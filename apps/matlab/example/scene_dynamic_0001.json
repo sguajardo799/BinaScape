@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.0",
+  "scene_type": "dynamic",
+  "scene_id": "scene_dynamic_0012",
+  "base_rpf_file": "C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf",
+  "project_name": "sim_0002",
+  "job_id": "render_job_dynamic_0012",
+  "seed": 24680,
+
+  "room": {
+    "room_id": "room_livingroom_medium",
+    "dimensions_m": [5.8, 4.7, 2.7],
+    "materials": {
+      "north_wall": "painted_brick",
+      "south_wall": "painted_brick",
+      "east_wall": "window_glass",
+      "west_wall": "painted_brick",
+      "floor": "tile",
+      "ceiling": "plaster"
+    }
+  },
+
+  "receiver": {
+    "receiver_id": "listener_001",
+    "hrtf": {
+      "hrtf_id": "subject_003",
+      "hrtf_path": "./assets/hrtf/id01_HRTF.v17.ir.daff"
+    },
+    "motion": {
+      "type": "static",
+      "pose": {
+        "position_m": [2.7, 2.3, 1.62],
+        "orientation_deg": {
+          "yaw": 0.0,
+          "pitch": 0.0,
+          "roll": 0.0
+        }
+      }
+    }
+  },
+
+  "sources": [
+    {
+      "source_id": "src_0001",
+      "name": "glass_breaking_moving",
+      "event_type": "glass_breaking",
+      "audio_path": "./assets/audio/1-26188-A-30.wav",
+      "gain_db": 0.0,
+      "start_time_s": 0.0,
+      "motion": {
+        "type": "keyframed",
+        "sampling_hz": 20,
+        "keyframes": [
+          {
+            "t_s": 0.0,
+            "position_m": [5.4, 3.7, 1.4],
+            "orientation_deg": {
+              "yaw": 180.0,
+              "pitch": 0.0,
+              "roll": 0.0
+            }
+          },
+          {
+            "t_s": 0.5,
+            "position_m": [5.0, 3.5, 1.4],
+            "orientation_deg": {
+              "yaw": 200.0,
+              "pitch": 0.0,
+              "roll": 0.0
+            }
+          },
+          {
+            "t_s": 1.0,
+            "position_m": [4.6, 3.2, 1.4],
+            "orientation_deg": {
+              "yaw": 210.0,
+              "pitch": 0.0,
+              "roll": 0.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "source_id": "src_0002",
+      "name": "knock_static",
+      "event_type": "door_knocking",
+      "audio_path": "./assets/audio/1-26188-A-30.wav",
+      "gain_db": -4.0,
+      "start_time_s": 0.3,
+      "motion": {
+        "type": "static",
+        "pose": {
+          "position_m": [4.15, 1.20, 1.05],
+          "orientation_deg": {
+            "yaw": 180.0,
+            "pitch": 0.0,
+            "roll": 0.0
+          }
+        }
+      }
+    }
+  ],
+
+  "dynamic_render": {
+    "block_size_ms": 100,
+    "crossfade_ms": 20,
+    "trajectory_interpolation": "linear"
+  },
+
+  "render": {
+    "sample_rate_hz": 44100,
+    "output_wav_path": "../data/raven_rendered/dynamic/scene_dynamic_0012.wav",
+    "output_metadata_path": "../data/raven_rendered/metadata/render_metadata/scene_dynamic_0012_render.json"
+  }
+}

@@ -1,0 +1,86 @@
+# Python caches, builds, and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# uv local/transient artifacts; keep uv.lock trackable
+.uv-cache/
+uv-cache/
+
+# MATLAB generated and temporary files
+*.asv
+*.m~
+*.mex*
+*.slxc
+slprj/
+codegen/
+*.mat
+
+# Audio, renders, datasets, models, and experiment outputs
+/outputs/
+/renders/
+/experiments/
+/results/
+/datasets/
+/data/raw/
+/data/external/
+/models/
+/weights/
+/checkpoints/
+*.wav
+*.flac
+*.mp3
+*.aiff
+*.aif
+*.sofa
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pickle
+*.pkl
+
+# Large bundled acoustic assets; track manifests/checksums instead
+assets/audio/
+assets/directivity/
+assets/hartf/
+assets/hrtf/
+
+# Logs and local runtime files
+*.log
+logs/
+tmp/
+temp/
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+credentials*
+secrets*
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+~$*

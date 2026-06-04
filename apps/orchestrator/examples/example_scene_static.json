@@ -1,0 +1,127 @@
+{
+  "schema_version": "1.0",
+  "scene_type": "static",
+  "base_rpf_file": "C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf",
+  "project_name": "sim_001",
+  "scene_id": "scene_static_0001",
+  "job_id": "render_job_static_0001",
+
+  "room": {
+    "room_id": "room_static_0001",
+    "dimensions_m": [4.2, 3.6, 2.6],
+    "materials": {
+      "north_wall": "bricks",
+      "south_wall": "bricks",
+      "east_wall": "glass",
+      "west_wall": "drywall",
+      "floor": "wood",
+      "ceiling": "plaster"
+    },
+    "material_files": {
+      "north_wall": {
+        "material_id": "bricks",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/Bricks.mat"
+      },
+      "south_wall": {
+        "material_id": "bricks",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/brickwall.mat"
+      },
+      "east_wall": {
+        "material_id": "glass",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/glass/glass.mat"
+      },
+      "west_wall": {
+        "material_id": "drywall",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/drywall/Drywall.mat"
+      },
+      "floor": {
+        "material_id": "wood",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/wood/woodfloor.mat"
+      },
+      "ceiling": {
+        "material_id": "plaster",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/plaster/plaster.mat"
+      }
+    }
+  },
+
+  "receiver": {
+    "receiver_id": "listener_001",
+    "position_m": [2.1, 1.8, 1.62],
+    "orientation_deg": {
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "roll": 0.0
+    },
+    "hrtfs": [
+      {
+        "hrtf_id": "binaural_hrtf",
+        "hrtf_path": "D:/Tesis/Binaural-Impared-Hear/assets/hrtf/id01_HRTF.v17.ir.daff"
+      }
+    ]
+  },
+
+  "sources": [
+    {
+      "source_id": "src_0001",
+      "event_type": "speech",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/speech/speech_001.wav",
+      "directivity_path": "D:/Tesis/Binaural-Impared-Hear/assets/directivity/speech_talker.daff",
+      "position_m": [3.60, 1.10, 1.20],
+      "orientation_deg": {
+        "yaw": -35.0,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": -1.5,
+      "start_time_s": 0.0
+    },
+    {
+      "source_id": "src_0002",
+      "event_type": "snoring",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/snoring/snoring_001.wav",
+      "position_m": [0.95, 1.40, 1.05],
+      "orientation_deg": {
+        "yaw": 145.0,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": -4.0,
+      "start_time_s": 0.8
+    },
+    {
+      "source_id": "src_0003",
+      "event_type": "breathing",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/breathing/breathing_001.wav",
+      "position_m": [2.85, 1.00, 1.35],
+      "orientation_deg": {
+        "yaw": 90.0,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": -3.0,
+      "start_time_s": 1.6
+    }
+  ],
+
+  "background_noise": {
+    "enabled": true,
+    "layers": [
+      {
+        "noise_id": "noise_0001",
+        "strategy": "colored",
+        "type": "white",
+        "color": "white",
+        "snr_db": 10.0
+      }
+    ]
+  },
+
+  "render": {
+    "sample_rate_hz": 44100,
+    "seed": 42,
+    "target_duration_s": 12.5,
+    "output_wav_path": "D:/Tesis/Binaural-Impared-Hear/outputs/artifacts/sim_001/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
+    "output_metadata_path": "D:/Tesis/Binaural-Impared-Hear/outputs/artifacts/sim_001/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json"
+  }
+}

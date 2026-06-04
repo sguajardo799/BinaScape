@@ -1,0 +1,124 @@
+# Example hearing profile catalog for Clarity/MSBG degradation tests.
+# Contract: root `profiles`, unique `hearing_profile_id`, and both ears present.
+# Supported bands in the current backend: 250, 500, 1000, 2000, 4000, 8000 Hz.
+
+profiles:
+  - hearing_profile_id: normal_hearing
+    description: Near-normal thresholds for control runs.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 0
+          500: 0
+          1000: 0
+          2000: 0
+          4000: 5
+          8000: 5
+      right:
+        loss_db_by_band:
+          250: 0
+          500: 0
+          1000: 0
+          2000: 0
+          4000: 5
+          8000: 5
+
+  - hearing_profile_id: symmetric_mild_loss
+    description: Mild bilateral high-frequency loss.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 10
+          500: 10
+          1000: 15
+          2000: 20
+          4000: 30
+          8000: 35
+      right:
+        loss_db_by_band:
+          250: 10
+          500: 10
+          1000: 15
+          2000: 20
+          4000: 30
+          8000: 35
+
+  - hearing_profile_id: asymmetric_sloping_loss
+    description: Left ear mild loss, right ear moderate sloping loss.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 5
+          500: 10
+          1000: 15
+          2000: 20
+          4000: 25
+          8000: 30
+      right:
+        loss_db_by_band:
+          250: 20
+          500: 25
+          1000: 35
+          2000: 45
+          4000: 55
+          8000: 60
+
+  - hearing_profile_id: single_sided_right_impairment
+    description: Near-normal left ear with pronounced right-ear impairment.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 0
+          500: 0
+          1000: 5
+          2000: 5
+          4000: 10
+          8000: 10
+      right:
+        loss_db_by_band:
+          250: 45
+          500: 50
+          1000: 55
+          2000: 60
+          4000: 65
+          8000: 70
+
+  - hearing_profile_id: symmetric_moderate_loss
+    description: Moderate bilateral loss for stronger degradation tests.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 30
+          500: 35
+          1000: 40
+          2000: 45
+          4000: 50
+          8000: 55
+      right:
+        loss_db_by_band:
+          250: 30
+          500: 35
+          1000: 40
+          2000: 45
+          4000: 50
+          8000: 55
+
+  - hearing_profile_id: marcela_herrera
+    description: Moderate bilateral loss for stronger degradation tests.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 25
+          500: 22
+          1000: 21
+          2000: 23
+          4000: 19
+          8000: 19
+      right:
+        loss_db_by_band:
+          250: 70
+          500: 70
+          1000: 70
+          2000: 70
+          4000: 60
+          8000: 60

@@ -1,0 +1,252 @@
+experiment:
+  experiment_id: sim_001_w_loss
+  description: >
+    Ejemplo base del pipeline estático con handoff de Clarity habilitado
+    sobre la salida canónica binaural_hrtf.
+  scene_type: static
+  random_seed: 42
+
+execution:
+  num_simulations: 30
+  num_workers: 1
+  overwrite_existing: true
+  resume_if_possible: true
+  save_scene_manifest: true
+  save_render_metadata: true
+
+raven:
+  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
+
+render: # Cortar tiempo de reverberación
+  sample_rate_hz: 44100
+  generate_rir: false
+  generate_brir: true
+  simulation_type_rt: true
+  simulation_type_is: true
+  num_particles: 60000
+  is_order_ps: 2
+
+# Ruido de fondo planificado por escena. El orquestador solo escribe metadata;
+# MATLAB/backends downstream hacen la síntesis/mezcla. Este ejemplo usa
+# exclusivamente ruido blanco sintético.
+background_noise:
+  enabled: true
+  snr_db: 10.0
+  allow_multiple_layers: false # false: una capa balanceada por escena; true: una por estrategia.
+  strategies:
+    - type: colored
+      colors: [white]
+
+receiver_sampling:
+  one_receiver_per_scene: true
+
+  position_strategy:
+    type: random_uniform_inside_room
+    margin_m:
+      x: 0.5 # min 0.5, entre fuente y source y source y paredes por onda plana
+      y: 0.0
+      z: 0.5
+    fixed_height_m:
+      min: 1.55
+      max: 1.70
+
+  orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+receiver_outputs:
+  binaural_hrtf:
+    enabled: true
+    ir_catalog_path: ../../../assets/hrtf/   # Fijarme en resolución sobretodo en elevación ya que se asumen posiciones discretas, o generar posiciones en base a resolución
+    file_pattern: "*.daff"
+    output_subdir: binaural_hrtf
+    num_channels: 2
+    required: true
+
+  # Multi-output sigue soportado. Descomenta salidas adicionales para usar
+  # variantes HARTF, pero `binaural_hrtf` es el ejemplo canónico del contrato.
+  # bte_rear_hartf:
+  #   enabled: true
+  #   ir_catalog_path: ../../../assets/hrtf/
+  #   file_pattern: "*.daff"
+  #   output_subdir: bte_rear_hartf
+  #   num_channels: 2
+  #   required: false
+
+  # bte_front_hartf:
+  #   enabled: true
+  #   ir_catalog_path: ../../../assets/hrtf/
+  #   file_pattern: "*.daff"
+  #   output_subdir: bte_front_hartf
+  #   num_channels: 2
+  #   required: false
+
+room_sampling:
+  dimensions_m:
+    length:
+      min: 2.0
+      max: 5.0
+    width:
+      min: 2.0
+      max: 5.0
+    height:
+      min: 1.8
+      max: 2.5
+
+  materials:
+    # Cada material_id debe coincidir exactamente con una carpeta en assets/materials/<material_id>
+    walls:
+      - bricks
+      - concrete
+      - glass
+      - drywall
+    floor:
+      - wood
+      - plaster
+    ceiling:
+      - wood
+      - plaster
+
+  semantic_surfaces:
+    enable_walls: true
+    enable_floor: true
+    enable_ceiling: true
+
+source_sampling:
+  min_sources: 2
+  max_sources: 4
+
+  timing:
+    allow_offsets: true
+    start_time_s:
+      min: 0.0
+      max: 5.0
+    # Contrato opcional del timeline total deseado. El orquestador lo declara
+    # en el manifest para que las etapas downstream recorten/limiten audio seco
+    # sin eliminar el tail reverberante del render final.
+    total_duration_s: 10
+
+  gain_db:
+    min: -0.2
+    max: 0.2
+
+  default_orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+  source_types:
+    - event_type: speech
+      role: base
+      min_count: 1
+      max_count: 2
+      probability: 1.0
+      audio_dir: ../../../assets/events/speech/
+      directivity: ../../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
+      spatial_policy:
+        type: random_valid
+
+    - event_type: snoring
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.1
+      audio_dir: ../../../assets/events/snoring/
+      directivity: ../../../assets/directivity/Cardioid.daff
+      spatial_policy:
+        type: random_valid
+
+    - event_type: breathing
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.1
+      audio_dir: ../../../assets/events/breathing/
+      spatial_policy:
+        type: random_valid
+
+    - event_type: clapping
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.1
+      audio_dir: ../../../assets/events/clapping/
+      spatial_policy:
+        type: random_valid
+
+    - event_type: door_knocking
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.1
+      audio_dir: ../../../assets/events/door_knocking/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.95
+          random_valid: 0.05
+      orientation_strategy:
+        type: facing_surface_normal
+
+    - event_type: glass_breaking
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.1
+      audio_dir: ../../../assets/events/glass_breaking/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.95
+          random_valid: 0.05
+      orientation_strategy:
+        type: facing_surface_normal
+
+scene_validation:
+  min_distance_source_to_receiver_m: 0.5
+  min_distance_between_sources_m: 0.2
+  require_sources_inside_room: true
+  require_receiver_inside_room: true
+  max_sampling_attempts_per_scene: 50
+
+outputs:
+  artifact_root: ../../../outputs/
+  # run_name es opcional. Si se omite, el loader usa experiment.experiment_id.
+  # El layout nuevo escribe solo dentro de {artifact_root}/{run_name}/...
+
+  naming:
+    scene_id_prefix: scene_static
+    # Soportados: {scene_id}, {output_type}
+    # El nombre público puede cambiar, pero el variant_id interno sigue siendo {scene_id}__{output_type}.
+    wav_pattern: "{scene_id}__{output_type}.wav"
+    # Metadata sigue siendo por variante en el pipeline estático actual.
+    # Para runs multi-output y save_render_metadata=true, incluye {output_type} para evitar colisiones.
+    metadata_pattern: "{scene_id}__{output_type}__render.json"
+
+hearing_degradation:
+  enabled: true
+  input_targets:
+    - binaural_hrtf
+  hearing_profiles_path: ./hearing_profiles.yaml
+  # output_dir es opcional. Si se omite, se reserva
+  # {artifact_root}/{run_name}/outputs/degraded para la etapa de degradación.
+  # Luego el backend escribe {output_type}/{hearing_profile_id}/{render_wav_name}
+  # y el sidecar {render_wav_stem}.json en ese mismo directorio.
+  runner:
+    # Nuevo backend hermano. Cuando auto_submit=false, el orquestador
+    # solo prepara manifests/indexes y no invoca el backend.
+    backend_project_path: ../../clarity-backend
+    entrypoint: clarity-backend
+    auto_submit: false
+    use_uv: true

@@ -1,0 +1,12 @@
+[project]
+name = "binaural-impared-hear"
+version = "0.1.0"
+description = "Monorepo entrypoint for the static binaural acoustic pipeline."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["apps/orchestrator", "apps/clarity-backend"]

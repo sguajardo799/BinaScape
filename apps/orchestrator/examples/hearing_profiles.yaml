@@ -1,0 +1,37 @@
+profiles:
+  - hearing_profile_id: right_unilateral
+    ears:
+      left:
+        loss_db_by_band:
+          250: 5
+          500: 5
+          1000: 10
+          2000: 10
+          4000: 15
+          8000: 20
+      right:
+        loss_db_by_band:
+          250:  35
+          500:  35
+          1000: 40
+          2000: 40
+          4000: 35
+          8000: 25
+  - hearing_profile_id: bilateral_base
+    ears:
+      left:
+        loss_db_by_band:
+          250: 10
+          500: 10
+          1000: 15
+          2000: 20
+          4000: 30
+          8000: 50
+      right:
+        loss_db_by_band:
+          250: 10
+          500: 10
+          1000: 15
+          2000: 20
+          4000: 30
+          8000: 50

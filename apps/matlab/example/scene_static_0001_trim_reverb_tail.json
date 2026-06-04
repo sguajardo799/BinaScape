@@ -1,0 +1,128 @@
+{
+  "schema_version": "1.0",
+  "scene_type": "static",
+  "base_rpf_file": "C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf",
+  "project_name": "sim_001",
+  "scene_id": "scene_static_0001",
+  "job_id": "render_job_static_0001",
+  "room": {
+    "room_id": "room_0123",
+    "dimensions_m": [3, 2.1, 3],
+    "materials": {
+      "north_wall": "bricks",
+      "south_wall": "wood",
+      "east_wall": "bricks",
+      "west_wall": "bricks",
+      "floor": "wood",
+      "ceiling": "wood"
+    },
+    "material_files": {
+      "north_wall": {
+        "material_id": "bricks",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/bricks.mat"
+      },
+      "south_wall": {
+        "material_id": "wood",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/wood/woodpanels.mat"
+      },
+      "east_wall": {
+        "material_id": "bricks",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/bricks.mat"
+      },
+      "west_wall": {
+        "material_id": "bricks",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/bricks.mat"
+      },
+      "floor": {
+        "material_id": "wood",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/wood/woodfloor.mat"
+      },
+      "ceiling": {
+        "material_id": "wood",
+        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/wood/woodpanels.mat"
+      }
+    }
+  },
+  "receiver": {
+    "receiver_id": "listener_001",
+    "position_m": [
+      0.702334,
+      0.217855,
+      -1.584899
+    ],
+    "orientation_deg": {
+      "yaw": 36.726742,
+      "pitch": 0.0,
+      "roll": 0.0
+    },
+    "hrtfs": [
+      {
+        "hrtf_id": "binaural_hrtf",
+        "hrtf_path": "D:/Tesis/Binaural-Impared-Hear/assets/hrtf/id13_HRTF.v17.ir.daff"
+      }
+    ]
+  },
+  "sources": [
+    {
+      "source_id": "src_0001",
+      "event_type": "speech",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/speech/Audio_section_1_2_ID12-2.wav",
+      "directivity_path": "D:/Tesis/Binaural-Impared-Hear/assets/directivity/Singer_2011_FWE_TLE_norm.daff",
+      "position_m": [
+        0.472566,
+        1.32514,
+        -0.485431
+      ],
+      "orientation_deg": {
+        "yaw": -90.0,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": 2.866994,
+      "start_time_s": 4.710635
+    },
+    {
+      "source_id": "src_0002",
+      "event_type": "speech",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/speech/Audio_section_1_24_ID12-2.wav",
+      "directivity_path": "D:/Tesis/Binaural-Impared-Hear/assets/directivity/Singer_2011_FWE_TLE_norm.daff",
+      "position_m": [
+        1.035654,
+        0.883847,
+        -0.96578
+      ],
+      "orientation_deg": {
+        "yaw": 120.279754,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": 2.668371,
+      "start_time_s": 0.219014
+    },
+    {
+      "source_id": "src_0003",
+      "event_type": "clapping",
+      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/clapping/3-197435-A-22-2.wav",
+      "position_m": [
+        1.435654,
+        0.883847,
+        -0.96578
+      ],
+      "orientation_deg": {
+        "yaw": 100.279754,
+        "pitch": 0.0,
+        "roll": 0.0
+      },
+      "gain_db": -10.668371,
+      "start_time_s": 0.119014
+    }
+  ],
+  "render": {
+    "sample_rate_hz": 44100,
+    "seed": 42,
+    "trim_reverb_tail": true,
+    "output_wav_path": "D:/Tesis/Binaural-Impared-Hear/outputs/demo_wo_rev/rendered/static/binaural_hrtf_scene_static_0001.wav",
+    "output_metadata_path": "D:/Tesis/Binaural-Impared-Hear/outputs/demo_wo_rev/metadata/render/binaural_hrtf_scene_static_0001_render.json",
+    "target_duration_s": 10.0
+  }
+}

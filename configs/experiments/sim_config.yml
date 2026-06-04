@@ -1,0 +1,228 @@
+# LEGACY / NO CANONICO.
+# Este archivo conserva una configuracion historica y usa claves de outputs
+# rechazadas por el loader actual: scene_manifest_dir, rendered_wav_dir,
+# render_metadata_dir y logs_dir. Para el flujo soportado desde la raiz use:
+# configs/experiments/static_example.yml
+
+experiment:
+  experiment_id: sim_001
+  description: >
+    Generación de escenas acústicas binaurales estáticas con múltiples fuentes,
+    con soporte opcional para salidas HRTF binaurales y HARTF de hearing aids.
+  scene_type: static
+  random_seed: 42
+
+execution:
+  num_simulations: 10
+  num_workers: 1
+  overwrite_existing: false
+  resume_if_possible: true
+  save_scene_manifest: true
+  save_render_metadata: true
+
+raven:
+  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
+
+render:
+  sample_rate_hz: 48000
+  generate_rir: false
+  generate_brir: true
+  simulation_type_rt: true
+  simulation_type_is: true
+  num_particles: 60000
+  is_order_ps: 2
+  target_duration_s: 10
+
+receiver_sampling:
+  one_receiver_per_scene: true
+
+  position_strategy:
+    type: random_uniform_inside_room
+    margin_m:
+      x: 0.4
+      y: 0.0
+      z: 0.4
+    fixed_height_m:
+      min: 1.55
+      max: 1.70
+
+  orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+receiver_outputs:
+  binaural_hrtf:
+    enabled: true
+    ir_catalog_path: ./assets/hrtf/
+    file_pattern: "*.daff"
+    output_subdir: binaural_hrtf
+    num_channels: 2
+    required: true
+
+  bte_rear_hartf:
+    enabled: true
+    ir_catalog_path: ./assets/hrtf/
+    file_pattern: "*.daff"
+    output_subdir: bte_rear_hartf
+    num_channels: 2
+    required: false
+
+  bte_front_hartf:
+    enabled: true
+    ir_catalog_path: ./assets/hrtf/
+    file_pattern: "*.daff"
+    output_subdir: bte_front_hartf
+    num_channels: 2
+    required: false
+
+room_sampling:
+  dimensions_m:
+    length:
+      min: 2.0
+      max: 15.0
+    width:
+      min: 2.0
+      max: 15.0
+    height:
+      min: 1.8
+      max: 3.0
+
+  materials:
+    walls:
+      - brick
+      - glass
+      - wood
+    floor:
+      - wood
+      - plaster
+    ceiling:
+      - wood
+      - plaster
+
+  semantic_surfaces:
+    enable_walls: true
+    enable_floor: true
+    enable_ceiling: true
+
+source_sampling:
+  min_sources: 3
+  max_sources: 5
+
+  timing:
+    allow_offsets: true
+    start_time_s:
+      min: 0.0
+      max: 2.0
+
+  gain_db:
+    min: -6.0
+    max: 3.0
+
+  default_orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+  source_types:
+    - event_type: speech
+      role: base
+      min_count: 1
+      max_count: 2
+      probability: 1.0
+      audio_dir: ./assets/events/speech/
+      directivity: ./assets/directivity/Singer_2011_FWE_TLE_norm.daff
+      spatial_policy:
+        type: random_valid
+
+    - event_type: snoring
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.4
+      audio_dir: ./assets/events/snoring/
+      spatial_policy:
+        type: random_valid
+
+    - event_type: breathing
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.4
+      audio_dir: ./assets/events/breathing/
+      spatial_policy:
+        type: random_valid
+
+    - event_type: clapping
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.3
+      audio_dir: ./assets/events/clapping/
+      spatial_policy:
+        type: random_valid
+
+    - event_type: door_knocking
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.25
+      audio_dir: ./assets/events/door_knocking/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.95
+          random_valid: 0.05
+      orientation_strategy:
+        type: facing_surface_normal
+
+    - event_type: glass_breaking
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.15
+      audio_dir: ./assets/events/glass_breaking/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.95
+          random_valid: 0.05
+      orientation_strategy:
+        type: facing_surface_normal
+
+scene_validation:
+  min_distance_source_to_receiver_m: 0.3
+  min_distance_between_sources_m: 0.2
+  require_sources_inside_room: true
+  require_receiver_inside_room: true
+  max_sampling_attempts_per_scene: 50
+
+outputs:
+  scene_manifest_dir: ./manifests/scenes/
+  rendered_wav_dir: ./data/rendered/static/
+  render_metadata_dir: ./data/metadata/render/
+  logs_dir: ./logs/render/
+
+  naming:
+    scene_id_prefix: scene_static
+    wav_pattern: "{scene_id}__{output_type}.wav"
+    metadata_pattern: "{scene_id}__render.json"
+
+hearing_degradation:
+  enabled: false
+  input_targets:
+    - binaural_hrtf
+    - bte_rear_hartf
+    - bte_front_hartf
+  hearing_profiles_path: ./configs/hearing/hearing_profiles.yaml
+  output_dir: ./data/degraded/
