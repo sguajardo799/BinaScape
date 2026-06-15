@@ -33,7 +33,7 @@ def test_readme_and_agent_guidance_describe_preserved_filenames_and_sidecars() -
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert "preservando exactamente el basename del WAV renderizado upstream" in readme
+    assert "outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav" in readme
     assert "{render_wav_stem}.json" in readme
     assert "preserve the rendered WAV basename exactly" in agents
     assert "{render_wav_stem}.json" in agents
