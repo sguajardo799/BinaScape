@@ -72,6 +72,9 @@ def validate_config(config: AppConfig) -> None:
     if config.source_sampling.min_sources > config.source_sampling.max_sources:
         errors.append("source_sampling.min_sources no puede ser mayor que max_sources")
 
+    if config.source_sampling.min_sources <= 1:
+        errors.append("source_sampling.min_sources debe ser > 1")
+
     for axis_name, dimension_range in {
         "length": config.room_sampling.dimensions_m.length,
         "width": config.room_sampling.dimensions_m.width,
@@ -421,6 +424,19 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
             total = sum(source_type.spatial_policy.targets.values())
             if not isclose(total, 1.0, rel_tol=1e-6, abs_tol=1e-6):
                 errors.append(f"{source_type.event_type}: targets debe sumar 1.0 y suma {total}")
+
+    radius = source_type.spatial_policy.min_radius_from_receiver_m
+    if source_type.spatial_policy.type == "random_valid_away_from_receiver":
+        if radius is None or not isfinite(radius) or radius < 0.0:
+            errors.append(
+                f"{source_type.event_type}: random_valid_away_from_receiver requiere "
+                "min_radius_from_receiver_m finito y >= 0"
+            )
+    elif radius is not None:
+        errors.append(
+            f"{source_type.event_type}: min_radius_from_receiver_m solo se permite con "
+            "random_valid_away_from_receiver"
+        )
 
 
 def _validate_run_name(errors: list[str], run_name: str | None) -> None:

@@ -241,22 +241,64 @@ def test_validate_config_rejects_global_min_sources_above_reachable_maximum(tmp_
 
 def test_load_config_rejects_source_type_without_min_count(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
-    config_path.write_text(config_path.read_text(encoding="utf-8").replace("      min_count: 1\n", "", 1), encoding="utf-8")
+    config_path.write_text(config_path.read_text(encoding="utf-8").replace("      min_count: 2\n", "", 1), encoding="utf-8")
 
     with pytest.raises(Exception, match=r"source_sampling\.source_types\.0\.min_count"):
         load_config(config_path)
+
+
+def test_validate_config_accepts_random_valid_away_from_receiver_with_radius(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, spatial_policy_block="""
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.5
+""".rstrip()))
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize("radius", [None, -0.1, ".nan"])
+def test_validate_config_rejects_invalid_away_policy_radius(tmp_path: Path, radius: object) -> None:
+    radius_line = "" if radius is None else f"        min_radius_from_receiver_m: {radius}\n"
+    config = load_config(_write_config(tmp_path, spatial_policy_block=(
+        "      spatial_policy:\n"
+        "        type: random_valid_away_from_receiver\n"
+        f"{radius_line}"
+    ).rstrip()))
+
+    with pytest.raises(ValueError, match="min_radius_from_receiver_m"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_away_radius_on_random_valid(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, spatial_policy_block="""
+      spatial_policy:
+        type: random_valid
+        min_radius_from_receiver_m: 1.5
+""".rstrip()))
+
+    with pytest.raises(ValueError, match="solo se permite"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_single_source_scenes(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, min_sources=1, max_sources=2, source_min_count=1, source_max_count=2))
+
+    with pytest.raises(ValueError, match="source_sampling.min_sources debe ser > 1"):
+        validate_config(config)
 
 
 def _write_config(
     tmp_path: Path,
     directivity: str | None = None,
     *,
-    min_sources: int = 1,
-    max_sources: int = 1,
-    source_min_count: int = 1,
-    source_max_count: int = 1,
+    min_sources: int = 2,
+    max_sources: int = 2,
+    source_min_count: int = 2,
+    source_max_count: int = 2,
     source_probability: float = 1.0,
     background_noise_block: str = "",
+    spatial_policy_block: str = "      spatial_policy:\n        type: random_valid",
 ) -> Path:
     artifact_root = tmp_path / "artifacts"
     assets_root = tmp_path / "assets"
@@ -321,7 +363,7 @@ def _write_config(
             "    pitch_deg: {fixed: 0.0}\n"
             "    roll_deg: {fixed: 0.0}\n"
             "  source_types:\n"
-            f"    - event_type: speech\n      role: base\n      min_count: {source_min_count}\n      max_count: {source_max_count}\n      probability: {source_probability}\n      audio_dir: {assets_root.as_posix()}/audio\n{directivity_block}      spatial_policy:\n        type: random_valid\n"
+            f"    - event_type: speech\n      role: base\n      min_count: {source_min_count}\n      max_count: {source_max_count}\n      probability: {source_probability}\n      audio_dir: {assets_root.as_posix()}/audio\n{directivity_block}{spatial_policy_block}\n"
             "scene_validation:\n"
             "  min_distance_source_to_receiver_m: 0.5\n"
             "  min_distance_between_sources_m: 0.1\n"

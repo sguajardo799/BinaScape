@@ -8,7 +8,7 @@ from acoustic_orchestrator.config.models import AppConfig, ReceiverOutputConfig
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
 from acoustic_orchestrator.experiment.manifest_writer import write_manifest
-from acoustic_orchestrator.experiment.sampler import build_background_noise_plan, sample_static_scene
+from acoustic_orchestrator.experiment.sampler import SceneSamplingSkipped, build_background_noise_plan, sample_static_scene
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.clarity_handoff import ClaritySummary, prepare_clarity_handoff
 from acoustic_orchestrator.pipeline.matlab_runner import (
@@ -311,7 +311,10 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
     for scene_index in range(config.execution.num_simulations):
         scene_id = f"{config.outputs.naming.scene_id_prefix}_{scene_index + 1:04d}"
         manifest_path = layout["scene_manifest_dir"] / f"{scene_id}.json"
-        sampled_scene = sample_static_scene(config, rng, scene_index)
+        try:
+            sampled_scene = sample_static_scene(config, rng, scene_index)
+        except SceneSamplingSkipped:
+            continue
         sampled_scene["background_noise"] = background_noise_plan[scene_index]
         scene_manifest = build_static_manifest(config, sampled_scene, scene_index, manifest_path)
         manifest_paths.append(
