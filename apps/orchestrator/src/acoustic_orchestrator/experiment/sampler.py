@@ -1,6 +1,7 @@
 import hashlib
 import math
 import random
+from dataclasses import dataclass
 from pathlib import Path
 import wave
 from typing import TypeVar
@@ -24,6 +25,16 @@ SURFACE_ORDER = ("north_wall", "south_wall", "east_wall", "west_wall", "floor", 
 SOURCE_WALL_CLEARANCE_M = 0.5
 SOURCE_RECEIVER_CLEARANCE_M = 0.5
 T = TypeVar("T")
+
+
+class SceneSamplingSkipped(RuntimeError):
+    """Raised when the current scene attempt must be skipped entirely."""
+
+
+@dataclass(frozen=True)
+class PlannedSource:
+    source_type: SourceTypeConfig
+    is_required: bool
 
 
 def sample_static_scene(config: AppConfig, rng: random.Random, scene_index: int) -> dict:
@@ -243,17 +254,26 @@ def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
 
 def _sample_sources(config: AppConfig, room: dict, receiver: dict, rng: random.Random) -> list[dict]:
     target_count = rng.randint(config.source_sampling.min_sources, config.source_sampling.max_sources)
-    selected_types = _choose_source_types(config, target_count, rng)
-    audio_pools = _build_audio_pools(selected_types)
+    planned_sources = _choose_source_types(config, target_count, rng)
+    audio_pools = _build_audio_pools([planned.source_type for planned in planned_sources])
     sources: list[dict] = []
 
-    for index, source_type in enumerate(selected_types, start=1):
-        position, wall_name = _sample_source_position(source_type, room, rng)
+    for planned_source in planned_sources:
+        source_type = planned_source.source_type
+        placement = _sample_source_position(config, source_type, room, receiver, rng)
+        if placement is None:
+            if planned_source.is_required:
+                raise SceneSamplingSkipped(
+                    f"No se pudo ubicar la fuente requerida {source_type.event_type} respetando min_radius_from_receiver_m"
+                )
+            continue
+
+        position, wall_name = placement
         orientation = _sample_source_orientation(config, source_type, rng, wall_name)
         audio_path = _draw_audio_path(source_type, audio_pools, rng)
         sources.append(
             {
-                "source_id": f"src_{index:04d}",
+                "source_id": f"src_{len(sources) + 1:04d}",
                 "event_type": source_type.event_type,
                 "audio_path": audio_path,
                 "position_m": position,
@@ -264,16 +284,19 @@ def _sample_sources(config: AppConfig, room: dict, receiver: dict, rng: random.R
             }
         )
 
+    if len(sources) <= 1:
+        raise SceneSamplingSkipped("La escena generada debe contener más de una fuente")
+
     return sources
 
 
-def _choose_source_types(config: AppConfig, target_count: int, rng: random.Random) -> list[SourceTypeConfig]:
+def _choose_source_types(config: AppConfig, target_count: int, rng: random.Random) -> list[PlannedSource]:
     planned_counts = _plan_source_type_counts(config, target_count, rng)
-    selected: list[SourceTypeConfig] = []
+    selected: list[PlannedSource] = []
 
     for source_type in config.source_sampling.source_types:
-        for _ in range(planned_counts[source_type.event_type]):
-            selected.append(source_type)
+        for index in range(planned_counts[source_type.event_type]):
+            selected.append(PlannedSource(source_type=source_type, is_required=index < source_type.min_count))
 
     rng.shuffle(selected)
     return selected
@@ -359,7 +382,13 @@ def _draw_audio_path(
     return chosen
 
 
-def _sample_source_position(source_type: SourceTypeConfig, room: dict, rng: random.Random) -> tuple[list[float], str | None]:
+def _sample_source_position(
+    config: AppConfig,
+    source_type: SourceTypeConfig,
+    room: dict,
+    receiver: dict,
+    rng: random.Random,
+) -> tuple[list[float], str | None] | None:
     policy_type = source_type.spatial_policy.type
     if policy_type == "weighted_targets":
         target = _weighted_choice(source_type.spatial_policy.targets or {}, rng)
@@ -367,7 +396,47 @@ def _sample_source_position(source_type: SourceTypeConfig, room: dict, rng: rand
             return _sample_wall_position(room, rng)
         return _sample_random_position(room, rng), None
 
+    if policy_type == "random_valid_away_from_receiver":
+        position = _sample_random_position_away_from_receiver(config, source_type, room, receiver, rng)
+        if position is None:
+            return None
+        return position, None
+
     return _sample_random_position(room, rng), None
+
+
+def _sample_random_position_away_from_receiver(
+    config: AppConfig,
+    source_type: SourceTypeConfig,
+    room: dict,
+    receiver: dict,
+    rng: random.Random,
+) -> list[float] | None:
+    radius = source_type.spatial_policy.min_radius_from_receiver_m
+    if radius is None:
+        raise RuntimeError("random_valid_away_from_receiver requiere min_radius_from_receiver_m")
+
+    receiver_position = receiver["position_m"]
+    for _ in range(config.scene_validation.max_sampling_attempts_per_scene):
+        position = _sample_random_position(room, rng)
+        if _distance(position, receiver_position) >= radius:
+            return position
+
+    fallback = _farthest_inset_box_corner(room, receiver_position)
+    if _distance(fallback, receiver_position) >= radius:
+        return fallback
+    return None
+
+
+def _farthest_inset_box_corner(room: dict, receiver_position: list[float]) -> list[float]:
+    dimensions = room["dimensions"]
+    candidates = [
+        [x, y, z]
+        for x in (SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M)
+        for y in (SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M)
+        for z in (SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M)
+    ]
+    return max(candidates, key=lambda candidate: _distance(candidate, receiver_position))
 
 
 def _sample_random_position(room: dict, rng: random.Random) -> list[float]:
@@ -440,6 +509,9 @@ def _wall_normal_orientation(wall_name: str) -> dict:
 
 def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list[dict]) -> bool:
     dimensions = room["dimensions"]
+    if len(sources) <= 1:
+        return False
+
     if config.scene_validation.require_receiver_inside_room and not _inside_room(receiver["position_m"], dimensions):
         return False
 

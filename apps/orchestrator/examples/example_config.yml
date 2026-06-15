@@ -160,7 +160,12 @@ source_sampling:
       audio_dir: ../../../assets/events/speech/
       directivity: ../../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
       spatial_policy:
-        type: random_valid
+        type: random_valid_away_from_receiver
+        # Igual que random_valid (incluye margen de 0.5 m a paredes),
+        # pero exige esta distancia mínima desde receiver.position_m.
+        # Si una fuente opcional no puede cumplirla, se omite; si es obligatoria,
+        # la escena se saltea y puede haber menos manifiestos que num_simulations.
+        min_radius_from_receiver_m: 1.5
 
     - event_type: snoring
       role: base

@@ -154,6 +154,7 @@ class SourceOrientationStrategy(StrictConfigModel):
 class SpatialPolicyConfig(StrictConfigModel):
     type: str
     targets: dict[str, float] | None = None
+    min_radius_from_receiver_m: float | None = None
 
 
 class SourceTypeConfig(StrictConfigModel):

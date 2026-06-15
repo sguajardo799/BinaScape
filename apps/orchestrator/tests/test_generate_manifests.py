@@ -221,15 +221,123 @@ def test_generate_static_manifests_keeps_sources_at_least_half_meter_from_walls_
         assert math.dist(source["position_m"], receiver_position) >= 0.5
 
 
+def test_generate_static_manifests_places_away_policy_sources_at_configured_receiver_radius(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "away_radius")
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.0
+""".rstrip())
+
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+    receiver_position = manifest["receiver"]["position_m"]
+
+    speech_sources = [source for source in manifest["sources"] if source["event_type"] == "speech"]
+    assert speech_sources
+    assert all(math.dist(source["position_m"], receiver_position) >= 1.0 for source in speech_sources)
+
+
+def test_generate_static_manifests_uses_farthest_corner_fallback_for_away_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "away_fallback", speech_min_count=1, speech_max_count=1)
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.0
+""".rstrip())
+
+    monkeypatch.setattr(
+        "acoustic_orchestrator.experiment.sampler._sample_random_position",
+        lambda room, rng: [2.0, 1.5, 1.2],
+    )
+    monkeypatch.setattr(
+        "acoustic_orchestrator.experiment.sampler._sample_receiver",
+        lambda config, room, rng: {
+            "receiver_id": "listener_001",
+            "position_m": [2.0, 1.5, 1.2],
+            "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+        },
+    )
+
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+    speech_source = next(source for source in manifest["sources"] if source["event_type"] == "speech")
+    receiver_position = manifest["receiver"]["position_m"]
+    room_length, room_width, room_height = manifest["room"]["dimensions_m"]
+    expected_corner = max(
+        ([x, y, z] for x in (0.5, room_length - 0.5) for y in (0.5, room_width - 0.5) for z in (0.5, room_height - 0.5)),
+        key=lambda position: math.dist(position, receiver_position),
+    )
+
+    assert speech_source["position_m"] == pytest.approx(expected_corner)
+
+
+def test_generate_static_manifests_omits_impossible_optional_away_source_without_metadata(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "away_optional_omit",
+        min_sources=2,
+        max_sources=3,
+        speech_min_count=2,
+        speech_max_count=2,
+        clapping_min_count=0,
+        clapping_max_count=1,
+        clapping_probability=1.0,
+    )
+    _replace_clapping_spatial_policy(config_path, """
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 999.0
+""".rstrip())
+
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+
+    assert [source["event_type"] for source in manifest["sources"]] == ["speech", "speech"]
+    assert all(source["event_type"] != "clapping" for source in manifest["sources"])
+
+
+def test_generate_static_manifests_skips_scene_when_required_away_source_is_impossible(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "away_required_skip",
+        num_simulations=2,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_min_count=1,
+        clapping_max_count=1,
+        clapping_probability=1.0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 999.0
+""".rstrip())
+    _replace_clapping_spatial_policy(config_path, """
+      spatial_policy:
+        type: random_valid
+""".rstrip())
+
+    manifest_paths = generate_static_manifests(config_path)
+
+    assert manifest_paths == []
+
+
 def test_generate_static_manifests_places_wall_targets_half_meter_from_the_selected_wall(tmp_path: Path) -> None:
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(
         workspace,
         "wall_target",
-        min_sources=1,
-        max_sources=1,
-        speech_min_count=0,
-        speech_max_count=0,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=1,
+        speech_max_count=1,
         clapping_min_count=1,
         clapping_max_count=1,
         clapping_probability=1.0,
@@ -237,8 +345,7 @@ def test_generate_static_manifests_places_wall_targets_half_meter_from_the_selec
 
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
 
-    assert [source["event_type"] for source in manifest["sources"]] == ["clapping"]
-    source_position = manifest["sources"][0]["position_m"]
+    source_position = next(source["position_m"] for source in manifest["sources"] if source["event_type"] == "clapping")
     room_length, room_width, room_height = manifest["room"]["dimensions_m"]
 
     wall_distances = [
@@ -257,7 +364,7 @@ def test_generate_static_manifests_probability_one_keeps_variability_above_minim
         workspace,
         "probability_one_variability",
         num_simulations=12,
-        min_sources=1,
+        min_sources=2,
         max_sources=3,
         speech_min_count=1,
         speech_max_count=3,
@@ -281,7 +388,7 @@ def test_generate_static_manifests_probability_zero_disables_only_optional_extra
     config_path = _write_config(
         workspace,
         "probability_zero_extras",
-        min_sources=1,
+        min_sources=2,
         max_sources=3,
         speech_min_count=1,
         speech_max_count=3,
@@ -293,7 +400,7 @@ def test_generate_static_manifests_probability_zero_disables_only_optional_extra
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
     speech_count = sum(1 for source in manifest["sources"] if source["event_type"] == "speech")
 
-    assert speech_count == 1
+    assert speech_count == 2
 
 
 def test_generate_static_manifests_uses_optional_capacity_to_reach_global_min_sources(tmp_path: Path) -> None:
@@ -453,10 +560,10 @@ def test_generate_static_manifests_clamps_start_time_to_zero_when_source_is_trim
         "trimmed_start",
         total_duration_s=5.0,
         start_time_range=(7.0, 7.0),
-        min_sources=1,
-        max_sources=1,
-        speech_min_count=1,
-        speech_max_count=1,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=2,
+        speech_max_count=2,
         clapping_min_count=0,
         clapping_max_count=0,
     )
@@ -464,7 +571,7 @@ def test_generate_static_manifests_clamps_start_time_to_zero_when_source_is_trim
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
 
     assert manifest["render"]["target_duration_s"] == 5.0
-    assert len(manifest["sources"]) == 1
+    assert len(manifest["sources"]) == 2
     assert manifest["sources"][0]["start_time_s"] == 0.0
 
 
@@ -476,10 +583,10 @@ def test_generate_static_manifests_limits_start_time_by_remaining_timeline_margi
         "remaining_margin",
         total_duration_s=10.0,
         start_time_range=(7.0, 7.0),
-        min_sources=1,
-        max_sources=1,
-        speech_min_count=1,
-        speech_max_count=1,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=2,
+        speech_max_count=2,
         clapping_min_count=0,
         clapping_max_count=0,
     )
@@ -487,7 +594,7 @@ def test_generate_static_manifests_limits_start_time_by_remaining_timeline_margi
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
 
     assert manifest["render"]["target_duration_s"] == 10.0
-    assert len(manifest["sources"]) == 1
+    assert len(manifest["sources"]) == 2
     assert manifest["sources"][0]["start_time_s"] == 1.0
 
 
@@ -1436,6 +1543,26 @@ hearing_degradation:
         encoding="utf-8",
     )
     return config_path
+
+
+def _replace_speech_spatial_policy(config_path: Path, replacement: str) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "      spatial_policy:\n        type: random_valid\n    - event_type: clapping",
+        f"{replacement}\n    - event_type: clapping",
+        1,
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+
+def _replace_clapping_spatial_policy(config_path: Path, replacement: str) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "      spatial_policy:\n        type: weighted_targets\n        targets:\n          wall: 1.0\n      orientation_strategy:",
+        f"{replacement}\n      orientation_strategy:",
+        1,
+    )
+    config_path.write_text(text, encoding="utf-8")
 
 
 def _background_noise_block(*, allow_multiple_layers: bool = False) -> str:
