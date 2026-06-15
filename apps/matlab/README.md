@@ -1,101 +1,110 @@
-# Binaural-Impared-Hear / MATLAB
+# MATLAB Backend
 
-Este directorio contiene un flujo en MATLAB para preparar y ejecutar renders binaurales a partir de escenas JSON. El proyecto sigue **en construcción**.
+This app contains the MATLAB/RAVEN backend for the static binaural rendering
+stage. It consumes scene JSON manifests produced by the orchestrator or written
+manually for backend development.
 
-Actualmente, la ruta documentable como usable es la de **render estático** mediante `run_raven_static_render.m`. El flujo dinámico todavía **no está implementado ni soportado**: `run_raven_dynamic_render.m` existe como entrypoint, pero `dynamic/render_dynamic_scene.m` sigue en estado placeholder con `TODO`.
+The supported flow is static rendering through `run_raven_static_render.m`.
+Dynamic rendering is not supported yet: `run_raven_dynamic_render.m` exists as
+an entrypoint, but `dynamic/render_dynamic_scene.m` is still a placeholder.
 
-## Dependencias
+## Requirements
 
 - MATLAB
 - ITA Toolbox
 - RAVEN
+- Local RAVEN project files, HRTF/DAFF files, source audio, directivity files,
+  and material files referenced by the input scene manifest
 
-## Estructura del repositorio
+For root-first end-to-end runs, `matlab` must also be available on `PATH` so the
+orchestrator can invoke it by subprocess.
+
+## Directory Layout
 
 ```text
-matlab/
-├─ assets/                      % audio de ejemplo y HRTF locales
-├─ core/                        % carga, validación y preparación del proyecto
-├─ dynamic/                     % trabajo preliminar del flujo dinámico
-├─ example/                     % escenas JSON de ejemplo
-├─ static/                      % implementación principal del flujo estático
-├─ run_raven_static_render.m    % entrypoint del render estático
-└─ run_raven_dynamic_render.m   % entrypoint presente, no soportado todavía
+apps/matlab/
+|-- assets/                     # Local example audio and HRTF assets, when present
+|-- core/                       # Loading, validation, audio, metadata, and helpers
+|-- dynamic/                    # Preliminary dynamic-rendering work
+|-- example/                    # Scene JSON examples
+|-- static/                     # Static rendering implementation
+|-- tests/                      # MATLAB tests
+|-- run_raven_static_render.m   # Supported static rendering entrypoint
+`-- run_raven_dynamic_render.m  # Present, but not supported yet
 ```
 
-## Archivos clave
+## Recommended Use Through The Orchestrator
 
-- `run_raven_static_render.m`: punto de entrada del render estático.
-- `static/render_static_scene.m`: implementación principal del render estático.
-- `core/load_scene_config.m`: carga la configuración JSON.
-- `core/validate_static_scene_config.m`: validación básica para escenas estáticas.
-- `core/prepare_raven_project.m`: prepara el proyecto RAVEN con supuestos de entorno local.
-- `run_raven_dynamic_render.m`: entrypoint presente, pero no implementado como flujo soportado.
-- `dynamic/render_dynamic_scene.m`: placeholder actual del render dinámico.
-
-## Uso básico del flujo estático
-
-Desde la raiz del monorepo, el uso recomendado es dejar que `apps/orchestrator` genere los manifests e invoque este backend por subprocess:
+From the repository root, prefer the orchestrator for normal runs. It generates
+the scene manifests, resolves output paths, and invokes this backend:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
 ```
 
-Para ese flujo, MATLAB debe estar disponible en `PATH` como `matlab`, ademas de tener ITA Toolbox y RAVEN configurados localmente.
+The root-level config must point to assets and a RAVEN `.rpf` file that exist in
+the local environment.
+
+## Direct MATLAB Use
+
+For backend development, call the static entrypoint with a scene JSON path:
 
 ```matlab
 run_raven_static_render('example/scene_static_0001.json')
 ```
 
-Antes de ejecutarlo, conviene revisar las rutas de entrada, HRTF, `.rpf` base y archivos de salida según el entorno local disponible.
+Before running directly, review the scene manifest paths for source WAV files,
+HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 
-## Contrato soportado del manifest estático
+## Important Files
 
-- El formato canónico del receiver es `receiver.hrtfs`, como lista no vacía de variantes con `hrtf_id` y `hrtf_path`.
-- Por compatibilidad, también se acepta `receiver.hrtf` singular y se normaliza internamente como batch de una sola variante.
-- La semilla soportada se declara preferentemente en `render.seed`. El campo heredado top-level `seed` sigue aceptándose si `render.seed` no existe.
-- Cada entrada de `sources` puede declarar opcionalmente `directivity_path` para aplicar un patrón de directividad de fuente en RAVEN.
-- `room.materials` y `room.material_files` forman ahora parte obligatoria del contrato del flujo estático.
-- `room.material_files` debe declarar explícitamente `north_wall`, `south_wall`, `east_wall`, `west_wall`, `floor` y `ceiling`, cada uno con `material_id` y `material_path` absoluto.
-- El validador exige consistencia entre `room.materials.<surface>` y `room.material_files.<surface>.material_id`.
-- El flujo estático carga los coeficientes de absorción y scattering desde esos archivos explícitos y los aplica a RAVEN asumiendo el orden de paredes `north`, `south`, `east`, `west`.
+- `run_raven_static_render.m`: entrypoint for supported static rendering.
+- `static/render_static_scene.m`: main static rendering implementation.
+- `core/load_scene_config.m`: loads scene JSON.
+- `core/validate_static_scene_config.m`: validates the static scene contract.
+- `core/prepare_raven_project.m`: prepares the RAVEN project for a local setup.
+- `core/apply_background_noise.m`: applies post-render additive background
+  noise.
+- `core/export_render_metadata.m`: writes render metadata.
+- `run_raven_dynamic_render.m`: dynamic entrypoint placeholder.
+- `dynamic/render_dynamic_scene.m`: dynamic implementation placeholder.
 
-### Salidas por HRTF
+## Static Scene Contract
 
-- `render.output_wav_path` y `render.output_metadata_path` pueden declararse como archivo explícito o como carpeta de salida.
-- Si se declara una carpeta, el flujo deriva automáticamente el nombre del archivo desde `scene_id` usando `scene_id.wav` y `scene_id.json`.
-- Si la escena declara una sola HRTF, el flujo mantiene `project_name` sin sufijos extra.
-- Si la escena declara múltiples HRTFs, el flujo ejecuta una corrida secuencial por variante y deriva nombres seguros con el patrón `__<hrtf_id>` antes de la extensión del archivo ya resuelto.
-- Cada variante genera su propio WAV y su propio metadata JSON.
-- `render.trim_reverb_tail` es opcional y por defecto vale `false`. Si vale `true`, el flujo recorta de cada fuente renderizada la cola añadida por la convolución antes de hacer el mix.
+The current static manifest contract includes these fields and behaviors:
 
-### Ruido de fondo en el render estático
+- `receiver.hrtfs` is the canonical receiver format. It is a non-empty list of
+  HRTF variants with `hrtf_id` and `hrtf_path`.
+- The legacy singular `receiver.hrtf` field is accepted and normalized as a
+  one-variant batch.
+- `render.seed` is the preferred seed location. A legacy top-level `seed` is
+  accepted when `render.seed` is absent.
+- Each source may optionally define `directivity_path`.
+- `room.materials` and `room.material_files` are required for the static flow.
+- `room.material_files` must explicitly define `north_wall`, `south_wall`,
+  `east_wall`, `west_wall`, `floor`, and `ceiling`.
+- Each material file entry must include `material_id` and an absolute
+  `material_path`.
+- The validator checks consistency between `room.materials.<surface>` and
+  `room.material_files.<surface>.material_id`.
+- Material absorption and scattering coefficients are loaded from explicit
+  material files and applied to RAVEN using the wall order `north`, `south`,
+  `east`, `west`.
 
-El manifest estático puede declarar `background_noise` como postprocesado aditivo sobre el audio final ya mezclado. Esta etapa ocurre **fuera de RAVEN**, después del mix de fuentes y antes de escribir el WAV de salida. No cambia BRIRs ni habilita el flujo dinámico.
+## Outputs Per HRTF
 
-- Si `background_noise` no existe o `background_noise.enabled` es `false`, no se agrega ruido.
-- Con `enabled=true`, `layers` debe ser una lista no vacía. Cada capa se escala por `snr_db` usando la potencia RMS del mix final previo al ruido.
-- `strategy="colored"` soporta `color`: `white`, `pink`, `brown`, `blue`, `violet`. La señal coloreada se genera mono de forma determinista con `render.seed` y el índice de capa, y se replica a todos los canales.
-- `strategy="audio_file"` carga un WAV desde `path`; si es mono se replica, si tiene exactamente la misma cantidad de canales se usa canal a canal, y otros casos multicanal se rechazan.
-- El alias heredado `strategy="audio_folder"` se acepta sólo cuando `path` apunta a un archivo WAV concreto; se normaliza como `audio_file`. No hay selección aleatoria desde carpetas.
-- Si el WAV de ruido tiene otra frecuencia de muestreo, se intenta usar `resample`; si MATLAB no lo tiene disponible, el render falla con un error explícito.
-- Si el ruido queda más corto que el render se repite en bucle; si queda más largo se recorta.
-- Después de sumar todas las capas se aplica una guardia de pico a `0.999`. Si actúa, la metadata registra la ganancia y advierte que el SNR efectivo puede cambiar.
+- `render.output_wav_path` and `render.output_metadata_path` can be explicit
+  files or output directories.
+- If an output path is a directory, filenames are derived from `scene_id`.
+- A single HRTF run keeps the configured `project_name` without extra suffixes.
+- Multiple HRTFs are rendered sequentially, one variant at a time.
+- Multi-HRTF output filenames receive a safe `__<hrtf_id>` suffix before the
+  file extension.
+- Each HRTF variant writes its own WAV file and metadata JSON.
+- `render.trim_reverb_tail` is optional and defaults to `false`. When `true`,
+  each rendered source is trimmed before mixing.
 
-Ejemplo mínimo:
-
-```json
-"background_noise": {
-  "enabled": true,
-  "layers": [
-    { "strategy": "colored", "color": "pink", "snr_db": 20.0 }
-  ]
-}
-```
-
-La metadata exportada en `summary.background_noise` registra las capas aplicadas, estrategia original y normalizada, color o archivo, SNR objetivo, semilla efectiva, resampling, loop/trim, adaptación de canales y guardia de clipping.
-
-Ejemplo con carpetas de salida:
+Example output-directory config:
 
 ```json
 "render": {
@@ -107,17 +116,75 @@ Ejemplo con carpetas de salida:
 }
 ```
 
-Para una escena con `scene_id = "scene_static_0001"`, el flujo genera:
+For `scene_id = "scene_static_0001"`, the backend writes:
 
-- Single HRTF: `../../data/raven_rendered/scene_static_0001.wav` y `../../data/raven_rendered/metadata/scene_static_0001.json`.
-- Multi HRTF: archivos por variante como `scene_static_0001__subject-001.wav` y `scene_static_0001__subject-001.json`.
+- Single HRTF: `scene_static_0001.wav` and `metadata/scene_static_0001.json`.
+- Multiple HRTFs: names such as `scene_static_0001__subject-001.wav` and
+  `metadata/scene_static_0001__subject-001.json`.
 
-### Alcance actual de reproducibilidad
+## Background Noise
 
-- El valor efectivo de semilla se normaliza y queda reflejado en metadata (`effective_seed`, `seed_source`).
-- En este repositorio sólo se aplica de forma verificada a `rng` de MATLAB.
-- **No está verificado** en el código actual que la API de RAVEN exponga una semilla compatible para garantizar reproducibilidad completa del BRIR. La metadata documenta esta degradación de forma explícita.
+The static manifest may include `background_noise` as additive post-processing
+on the final mixed audio. This happens outside RAVEN, after source mixing and
+before the output WAV is written. It does not modify BRIRs and does not enable
+the dynamic pipeline.
 
-## Render dinámico
+- If `background_noise` is absent or `background_noise.enabled` is `false`, no
+  noise is added.
+- With `enabled=true`, `layers` must be a non-empty list.
+- Each layer is scaled by `snr_db` using the RMS power of the final pre-noise
+  mix.
+- `strategy="colored"` supports `white`, `pink`, `brown`, `blue`, and `violet`.
+- Colored noise is generated deterministically from `render.seed` and the layer
+  index, then replicated to all channels.
+- `strategy="audio_file"` loads a WAV from `path`.
+- Mono noise is replicated to all channels. Noise with the same channel count is
+  used channel-by-channel. Other multichannel layouts are rejected.
+- The legacy alias `strategy="audio_folder"` is accepted only when `path` points
+  to a concrete WAV file, and is normalized as `audio_file`.
+- If a noise WAV has a different sample rate, the backend attempts to resample
+  it. If the required MATLAB function is unavailable, rendering fails with an
+  explicit error.
+- Short noise is looped; long noise is trimmed.
+- After summing all layers, a peak guard limits audio to `0.999`. If it acts,
+  metadata records the gain and warns that the effective SNR may change.
 
-**No implementado / no soportado aún**.
+Minimal example:
+
+```json
+"background_noise": {
+  "enabled": true,
+  "layers": [
+    { "strategy": "colored", "color": "pink", "snr_db": 20.0 }
+  ]
+}
+```
+
+The exported metadata records applied layers, original and normalized strategy,
+noise color or file path, target SNR, effective seed, resampling, loop/trim,
+channel adaptation, and clipping-guard information.
+
+## Reproducibility Notes
+
+- The effective seed is normalized and written to metadata as `effective_seed`
+  and `seed_source`.
+- In this repository, the seed is verified for MATLAB `rng` usage.
+- The code does not currently verify that the RAVEN API exposes a compatible
+  seed mechanism for complete BRIR reproducibility. Metadata documents that
+  limitation explicitly.
+
+## Tests
+
+Run MATLAB tests from this directory in an environment with the required
+toolboxes:
+
+```matlab
+runtests('tests')
+```
+
+Some tests use local mocks; full rendering still depends on the local
+MATLAB/RAVEN setup and assets.
+
+## Dynamic Rendering
+
+Dynamic rendering is not implemented or supported yet.
