@@ -1,60 +1,87 @@
 # Clarity Backend
 
-Backend mínimo para la slice actual del handoff de Clarity en el workspace.
+Python backend for the hearing loss degradation stage. It consumes the JSONL job
+manifest produced by `apps/orchestrator`, resolves hearing profiles from YAML,
+applies Clarity MSBG processing, and writes the degraded WAV plus sidecar
+metadata at the explicit paths requested by each job.
 
-## Propósito
+The backend is intentionally kept as a sibling project. The orchestrator calls
+it through files and subprocesses instead of importing backend internals.
 
-Este proyecto consume el manifiesto JSONL generado por `apps/orchestrator`, valida los inputs requeridos por job, resuelve el `hearing_profile_id` en un catálogo YAML y escribe los artifacts mínimos del backend.
+## Requirements
 
-Hoy el backend aplica degradación auditiva real con MSBG (`clarity.evaluator.msbg.msbg`) y preserva el boundary explícito de archivos + subprocess para que el orchestrator pueda inspeccionar resultados.
+- Python `>=3.12,<3.13`
+- `uv`
+- Dependencies declared in `pyproject.toml`, including `pyclarity`, `numpy`,
+  `scipy`, `soundfile`, and `PyYAML`
+- Input WAV files compatible with the current MSBG integration
 
-## Relación con `orchestrator` y `matlab`
+Current integration note: the MSBG path used here expects stereo WAV input at
+44.1 kHz.
 
-- `apps/orchestrator` decide qué jobs de Clarity existen y escribe `manifests/runtime/clarity/clarity_jobs.jsonl`.
-- `apps/matlab` produce el WAV renderizado y su metadata upstream.
-- `apps/clarity-backend` consume esos paths explícitos, genera el WAV degradado y su sidecar exactamente en los paths esperados del manifest, y no importa código interno del orchestrator.
+## Install
 
-La forma preferida de invocación desde el sibling orchestrator sigue siendo:
-
-```sh
-uv run --project ../clarity-backend clarity-backend run-manifest .\manifests\runtime\clarity\clarity_jobs.jsonl
-```
-
-Desde la raiz del monorepo, el backend tambien se verifica como proyecto sibling con Python 3.12:
-
-```sh
-uv run --project apps/clarity-backend clarity-backend --help
-```
-
-## Instalación local
+From this directory:
 
 ```sh
 uv sync
 ```
 
+From the repository root:
+
+```sh
+uv sync --project apps/clarity-backend
+```
+
+Check the CLI:
+
+```sh
+uv run --project apps/clarity-backend clarity-backend --help
+```
+
+## Relationship With The Pipeline
+
+- `apps/orchestrator` decides which Clarity jobs exist and writes
+  `manifests/runtime/clarity/clarity_jobs.jsonl`.
+- `apps/matlab` produces upstream rendered WAV files and render metadata.
+- `apps/clarity-backend` reads the explicit paths in each job, writes degraded
+  audio and metadata, and exits with status `1` if any job fails.
+
+Preferred invocation from the repository root:
+
+```sh
+uv run --project apps/clarity-backend clarity-backend run-manifest path/to/clarity_jobs.jsonl
+```
+
+When called from `apps/orchestrator`, the sibling invocation is typically:
+
+```sh
+uv run --project ../clarity-backend clarity-backend run-manifest .\manifests\runtime\clarity\clarity_jobs.jsonl
+```
+
 ## CLI
 
-### Ejecutar un manifiesto
+Run a manifest:
 
 ```sh
 uv run --project . clarity-backend run-manifest path/to/clarity_jobs.jsonl
 ```
 
-Qué hace el comando:
+The command:
 
-1. Lee el manifiesto JSONL línea por línea.
-2. Valida que existan `input_wav_path`, `input_render_metadata_path` y `hearing_profiles_path`.
-3. Resuelve el `hearing_profile_id` en el catálogo YAML.
-4. Convierte el perfil auditivo a audiogramas de Clarity y procesa el WAV con MSBG.
-5. Escribe el WAV degradado y la metadata sidecar en los paths pedidos por cada job.
-6. Continúa con los siguientes jobs aunque uno falle.
-7. Termina con código `1` si hubo al menos un job fallido.
+1. Reads the JSONL manifest line by line.
+2. Validates the required input paths for each job.
+3. Resolves `hearing_profile_id` in the YAML profile catalog.
+4. Converts the hearing profile into Clarity audiograms.
+5. Processes the WAV with MSBG.
+6. Writes the degraded WAV and metadata sidecar to the expected paths.
+7. Continues after failed jobs.
+8. Exits with code `1` if at least one job failed.
 
-## Contrato actual del manifiesto
+## Manifest Contract
 
-El backend consume el contrato escrito por `apps/orchestrator/tests/test_clarity_handoff.py`.
-
-Cada línea del JSONL representa un job con esta forma general:
+Each JSONL line is one job. The backend consumes the current contract generated
+by the orchestrator tests, including:
 
 ```json
 {
@@ -80,17 +107,21 @@ Cada línea del JSONL representa un job con esta forma general:
 }
 ```
 
-Notas:
+Contract notes:
 
-- `schema_version` actual: `1.0`.
-- `backend_invocation` se preserva como parte del contrato, pero este repo solo consume el manifiesto ya escrito.
-- `expected_output_wav_path` y `expected_output_metadata_path` son autoritativos; el backend no debe asumir nombres fijos.
+- Current `schema_version`: `1.0`.
+- `backend_invocation` is preserved as part of the handoff contract.
+- `expected_output_wav_path` and `expected_output_metadata_path` are
+  authoritative. The backend must not infer fixed output names.
+- The backend assumes the orchestrator already selected valid jobs and explicit
+  paths, but still validates required files before processing.
 
-## Catálogo de perfiles auditivos
+## Hearing Profile Catalog
 
-El backend espera un YAML con raíz `profiles` y perfiles únicos por `hearing_profile_id`.
+The backend expects a YAML file with a root `profiles` list. Each profile must
+have a unique `hearing_profile_id`.
 
-Ejemplo mínimo válido:
+Minimal valid example:
 
 ```yaml
 profiles:
@@ -104,47 +135,62 @@ profiles:
           250: 12
 ```
 
-Reglas actuales validadas por el backend:
+Validation rules:
 
-- `profiles` debe ser una lista no vacía.
-- cada perfil debe existir una sola vez.
-- cada oído (`left`, `right`) debe existir.
-- `loss_db_by_band` debe ser un mapa no vacío.
-- las bandas soportadas por MSBG en este backend son `250, 500, 1000, 2000, 4000, 8000` para ambos oídos.
-- cada banda debe tener valor numérico finito.
+- `profiles` must be a non-empty list.
+- Each profile must have a unique non-empty `hearing_profile_id`.
+- Both `ears.left` and `ears.right` must exist.
+- Each ear must define a non-empty `loss_db_by_band` map.
+- Band names are normalized to strings.
+- Loss values must be finite numbers.
 
-## Outputs generados
+The MSBG adapter maps the profile into left and right audiograms before
+processing.
 
-Por cada job, el backend escribe en `output_dir`:
+## Outputs
 
-- el WAV degradado con el mismo basename que `input_wav_path`
-- el sidecar JSON con el mismo stem (`{wav_stem}.json`)
+For each job, the backend writes to the explicit paths in the job:
 
-### Caso exitoso
+- Degraded WAV: `expected_output_wav_path`
+- Sidecar metadata JSON: `expected_output_metadata_path`
 
-- el WAV degradado es el resultado procesado por MSBG a partir de `input_wav_path`.
-- la metadata sidecar incluye identidad del job, paths resueltos, `status: "completed"`, `processor` y `degradation_applied` con pérdidas por banda y frecuencias del audiograma.
+Successful metadata includes:
 
-### Caso fallido
+- job identity fields
+- resolved input and output paths
+- `status: "completed"`
+- processor metadata
+- applied degradation by band and audiogram frequency
 
-- la metadata sidecar se escribe igual.
-- `status` pasa a `"failed"`.
-- `output_wav_path` queda en `null`.
-- se incluye `error.type` y `error.message` para debugging.
+Failed metadata includes:
 
-## Limitaciones actuales
+- job identity fields
+- resolved input paths
+- `status: "failed"`
+- `output_wav_path: null`
+- `error.type` and `error.message`
 
-- MSBG en esta integración soporta WAV estéreo a 44.1 kHz.
-- el backend asume que el orchestrator ya produjo un manifiesto válido y rutas explícitas.
-- hoy solo existe un CLI simple con `run-manifest`.
-- la validación está centrada en inputs y perfiles auditivos, no en una capa de modelos más abstracta.
+## Development
 
-## Referencias upstream relevantes
+Run tests:
 
-Para entender el contrato vigente, revisar primero:
+```sh
+uv run --project apps/clarity-backend pytest
+```
+
+Useful upstream references:
 
 - `apps/orchestrator/README.md`
 - `apps/orchestrator/tests/test_clarity_handoff.py`
 - `apps/orchestrator/tests/test_output_index.py`
 
-Esos archivos describen mejor que este README cómo se preparan los jobs, cómo se reservan los outputs y qué estados observa el orchestrator alrededor del handoff.
+Those files describe how jobs are prepared, how output paths are reserved, and
+which handoff states the orchestrator tracks.
+
+## Limitations
+
+- The CLI currently exposes only `run-manifest`.
+- The integration is centered on file-based JSONL jobs, not a long-running
+  service API.
+- Validation focuses on required paths and hearing profiles.
+- Current MSBG processing is limited to the formats supported by the adapter.
