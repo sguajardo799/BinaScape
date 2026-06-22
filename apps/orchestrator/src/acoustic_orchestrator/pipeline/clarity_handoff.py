@@ -60,6 +60,7 @@ def prepare_clarity_handoff(
 ) -> ClaritySummary:
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     submit_enabled = config.hearing_degradation.runner.auto_submit if submit is None else submit
+    resume_enabled = config.execution.resume_if_possible and not config.hearing_degradation.runner.force_rerun
 
     if not config.hearing_degradation.enabled:
         return _build_summary(
@@ -127,7 +128,7 @@ def prepare_clarity_handoff(
                 job=job,
             )
 
-            if should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
+            if resume_enabled and should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
                 upsert_clarity_record(
                     layout["clarity_index_path"],
                     clarity_records,

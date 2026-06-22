@@ -1,10 +1,21 @@
 import json
+import os
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
+from uuid import uuid4
 
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
 
+
+_INDEX_LOCKS_GUARD = threading.Lock()
+_INDEX_LOCKS: dict[Path, threading.Lock] = {}
+_INDEX_REPLACE_ATTEMPTS = 10
+_INDEX_REPLACE_RETRY_DELAY_S = 0.01
 
 VariantStatus = Literal["planned", "completed", "partial", "failed"]
 ClarityStatus = Literal["planned", "submitted", "completed", "partial", "failed", "blocked", "skipped"]
@@ -811,10 +822,41 @@ def _now_isoformat() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@contextmanager
+def _index_write_lock(index_path: Path) -> Iterator[None]:
+    resolved_path = index_path.resolve()
+    with _INDEX_LOCKS_GUARD:
+        lock = _INDEX_LOCKS.setdefault(resolved_path, threading.Lock())
+    with lock:
+        yield
+
+
+def _index_temp_path(index_path: Path) -> Path:
+    return index_path.with_name(
+        f".{index_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp"
+    )
+
+
+def _replace_index(temp_path: Path, index_path: Path) -> None:
+    for attempt in range(_INDEX_REPLACE_ATTEMPTS):
+        try:
+            temp_path.replace(index_path)
+            return
+        except PermissionError:
+            if attempt == _INDEX_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_INDEX_REPLACE_RETRY_DELAY_S)
+
+
 def _upsert_jsonl(index_path: Path, records: dict[str, Any], key: str, record: Any) -> None:
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    records[key] = record
-    temp_path = index_path.with_suffix(f"{index_path.suffix}.tmp")
-    lines = [json.dumps(records[current_key], sort_keys=True) for current_key in sorted(records)]
-    temp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    temp_path.replace(index_path)
+    with _index_write_lock(index_path):
+        records[key] = record
+        temp_path = _index_temp_path(index_path)
+        lines = [json.dumps(records[current_key], sort_keys=True) for current_key in sorted(records)]
+        try:
+            temp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            _replace_index(temp_path, index_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise

@@ -70,10 +70,14 @@ def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, con
             "Clarity "
             f"total={clarity['total_jobs']} "
             f"planificados={clarity['planned_jobs']} "
+            f"enviados={clarity['submitted_jobs']} "
             f"completados={clarity['completed_jobs']} "
             f"bloqueados={clarity['blocked_jobs']} "
             f"omitidos={clarity['skipped_jobs']} "
-            f"manifest={clarity['manifest_path']}"
+            f"auto_submit={clarity['auto_submit']} "
+            f"submitted={clarity['submitted']} "
+            f"manifest={clarity['manifest_path']} "
+            f"mensaje={clarity['message']}"
         ]
 
     typer.echo(

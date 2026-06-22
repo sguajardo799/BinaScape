@@ -1,5 +1,5 @@
 experiment:
-  experiment_id: sim_001_wo_noise
+  experiment_id: sim_001
   description: >
     Ejemplo canonico root-first del pipeline estatico con una sola salida
     habilitada: binaural_hrtf. El runtime sigue soportando salidas HARTF
@@ -11,7 +11,7 @@ execution:
   num_simulations: 30
   num_workers: 2
   overwrite_existing: true
-  resume_if_possible: true
+  resume_if_possible: false
   save_scene_manifest: true
   save_render_metadata: true
 
@@ -170,12 +170,12 @@ source_sampling:
       spatial_policy:
         type: random_valid
 
-    - event_type: clapping
+    - event_type: footsteps
       role: optional
       min_count: 0
       max_count: 1
       probability: 0.1
-      audio_dir: ../../assets/events/clapping/
+      audio_dir: ../../assets/events/footsteps/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 3.1
@@ -194,12 +194,12 @@ source_sampling:
       orientation_strategy:
         type: facing_surface_normal
 
-    - event_type: glass_breaking
+    - event_type: keyboard_typing
       role: optional
       min_count: 0
       max_count: 1
       probability: 0.1
-      audio_dir: ../../assets/events/glass_breaking/
+      audio_dir: ../../assets/events/keyboard_typing/
       spatial_policy:
         type: weighted_targets
         targets:
@@ -226,12 +226,13 @@ outputs:
     metadata_pattern: "{scene_id}__{output_type}__render.json"
 
 hearing_degradation:
-  enabled: false
+  enabled: true
   input_targets:
     - binaural_hrtf
   hearing_profiles_path: ../hearing/hearing_profiles.yaml
   runner:
     backend_project_path: ../../apps/clarity-backend
     entrypoint: clarity-backend
-    auto_submit: false
+    auto_submit: true
     use_uv: true
+    force_rerun: true
