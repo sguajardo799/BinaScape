@@ -1,158 +1,272 @@
-# Orchestrator
+# Acoustic Orchestrator
 
-## Qué hace
+Python CLI for coordinating the static binaural acoustic pipeline. It loads an
+experiment YAML file, validates and samples static scenes, writes scene
+manifests, invokes the MATLAB/RAVEN backend, and prepares optional Clarity
+hearing-loss degradation jobs.
 
-Orquesta la etapa Python del pipeline acústico: carga y valida un archivo YAML de experimento, muestrea escenas estáticas y genera manifiestos JSON listos para el renderer de MATLAB.
+The primary supported workflow is root-first execution from the monorepo root.
 
-## Ejecución con `uv`
+## Requirements
 
-Desde la raiz del monorepo, el comando primario cross-platform para el flujo soportado es:
+- Python `>=3.12,<3.13`
+- `uv`
+- MATLAB on `PATH` as `matlab` for `render-static`
+- A local MATLAB/RAVEN backend at `apps/matlab`
+- ITA Toolbox and RAVEN configured in MATLAB
+- Local assets referenced by the selected config
+- The sibling Clarity backend at `apps/clarity-backend` when submitting hearing
+  degradation jobs
 
-```sh
-uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
-```
-
-La config root-first canonica vive en `configs/experiments/static_example.yml`. Los ejemplos locales de esta carpeta siguen siendo la referencia para pruebas del app y no estan deprecated.
-
-### Prerrequisitos
-
-- Tener `uv` instalado.
-- Usar Python 3.12.
-- Desde esta carpeta (`apps/orchestrator`), instalar dependencias con:
+Install app dependencies from this directory:
 
 ```sh
 uv sync --extra dev
 ```
 
-- Para `render-static`, MATLAB debe estar disponible en `PATH` como `matlab`.
-- El backend oficial de MATLAB en este monorepo es `apps/matlab`: desde `apps/orchestrator` se resuelve como `../matlab`, y el entrypoint esperado es `../matlab/run_raven_static_render.m`.
-- El backend de Clarity de esta primera slice vive como sibling project en `apps/clarity-backend` y se invoca preferentemente con `uv run --project ../clarity-backend ...`.
+Or from the repository root:
 
-### Config de ejemplo verificable en este repo
-
-El repo incluye un ejemplo canónico en:
-
-```text
-examples/example_config.yml
+```sh
+uv sync --project apps/orchestrator --extra dev
 ```
 
-Importante:
-- `examples/example_config.yml` y `examples/example_scene_static.json` son la pareja canónica del contrato.
-- El ejemplo principal de `examples/` es single-output con `binaural_hrtf`.
-- El runtime sigue soportando múltiples receiver IR outputs cuando se habilitan salidas adicionales en `receiver_outputs`.
+## Commands
 
-### Generar manifiestos
+Show CLI help:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator --help
+```
+
+Generate manifests only:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml
+```
+
+Run the full static render:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
+```
+
+Prepare Clarity handoff artifacts without submission:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml
+```
+
+Prepare and submit Clarity handoff artifacts to the sibling backend:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit
+```
+
+From inside `apps/orchestrator`, the equivalent app-local example command is:
 
 ```sh
 uv run acoustic-orchestrator generate-manifests .\examples\example_config.yml
 ```
 
-Qué hace:
-
-1. Lee y valida el YAML.
-2. Resuelve rutas relativas respecto al archivo de configuración.
-3. Genera escenas estáticas según `execution.num_simulations`.
-4. Escribe un manifiesto JSON por escena dentro de `{outputs.artifact_root}/{run_name}/manifests/scene/`.
-
-Contrato actual de materiales en el manifiesto:
-- `room.materials` se conserva como mapa superficie -> `material_id`.
-- `room.material_files` se agrega como mapa superficie -> `{ material_id, material_path }`.
-- Cada `material_path` debe ser absoluto y no se emite `surface_id` dentro de cada entrada.
-
-Contrato de ruido de fondo:
-- La config opcional `background_noise` acepta `enabled`, `snr_db`, `allow_multiple_layers` y estrategias `colored` (`white|pink|brown`) o `audio_folder` (`noise_type`, `audio_dir`, `file_pattern`).
-- Todo manifest incluye `background_noise`; si está deshabilitado, es exactamente `{ "enabled": false, "layers": [] }`.
-- Cuando está habilitado, el orquestador elige capas concretas por escena de forma reproducible y balanceada, incluyendo rutas absolutas para archivos de carpeta. No hace DSP ni mezcla audio.
-
-Nota de coordenadas para RAVEN: las posiciones de receiver y sources se serializan como `[x, y, -z]` porque RAVEN usa la esquina superior izquierda como origen.
-
-### Render estático completo
+The local `main.py` entrypoint can also be used for development:
 
 ```sh
-uv run acoustic-orchestrator render-static .\examples\example_config.yml
+uv run python .\main.py generate-manifests .\examples\example_config.yml
 ```
 
-Qué hace:
+## Config Examples
 
-1. Repite la generación de manifiestos estáticos.
-2. Crea manifiestos de entrada para MATLAB, uno por variante HRTF/HARTF habilitada, en `outputs.logs_dir/matlab_input_manifests/`.
-3. Invoca `matlab -batch` usando el entrypoint fijo `../matlab/run_raven_static_render.m`.
-4. Escribe WAVs y metadatos de render en las rutas configuradas.
-5. Si `hearing_degradation.enabled=true`, prepara `manifests/runtime/clarity/clarity_jobs.jsonl`, actualiza `indexes/clarity_index.jsonl` y solo auto-envía al backend si `hearing_degradation.runner.auto_submit=true`.
+Root-level examples:
 
-Paralelización MATLAB/RAVEN: `execution.num_workers: 1` mantiene la ejecución secuencial. Valores mayores a 1 pueden ejecutar subprocesses de MATLAB en paralelo después de preparar todos los manifiestos/audio runtime; no configure más workers que licencias MATLAB/RAVEN disponibles, y vuelva a `1` si RAVEN presenta estado global oculto en su entorno.
+- `configs/experiments/static_example.yml`: canonical root-first static
+  pipeline example.
+- `configs/experiments/sim_config.yml`: additional experiment configuration.
+- `configs/hearing/hearing_profiles.yaml`: hearing profile catalog for Clarity
+  degradation.
 
-### Preparar o enviar el handoff de Clarity
+App-local examples:
 
-Solo preparar artifacts:
+- `apps/orchestrator/examples/example_config.yml`
+- `apps/orchestrator/examples/example_config_w_loss.yml`
+- `apps/orchestrator/examples/example_config_clapping_background_noise.yml`
+- `apps/orchestrator/examples/example_scene_static.json`
+- `apps/orchestrator/examples/hearing_profiles.yaml`
+
+The app-local examples are useful for tests and development. The root-level
+config is the preferred starting point for end-to-end runs from the repository
+root.
+
+## Generate Manifests
 
 ```sh
-uv run acoustic-orchestrator clarity-handoff .\examples\example_config.yml
+uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml
 ```
 
-Preparar y enviar al backend sibling:
+This command:
+
+1. Reads and validates the YAML config.
+2. Resolves relative paths from the config file location.
+3. Samples static scenes according to `execution.num_simulations`.
+4. Writes one scene manifest per generated scene under
+   `{outputs.artifact_root}/{run_name}/manifests/scene/`.
+
+Current material contract in generated manifests:
+
+- `room.materials` is preserved as a surface-to-`material_id` map.
+- `room.material_files` is added as a surface-to-file map.
+- Each material file path is absolute.
+- Material entries do not emit `surface_id`.
+
+Coordinate note for RAVEN: receiver and source positions are serialized as
+`[x, y, -z]` because the MATLAB/RAVEN side expects that coordinate convention.
+
+## Background Noise Planning
+
+The orchestrator plans background noise metadata in the scene manifest. MATLAB
+performs the downstream synthesis and mixing.
+
+The optional `background_noise` config supports:
+
+- `enabled`
+- `snr_db`
+- `allow_multiple_layers`
+- `colored` strategies with `white`, `pink`, or `brown`
+- `audio_folder` strategies with `noise_type`, `audio_dir`, and `file_pattern`
+
+Every emitted manifest includes `background_noise`. When disabled, it is exactly:
+
+```json
+{ "enabled": false, "layers": [] }
+```
+
+When enabled, the orchestrator chooses concrete layers per scene in a
+reproducible and balanced way, including absolute paths for selected audio
+files. It does not perform DSP or audio mixing.
+
+## Static Render
 
 ```sh
-uv run acoustic-orchestrator clarity-handoff .\examples\example_config.yml --submit
+uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
 ```
 
-Artifacts esperados del slice inicial:
-- `manifests/runtime/clarity/clarity_jobs.jsonl` — un job por variant elegible, incluyendo `run_id` y `backend_invocation` para preservar el contrato con el backend sibling.
-- `indexes/clarity_index.jsonl` — estados `planned|submitted|completed|partial|failed|blocked|skipped`.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav` — salida degradada producida por el backend, preservando exactamente el basename del WAV renderizado upstream.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json` — metadata sidecar del mismo archivo, escrita en el mismo directorio con el stem del WAV degradado.
+This command:
 
-Regla de contrato actual para degradación auditiva:
-- el root por defecto es `{artifact_root}/{run_name}/outputs/degraded/`
-- los subdirectorios son `{output_type}/{hearing_profile_id}/`
-- `expected_output_wav_path` y `expected_output_metadata_path` son autoritativos para el backend sibling
-- el resume del orquestador valida solo esos paths explícitos; layouts legacy bajo `outputs/clarity/...` con nombres fijos no satisfacen runs nuevos por sí solos
-- `execution.resume_if_possible: false` deshabilita el resume también para Clarity; `hearing_degradation.runner.force_rerun: true` fuerza reenvío de jobs de Clarity aunque ya existan salidas completas
+1. Generates static scene manifests.
+2. Creates MATLAB input manifests, one per enabled receiver-output variant.
+3. Invokes `matlab -batch` through the fixed backend entrypoint
+   `apps/matlab/run_raven_static_render.m`.
+4. Writes rendered WAV files and render metadata to configured paths.
+5. Updates output indexes for planned, completed, resumed, failed, partial,
+   blocked, skipped, or inconsistent variants.
+6. If `hearing_degradation.enabled=true`, prepares Clarity handoff artifacts.
+7. Submits Clarity jobs only when
+   `hearing_degradation.runner.auto_submit=true`.
 
-### Notas prácticas
+Parallel MATLAB/RAVEN execution is controlled by `execution.num_workers`.
+`num_workers: 1` keeps execution sequential. Higher values may launch multiple
+MATLAB subprocesses after runtime inputs are prepared. Do not configure more
+workers than available MATLAB/RAVEN licenses, and return to `1` if the local
+RAVEN setup shows hidden global state.
 
-- `render-static` asume la estructura actual del monorepo (`apps/orchestrator` y `apps/matlab` como carpetas hermanas). Si `apps/matlab` no existe, el comando falla antes de invocar MATLAB.
-- El orquestador no hace `uv add` del backend de Clarity como dependencia directa: la decisión actual es preservar el boundary de subprocess + archivos y dejar el lockfile del backend en su propio proyecto.
-- La metadata `backend_invocation` en el manifest describe cómo invocar el backend, pero la ejecución real sigue ocurriendo por `uv run --project <sibling-backend>` o por el entrypoint configurado; no se importa código del backend desde el orchestrator.
-- El ejemplo canónico tiene `execution.overwrite_existing: true`, por lo que volver a ejecutar los comandos reemplaza los manifiestos/salidas del ejemplo.
-- También puede usarse el entrypoint local `uv run python .\main.py <comando> <config>`, pero la forma recomendada es `uv run acoustic-orchestrator ...`.
+The canonical single-output example enables `binaural_hrtf`. The runtime also
+supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
-## Estructura actual
+## Clarity Handoff
+
+Prepare artifacts only:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml
+```
+
+Prepare and submit:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit
+```
+
+Expected artifacts:
+
+- `manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
+  variant, including `run_id` and `backend_invocation`.
+- `indexes/clarity_index.jsonl`: status tracking for planned, submitted,
+  completed, partial, failed, blocked, or skipped jobs.
+- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
+  degraded output from the backend.
+- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
+  metadata sidecar next to the degraded WAV.
+
+Current degradation output contract:
+
+- The default root is `{artifact_root}/{run_name}/outputs/degraded/`.
+- Subdirectories are `{output_type}/{hearing_profile_id}/`.
+- `expected_output_wav_path` and `expected_output_metadata_path` in each JSONL
+  job are authoritative for the backend.
+- Resume checks validate the explicit paths reserved in the handoff manifest.
+- Legacy layouts under `outputs/clarity/...` are not enough to satisfy new runs
+  by themselves.
+
+The orchestrator does not add the Clarity backend as a direct Python dependency.
+The current design keeps a file-and-subprocess boundary between the two apps.
+
+## Project Structure
 
 ```text
-orchestrator/
-├─ main.py
-├─ pyproject.toml
-├─ README.md
-├─ ARCHITECTURE.md
-├─ AGENTS.md
-├─ examples/
-│  ├─ example_config.yml
-│  └─ example_scene_static.json
-├─ src/
-│  └─ acoustic_orchestrator/
-│     ├─ cli.py
-│     ├─ config/
-│     │  ├─ loader.py
-│     │  ├─ models.py
-│     │  └─ validator.py
-│     ├─ experiment/
-│     │  ├─ manifest_writer.py
-│     │  ├─ sampler.py
-│     │  └─ scene_builder.py
-│     ├─ pipeline/
-│     │  ├─ clarity_handoff.py
-│     │  ├─ clarity_runner.py
-│     │  ├─ matlab_runner.py
-│     │  ├─ output_index.py
-│     │  └─ render_pipeline.py
-│     ├─ matlab/        # actualmente vacío
-│     └─ utils/         # actualmente vacío
-└─ tests/
-   ├─ test_clarity_handoff.py
-   ├─ test_clarity_runner.py
-   ├─ test_generate_manifests.py
-   ├─ test_output_index.py
-   ├─ test_output_paths.py
-   └─ test_render_pipeline_clarity.py
+apps/orchestrator/
+|-- main.py
+|-- pyproject.toml
+|-- ARCHITECTURE.md
+|-- examples/
+|-- src/
+|   `-- acoustic_orchestrator/
+|       |-- cli.py
+|       |-- config/
+|       |-- experiment/
+|       `-- pipeline/
+`-- tests/
 ```
+
+Key modules:
+
+- `config/loader.py`: reads config files and resolves paths.
+- `config/models.py`: Pydantic models for the experiment config.
+- `config/validator.py`: config validation rules.
+- `experiment/sampler.py`: scene sampling.
+- `experiment/scene_builder.py`: scene manifest construction.
+- `experiment/manifest_writer.py`: manifest output.
+- `pipeline/render_pipeline.py`: high-level workflow orchestration.
+- `pipeline/matlab_runner.py`: MATLAB subprocess integration.
+- `pipeline/clarity_handoff.py`: Clarity JSONL job preparation.
+- `pipeline/clarity_runner.py`: Clarity subprocess integration.
+- `pipeline/output_index.py`: output status tracking.
+- `pipeline/output_paths.py`: output path reservation.
+- `pipeline/runtime_audio.py`: runtime audio preparation.
+
+## Development
+
+Run tests:
+
+```sh
+uv run --project apps/orchestrator pytest
+```
+
+Run static checks when the tools are installed:
+
+```sh
+uv run --project apps/orchestrator ruff check .
+uv run --project apps/orchestrator mypy src
+```
+
+The example configs use `execution.overwrite_existing: true`, so repeated runs
+can replace generated manifests and outputs for the same run.
+
+## Practical Notes
+
+- `render-static` assumes the monorepo layout where `apps/orchestrator`,
+  `apps/matlab`, and `apps/clarity-backend` are sibling directories.
+- If `apps/matlab` is missing, `render-static` fails before invoking MATLAB.
+- The orchestrator writes `backend_invocation` metadata into Clarity jobs, but
+  actual execution still happens via `uv run --project <sibling-backend>` or the
+  configured entrypoint.
+- The supported pipeline is static. Dynamic rendering remains outside the
+  supported orchestrator workflow.
