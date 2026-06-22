@@ -202,6 +202,7 @@ class ClarityRunnerConfig(StrictConfigModel):
     backend_project_path: Path | None = None
     entrypoint: str = "clarity-backend"
     auto_submit: bool = False
+    force_rerun: bool = False
     use_uv: bool = True
 
 

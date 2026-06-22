@@ -107,6 +107,7 @@ Regla de contrato actual para degradación auditiva:
 - los subdirectorios son `{output_type}/{hearing_profile_id}/`
 - `expected_output_wav_path` y `expected_output_metadata_path` son autoritativos para el backend sibling
 - el resume del orquestador valida solo esos paths explícitos; layouts legacy bajo `outputs/clarity/...` con nombres fijos no satisfacen runs nuevos por sí solos
+- `execution.resume_if_possible: false` deshabilita el resume también para Clarity; `hearing_degradation.runner.force_rerun: true` fuerza reenvío de jobs de Clarity aunque ya existan salidas completas
 
 ### Notas prácticas
 

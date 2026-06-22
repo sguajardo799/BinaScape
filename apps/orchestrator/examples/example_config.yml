@@ -262,4 +262,5 @@ hearing_degradation:
     backend_project_path: ../../clarity-backend
     entrypoint: clarity-backend
     auto_submit: false
+    force_rerun: false
     use_uv: true

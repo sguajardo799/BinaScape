@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 
@@ -316,6 +317,72 @@ def test_upsert_clarity_record_rewrites_current_record_per_variant(tmp_path: Pat
     lines = index_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert load_clarity_index(index_path)[job["job_id"]]["status"] == "blocked"
+
+
+def test_upsert_clarity_record_uses_unique_temp_file_per_write(tmp_path: Path, monkeypatch) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    records = {}
+    replace_sources: list[str] = []
+    path_class = type(index_path)
+    original_replace = path_class.replace
+
+    def recording_replace(self, target):  # type: ignore[no-untyped-def]
+        replace_sources.append(self.name)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(path_class, "replace", recording_replace)
+
+    for suffix in ["mild_loss", "moderate_loss", "severe_loss"]:
+        job = _clarity_job(tmp_path)
+        job["job_id"] = f"clarity__scene_static_0001__binaural_hrtf__{suffix}"
+        job["hearing_profile_id"] = suffix
+        upsert_clarity_record(
+            index_path,
+            records,
+            build_clarity_record(
+                job,
+                manifest_path=tmp_path / "clarity_jobs.jsonl",
+                status="planned",
+                attempted=False,
+                resumed=False,
+                runnable=True,
+            ),
+        )
+
+    assert len(replace_sources) == 3
+    assert len(set(replace_sources)) == 3
+    assert "clarity_index.jsonl.tmp" not in replace_sources
+    assert not (tmp_path / "clarity_index.jsonl.tmp").exists()
+
+
+def test_upsert_clarity_record_serializes_same_process_writers(tmp_path: Path) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    records = {}
+
+    def upsert_job(index: int) -> None:
+        job = _clarity_job(tmp_path)
+        job["job_id"] = f"clarity__scene_static_{index:04d}__binaural_hrtf__mild_loss"
+        job["variant_id"] = f"scene_static_{index:04d}__binaural_hrtf"
+        job["scene_id"] = f"scene_static_{index:04d}"
+        upsert_clarity_record(
+            index_path,
+            records,
+            build_clarity_record(
+                job,
+                manifest_path=tmp_path / "clarity_jobs.jsonl",
+                status="planned",
+                attempted=False,
+                resumed=False,
+                runnable=True,
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(upsert_job, range(1, 25)))
+
+    loaded_records = load_clarity_index(index_path)
+    assert len(loaded_records) == 24
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_inspect_clarity_record_detects_completed_outputs(tmp_path: Path) -> None:
