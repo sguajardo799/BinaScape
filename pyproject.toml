@@ -9,4 +9,4 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-members = ["apps/orchestrator", "apps/clarity-backend"]
+members = ["apps/orchestrator", "apps/clarity-backend", "apps/output-analyzer"]
