@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from output_analyzer.loader import load_run
 from output_analyzer.report import build_analysis
 
@@ -25,8 +27,13 @@ def test_build_analysis_writes_data_images_and_html(sample_run):
 
     heatmap = (sample_run / "analysis" / "images" / "heatmap_locations_speech.svg").read_text(encoding="utf-8")
     assert ">0<" in heatmap
-    assert ">8<" in heatmap
     assert ">6<" in heatmap
+    assert ">8<" in heatmap
+
+    render_scenes = json.loads((sample_run / "analysis" / "render_scenes.json").read_text(encoding="utf-8"))
+    assert render_scenes[0]["room_length_m"] == 8.0
+    assert render_scenes[0]["room_width_m"] == 6.0
+    assert render_scenes[0]["room_height_m"] == 3.0
 
     report = artifacts["report"].read_text(encoding="utf-8")
     assert "Output Analysis Report" in report
