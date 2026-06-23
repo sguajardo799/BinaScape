@@ -12,6 +12,7 @@ members = [
     "acoustic-orchestrator",
     "binaural-impared-hear",
     "clarity-backend",
+    "output-analyzer",
 ]
 
 [[package]]
@@ -1054,6 +1055,26 @@ sdist = { url = "https://files.pythonhosted.org/packages/09/48/6388f1bb9da707110
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/94/1843518e420fa3ed6919835845df698c7e27e183cb997394e4a670973a65/omegaconf-2.3.0-py3-none-any.whl", hash = "sha256:7b4df175cdb08ba400f45cae3bdcae7ba8365db4d165fc65fd04b050ab63b46b", size = 79500, upload-time = "2022-12-08T20:59:19.686Z" },
 ]
+
+[[package]]
+name = "output-analyzer"
+version = "0.1.0"
+source = { editable = "apps/output-analyzer" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "packaging"
