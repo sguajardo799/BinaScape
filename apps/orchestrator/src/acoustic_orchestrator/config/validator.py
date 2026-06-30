@@ -63,8 +63,8 @@ def validate_config(config: AppConfig) -> None:
     if config.receiver_sampling.position_strategy.margin_m.x * 2 >= config.room_sampling.dimensions_m.length.max:
         errors.append("receiver_sampling.position_strategy.margin_m.x es demasiado grande para la longitud máxima del cuarto")
 
-    if config.receiver_sampling.position_strategy.margin_m.y * 2 >= config.room_sampling.dimensions_m.width.max:
-        errors.append("receiver_sampling.position_strategy.margin_m.y es demasiado grande para el ancho máximo del cuarto")
+    if config.receiver_sampling.position_strategy.margin_m.z * 2 >= config.room_sampling.dimensions_m.width.max:
+        errors.append("receiver_sampling.position_strategy.margin_m.z es demasiado grande para el ancho máximo del cuarto")
 
     if config.receiver_sampling.position_strategy.fixed_height_m.max > config.room_sampling.dimensions_m.height.max:
         errors.append("receiver_sampling.position_strategy.fixed_height_m.max no puede exceder room_sampling.dimensions_m.height.max")

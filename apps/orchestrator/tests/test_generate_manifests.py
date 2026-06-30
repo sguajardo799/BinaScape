@@ -11,6 +11,7 @@ import acoustic_orchestrator.pipeline.render_pipeline as render_pipeline
 from acoustic_orchestrator.cli import app
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
+from acoustic_orchestrator.experiment.sampler import _sample_random_position, _sample_receiver
 from acoustic_orchestrator.pipeline.matlab_runner import build_raven_project_name, build_render_variant_paths
 from acoustic_orchestrator.pipeline.render_pipeline import (
     RenderStaticRunError,
@@ -90,6 +91,23 @@ def test_generate_static_manifests_allows_omitting_optional_hartf_outputs(tmp_pa
     assert len(manifest_paths) == 2
     manifest = json.loads(manifest_paths[0].read_text(encoding="utf-8"))
     assert [output["hrtf_id"] for output in manifest["receiver"]["hrtfs"]] == ["binaural_hrtf"]
+
+
+def test_sampler_uses_xyz_position_convention_for_receiver_and_sources(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "coordinate_convention"))
+    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+    rng = _MaxUniformRng()
+
+    receiver = _sample_receiver(config, room, rng)
+    source_position = _sample_random_position(room, rng)
+
+    assert receiver["position_m"] == [3.8, 1.4, 7.8]
+    assert source_position == [3.5, 2.0, 7.5]
+    assert receiver["position_m"][1] <= room["dimensions"]["height"]
+    assert receiver["position_m"][2] > room["dimensions"]["height"]
+    assert source_position[1] <= room["dimensions"]["height"]
+    assert source_position[2] > room["dimensions"]["height"]
 
 
 def test_background_noise_folder_layers_use_concrete_absolute_paths_and_are_deterministic(tmp_path: Path) -> None:
@@ -211,13 +229,14 @@ def test_generate_static_manifests_keeps_sources_at_least_half_meter_from_walls_
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
     room_dimensions = manifest["room"]["dimensions_m"]
     receiver_position = manifest["receiver"]["position_m"]
+    room_length, room_width, room_height = room_dimensions
 
     assert len(manifest["sources"]) >= 2
     for source in manifest["sources"]:
         x, y, z = source["position_m"]
-        assert 0.5 <= x <= room_dimensions[0] - 0.5
-        assert 0.5 <= y <= room_dimensions[1] - 0.5
-        assert 0.5 <= z <= room_dimensions[2] - 0.5
+        assert 0.5 <= x <= room_length - 0.5
+        assert 0.5 <= y <= room_height - 0.5
+        assert 0.5 <= z <= room_width - 0.5
         assert math.dist(source["position_m"], receiver_position) >= 0.5
 
 
@@ -268,7 +287,7 @@ def test_generate_static_manifests_uses_farthest_corner_fallback_for_away_policy
     receiver_position = manifest["receiver"]["position_m"]
     room_length, room_width, room_height = manifest["room"]["dimensions_m"]
     expected_corner = max(
-        ([x, y, z] for x in (0.5, room_length - 0.5) for y in (0.5, room_width - 0.5) for z in (0.5, room_height - 0.5)),
+        ([x, y, z] for x in (0.5, room_length - 0.5) for y in (0.5, room_height - 0.5) for z in (0.5, room_width - 0.5)),
         key=lambda position: math.dist(position, receiver_position),
     )
 
@@ -351,11 +370,11 @@ def test_generate_static_manifests_places_wall_targets_half_meter_from_the_selec
     wall_distances = [
         source_position[0],
         room_length - source_position[0],
-        source_position[1],
-        room_width - source_position[1],
+        source_position[2],
+        room_width - source_position[2],
     ]
     assert min(wall_distances) == pytest.approx(0.5)
-    assert 0.5 <= source_position[2] <= room_height - 0.5
+    assert 0.5 <= source_position[1] <= room_height - 0.5
 
 
 def test_generate_static_manifests_probability_one_keeps_variability_above_minimum(tmp_path: Path) -> None:
@@ -891,9 +910,18 @@ def test_render_static_scenes_negates_receiver_and_source_z_coordinates_in_runti
     render_static_scenes(config_path)
 
     scene_manifest = json.loads((layout["scene_manifest_dir"] / "scene_static_0001.json").read_text(encoding="utf-8"))
+    room_length, room_width, room_height = scene_manifest["room"]["dimensions_m"]
     runtime_manifest = json.loads(
         next(layout["runtime_manifest_dir"].glob("scene_static_0001__*.json")).read_text(encoding="utf-8")
     )
+
+    assert 0.0 <= scene_manifest["receiver"]["position_m"][0] <= room_length
+    assert 0.0 <= scene_manifest["receiver"]["position_m"][1] <= room_height
+    assert 0.0 <= scene_manifest["receiver"]["position_m"][2] <= room_width
+    for source in scene_manifest["sources"]:
+        assert 0.0 <= source["position_m"][0] <= room_length
+        assert 0.0 <= source["position_m"][1] <= room_height
+        assert 0.0 <= source["position_m"][2] <= room_width
 
     assert runtime_manifest["receiver"]["position_m"] == [
         scene_manifest["receiver"]["position_m"][0],
@@ -1291,6 +1319,11 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
 
     assert generate_result.exit_code == 0
     assert "Generados 2 manifiestos" in generate_result.stdout
+
+
+class _MaxUniformRng:
+    def uniform(self, minimum: float, maximum: float) -> float:
+        return maximum
 
 
 def _build_workspace(

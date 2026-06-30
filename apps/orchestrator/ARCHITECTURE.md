@@ -106,7 +106,7 @@ This manifest is the rendering contract.
 The current expected shape should be inspectable in `examples/example_scene_static.json`.
 Treat `examples/example_config.yml` and `examples/example_scene_static.json` as the only normative example pair for the static pipeline.
 
-For receiver and source positions consumed by RAVEN, serialize coordinates as `[x, y, -z]` because RAVEN uses the upper-left corner as origin.
+Receiver and source positions use canonical `[x, y, z]` coordinates, where `y` is height and `z` is horizontal depth. Runtime manifests consumed by RAVEN serialize those positions as `[x, y, -z]` because RAVEN uses the upper-left corner as origin.
 
 For the current static pipeline, room materials are represented in two parallel manifest fields:
 - `room.materials`: surface-keyed semantic material IDs
