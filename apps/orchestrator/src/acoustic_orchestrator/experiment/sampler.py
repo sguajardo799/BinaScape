@@ -215,12 +215,12 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
     dimensions = room["dimensions"]
     position = [
         _uniform(rng, margins.x, dimensions["length"] - margins.x),
-        _uniform(rng, margins.y, dimensions["width"] - margins.y),
         _uniform(
             rng,
             config.receiver_sampling.position_strategy.fixed_height_m.min,
             config.receiver_sampling.position_strategy.fixed_height_m.max,
         ),
+        _uniform(rng, margins.z, dimensions["width"] - margins.z),
     ]
 
     return {
@@ -433,8 +433,8 @@ def _farthest_inset_box_corner(room: dict, receiver_position: list[float]) -> li
     candidates = [
         [x, y, z]
         for x in (SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M)
-        for y in (SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M)
-        for z in (SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M)
+        for y in (SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M)
+        for z in (SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M)
     ]
     return max(candidates, key=lambda candidate: _distance(candidate, receiver_position))
 
@@ -443,8 +443,8 @@ def _sample_random_position(room: dict, rng: random.Random) -> list[float]:
     dimensions = room["dimensions"]
     return [
         _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
         _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
+        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
     ]
 
 
@@ -454,25 +454,25 @@ def _sample_wall_position(room: dict, rng: random.Random) -> tuple[list[float], 
     if wall == "north_wall":
         return [
             _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-            dimensions["width"] - SOURCE_WALL_CLEARANCE_M,
             _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
+            dimensions["width"] - SOURCE_WALL_CLEARANCE_M,
         ], wall
     if wall == "south_wall":
         return [
             _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-            SOURCE_WALL_CLEARANCE_M,
             _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
+            SOURCE_WALL_CLEARANCE_M,
         ], wall
     if wall == "east_wall":
         return [
             dimensions["length"] - SOURCE_WALL_CLEARANCE_M,
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
             _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
+            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
         ], wall
     return [
         SOURCE_WALL_CLEARANCE_M,
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
         _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
+        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
     ], wall
 
 
@@ -543,8 +543,8 @@ def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list
 def _inside_room(position: list[float], dimensions: dict) -> bool:
     return (
         0.0 <= position[0] <= dimensions["length"]
-        and 0.0 <= position[1] <= dimensions["width"]
-        and 0.0 <= position[2] <= dimensions["height"]
+        and 0.0 <= position[1] <= dimensions["height"]
+        and 0.0 <= position[2] <= dimensions["width"]
     )
 
 
@@ -557,9 +557,9 @@ def _source_wall_clearance(position: list[float], dimensions: dict) -> float:
         position[0],
         dimensions["length"] - position[0],
         position[1],
-        dimensions["width"] - position[1],
+        dimensions["height"] - position[1],
         position[2],
-        dimensions["height"] - position[2],
+        dimensions["width"] - position[2],
     )
 
 
