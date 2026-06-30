@@ -109,8 +109,8 @@ def _render_scene_record(
     scene_id = str(metadata.get("scene_id") or manifest.get("scene_id") or "")
     hrtf_path = metadata.get("hrtf_path") or _first_hrtf_path(manifest)
     room_dimensions = _number_list(_nested(manifest, "room", "dimensions_m"))
-    width = room_dimensions[0] if len(room_dimensions) >= 1 else None
-    length = room_dimensions[1] if len(room_dimensions) >= 2 else None
+    length = room_dimensions[0] if len(room_dimensions) >= 1 else None
+    width = room_dimensions[1] if len(room_dimensions) >= 2 else None
     height = room_dimensions[2] if len(room_dimensions) >= 3 else None
     area = width * length if width is not None and length is not None else None
     reverb = _nested(metadata, "summary", "room", "reverberation", "mean_t30_s")

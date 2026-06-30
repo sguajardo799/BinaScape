@@ -10,6 +10,9 @@ def test_load_run_joins_render_metadata_with_scene_manifest(sample_run):
 
     assert len(data.render_scenes) == 1
     assert len(data.render_sources) == 2
+    assert data.render_scenes[0]["room_length_m"] == 8.0
+    assert data.render_scenes[0]["room_width_m"] == 6.0
+    assert data.render_scenes[0]["room_height_m"] == 3.0
     assert data.render_scenes[0]["room_area_m2"] == 48.0
     assert data.render_scenes[0]["employed_hrtf"] == "id25_HRTF.v17.ir.daff"
 
