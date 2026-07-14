@@ -1,0 +1,247 @@
+experiment:
+  experiment_id: pasillo_small_val_v0
+  description: >
+    Dataset pasillo_small de 1 h limpia total. Diseñado para validar el pipeline completo antes de escalar. Split train.
+  scene_type: static
+  random_seed: 20260705
+
+execution:
+  num_simulations: 720   # 12.0 min de escenas limpias de 10 s; x4 perfiles = 288 muestras degradadas
+  num_workers: 2
+  overwrite_existing: true
+  resume_if_possible: true
+  save_scene_manifest: true
+  save_render_metadata: true
+
+raven:
+  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
+
+render:
+  sample_rate_hz: 44100
+  generate_rir: false
+  generate_brir: true
+  simulation_type_rt: true
+  simulation_type_is: true
+  num_particles: 80000
+  is_order_ps: 3
+
+background_noise:
+  enabled: true
+  snr_db: 40.0
+  allow_multiple_layers: false
+  strategies:
+    - type: colored
+      colors: [white, pink]
+    # - type: event_bed
+    #   probability: 0.20
+    #   audio_dirs:
+    #     - ../../assets/events/val/refrigerator_hum/
+    #     - ../../assets/events/val/fan_ac/
+
+receiver_sampling:
+  one_receiver_per_scene: true
+  position_strategy:
+    type: random_uniform_inside_room
+    margin_m:
+      x: 0.8
+      y: 0.25
+      z: 0.5
+    fixed_height_m:
+      min: 1.55
+      max: 1.72
+  orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+receiver_outputs:
+  binaural_hrtf:
+    enabled: true
+    ir_catalog_path: ../../assets/hrtf/
+    file_pattern: "*.daff"
+    output_subdir: binaural_hrtf
+    num_channels: 2
+    required: true
+
+room_sampling:
+  dimensions_m:
+    length:
+      min: 7.0
+      max: 14.0
+    width:
+      min: 1.35
+      max: 2.40
+    height:
+      min: 2.25
+      max: 3.00
+  materials:
+    walls:
+      - plaster
+      - drywall
+      - concrete
+      - glass
+    floor:
+      - concrete
+      - wood
+    ceiling:
+      - plaster
+      - concrete
+      - wood
+  semantic_surfaces:
+    enable_walls: true
+    enable_floor: true
+    enable_ceiling: true
+
+source_sampling:
+  min_sources: 2
+  max_sources: 5
+  timing:
+    allow_offsets: true
+    start_time_s:
+      min: 0.1
+      max: 5.5
+    total_duration_s: 10.0
+  gain_db:
+    min: -6.0
+    max: 0.0
+  default_orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: -180.0
+      max: 180.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+  source_types:
+    - event_type: footsteps
+      role: base
+      min_count: 1
+      max_count: 2
+      probability: 0.85
+      audio_dir: ../../assets/events/val/footsteps/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.1
+
+    - event_type: speech
+      role: base
+      min_count: 0
+      max_count: 2
+      probability: 0.65
+      audio_dir: ../../assets/events/val/speech/
+      directivity: ../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.1
+
+    - event_type: door_knock
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.60
+      audio_dir: ../../assets/events/val/door_knock/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.90
+          random_valid: 0.10
+      orientation_strategy:
+        type: facing_surface_normal
+
+    - event_type: door_move_slam
+      role: base
+      min_count: 0
+      max_count: 1
+      probability: 0.55
+      audio_dir: ../../assets/events/val/door_move_slam/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          short_wall_end: 0.55
+          side_wall: 0.35
+          random_valid: 0.10
+      orientation_strategy:
+        type: facing_surface_normal
+
+    - event_type: phone_notification_vibration
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.08
+      audio_dir: ../../assets/events/val/phone_notification_vibration/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.1
+
+    - event_type: dog
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.06
+      audio_dir: ../../assets/events/val/dog/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.2
+
+    - event_type: cat
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.04
+      audio_dir: ../../assets/events/val/cat/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.2
+
+    - event_type: siren
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.05
+      audio_dir: ../../assets/events/val/siren/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.2
+
+    - event_type: object_fall
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.08
+      audio_dir: ../../assets/events/val/object_fall/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 2.2
+
+scene_validation:
+  min_distance_source_to_receiver_m: 1.5
+  min_distance_between_sources_m: 0.35
+  require_sources_inside_room: true
+  require_receiver_inside_room: true
+  max_sampling_attempts_per_scene: 80
+
+outputs:
+  artifact_root: ../../outputs/
+  run_name: pasillo_small_train_v0
+  naming:
+    scene_id_prefix: scene_pasillo_small_val
+    wav_pattern: "{scene_id}__{output_type}.wav"
+    metadata_pattern: "{scene_id}__{output_type}__render.json"
+
+hearing_degradation:
+  enabled: true
+  input_targets:
+    - binaural_hrtf
+  hearing_profiles_path: ../hearing/hearing_profiles.yaml
+  runner:
+    backend_project_path: ../../apps/clarity-backend
+    entrypoint: clarity-backend
+    auto_submit: true
+    use_uv: true
+    force_rerun: true

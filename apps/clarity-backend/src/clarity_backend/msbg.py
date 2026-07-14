@@ -83,7 +83,7 @@ def process_wav(
 
 
 def _process_channel(channel: np.ndarray, sample_rate: int, audiogram: Audiogram) -> np.ndarray:
-    ear = Ear(sample_rate=float(sample_rate))
+    ear = Ear(sample_rate=float(sample_rate), equiv_0db_spl=70)
     ear.set_audiogram(audiogram)
     processed = ear.process(np.asarray(channel, dtype=float))
     return np.asarray(processed[0], dtype=float)

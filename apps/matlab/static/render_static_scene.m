@@ -21,7 +21,12 @@ function result = render_static_scene(cfg)
     %   result.fs      -> frecuencia de muestreo
     %   result.summary -> struct con metadata resumida
 
-    fs = cfg.render.sample_rate_hz;
+    fs = 44100;
+    if double(cfg.render.sample_rate_hz) ~= fs
+        error('BinaScape:Matlab:UnsupportedSampleRate', ...
+            'El backend MATLAB/RAVEN requiere render.sample_rate_hz=%d Hz; recibido %d Hz.', ...
+            fs, double(cfg.render.sample_rate_hz));
+    end
     n_runs = numel(cfg.receiver.hrtfs);
     runs = preallocate_static_runs(n_runs);
 
@@ -77,7 +82,7 @@ function run_result = render_single_hrtf_run(cfg, active_hrtf, output_cfg, fs)
         error('Cantidad de BRIR (%d) no coincide con cantidad de fuentes (%d).', numel(BRIR), n_sources);
     end
 
-    samples_tail = (rpf.filterLength / 1000) * cfg.render.sample_rate_hz;
+    samples_tail = (rpf.filterLength / 1000) * fs;
     [mix, mix_summary] = mix_rendered_sources(ctx, BRIR, fs, room_reverberation, samples_tail);
     [mix, background_noise_summary] = apply_background_noise(mix, fs, cfg.background_noise, run_ctx);
     mix_summary.background_noise = background_noise_summary;
@@ -114,12 +119,7 @@ function [mix, summary] = mix_rendered_sources(ctx, BRIR, fs, room_reverberation
         audio_path = fullfile(dir(src.audio_path).folder, dir(src.audio_path).name);
         source_info = audioinfo(audio_path);
         source_ita = ita_read(audio_path);
-
-        if source_ita.samplingRate ~= fs
-            error(['La fuente %d tiene fs=%d Hz, pero la escena espera fs=%d Hz. ', ...
-                   'Re-muestrea antes o agrega una etapa de resampling.'], ...
-                    s, source_ita.samplingRate, fs);
-        end
+        source_ita = resample_ita_audio_if_needed(source_ita, fs, s);
 
         original_duration_s = double(source_info.TotalSamples) / double(source_info.SampleRate);
         %% source_ita.timeData = normalize_audio_peak(source_ita.timeData, 0.99);

@@ -27,7 +27,7 @@ def validate_config(config: AppConfig) -> None:
     materials_root: Path | None = None
 
     if config.experiment.scene_type != "static":
-        errors.append("Solo se soporta experiment.scene_type=static en este MVP")
+        errors.append("Solo se soporta experiment.scene_type=static en esta versión")
 
     if config.execution.num_simulations <= 0:
         errors.append("execution.num_simulations debe ser > 0")

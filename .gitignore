@@ -40,6 +40,8 @@ codegen/
 /models/
 /weights/
 /checkpoints/
+/configs/experiments/*
+!/configs/experiments/static_example.yml
 *.wav
 *.flac
 *.mp3

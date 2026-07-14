@@ -82,10 +82,10 @@ class ReceiverPositionStrategy(StrictConfigModel):
 
 
 class ReceiverOrientationStrategy(StrictConfigModel):
-    type: Literal["random_yaw"]
+    type: Literal["random_yaw_pitch"]
     yaw_deg: RangeFloat
-    pitch_deg: FixedFloat
-    roll_deg: FixedFloat
+    pitch_deg: RangeFloat
+    roll_deg: RangeFloat
 
 
 class ReceiverSamplingConfig(StrictConfigModel):
