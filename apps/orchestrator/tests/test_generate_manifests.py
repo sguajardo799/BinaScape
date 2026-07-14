@@ -2,12 +2,14 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
+import random
 import wave
 
 import pytest
 from typer.testing import CliRunner
 
 import acoustic_orchestrator.pipeline.render_pipeline as render_pipeline
+import acoustic_orchestrator.experiment.sampler as sampler
 from acoustic_orchestrator.cli import app
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
@@ -65,6 +67,132 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert Path(manifest["render"]["output_wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "outputs", "render")
     assert manifest["room"]["material_files"] == json.loads(second_paths[0].read_text(encoding="utf-8"))["room"]["material_files"]
     assert manifest["background_noise"] == {"enabled": False, "layers": []}
+
+
+def test_rt30_guard_accepts_the_inclusive_limit_and_records_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "rt30_boundary", num_simulations=1)
+    _make_receiver_orientation_compatible(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "room_sampling:\n",
+            "room_sampling:\n  max_rt30_s: 0.75\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sampler,
+        "estimate_room_rt30_s",
+        lambda room: {
+            "estimated_rt30_s": 0.75,
+            "rt30_by_band_s": {frequency: 0.75 for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+        },
+    )
+
+    manifest_path = generate_static_manifests(config_path)[0]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+
+    assert guard["estimated_rt30_s"] == 0.75
+    assert guard["sampling_attempts"] == 1
+    assert guard["method"] == "sabine"
+    assert guard["aggregation"] == "arithmetic_mean"
+    assert guard["max_rt30_s"] == 0.75
+    assert guard["band_frequencies_hz"] == [500, 630, 800, 1000, 1250, 1600, 2000]
+
+
+def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "rt30_real_estimate", num_simulations=1)
+    _make_receiver_orientation_compatible(config_path)
+
+    manifest_path = generate_static_manifests(config_path)[0]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+
+    assert guard["estimated_rt30_s"] <= guard["max_rt30_s"]
+    assert set(guard["rt30_by_band_s"]) == {"500", "630", "800", "1000", "1250", "1600", "2000"}
+    assert all(value > 0 for value in guard["rt30_by_band_s"].values())
+
+
+def test_rt30_guard_sampling_is_deterministic_for_the_same_seed(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "rt30_deterministic", num_simulations=1)
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+    validate_config(config)
+
+    first_scene = sampler.sample_static_scene(config, random.Random(123), scene_index=0)
+    second_scene = sampler.sample_static_scene(config, random.Random(123), scene_index=0)
+
+    assert first_scene == second_scene
+
+
+def test_rt30_guard_resamples_room_before_accepting_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "rt30_retry", num_simulations=1)
+    _make_receiver_orientation_compatible(config_path)
+    estimates = iter([1.5, 0.9])
+    estimate_calls = 0
+    receiver_calls = 0
+    original_sample_receiver = sampler._sample_receiver
+
+    def estimate_room_rt30_s(room: dict) -> dict:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        estimate = next(estimates)
+        return {
+            "estimated_rt30_s": estimate,
+            "rt30_by_band_s": {frequency: estimate for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+        }
+
+    def sample_receiver(*args: object, **kwargs: object) -> dict:
+        nonlocal receiver_calls
+        receiver_calls += 1
+        assert estimate_calls == 2
+        return original_sample_receiver(*args, **kwargs)
+
+    monkeypatch.setattr(sampler, "estimate_room_rt30_s", estimate_room_rt30_s)
+    monkeypatch.setattr(sampler, "_sample_receiver", sample_receiver)
+
+    manifest_path = generate_static_manifests(config_path)[0]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+
+    assert guard["estimated_rt30_s"] == 0.9
+    assert guard["sampling_attempts"] == 2
+    assert receiver_calls == 1
+
+
+def test_rt30_guard_exhaustion_aborts_without_writing_partial_manifest_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "rt30_exhaustion", num_simulations=2)
+    _make_receiver_orientation_compatible(config_path)
+    estimate_calls = 0
+
+    def estimate_room_rt30_s(room: dict) -> dict:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        estimate = 0.9 if estimate_calls == 1 else 1.5
+        return {
+            "estimated_rt30_s": estimate,
+            "rt30_by_band_s": {frequency: estimate for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+        }
+
+    monkeypatch.setattr(sampler, "estimate_room_rt30_s", estimate_room_rt30_s)
+
+    with pytest.raises(RuntimeError, match=r"scene_index=1; intentos=10; mejor_estimacion_s=1.5"):
+        generate_static_manifests(config_path)
+
+    artifact_root = workspace / "artifacts"
+    assert not artifact_root.exists() or not list(artifact_root.rglob("*.json"))
 
 
 def test_background_noise_does_not_perturb_existing_static_sampling(tmp_path: Path) -> None:
@@ -1641,6 +1769,32 @@ def _material_file_text(*, absorp_values: list[float] | None = None, scatter_val
             "interpol= " + ", ".join(["1"] * 31),
         ]
     )
+
+
+def _make_receiver_orientation_compatible(config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "    type: random_yaw\n"
+        "    yaw_deg:\n"
+        "      min: -180.0\n"
+        "      max: 180.0\n"
+        "    pitch_deg:\n"
+        "      fixed: 0.0\n"
+        "    roll_deg:\n"
+        "      fixed: 0.0\n",
+        "    type: random_yaw_pitch\n"
+        "    yaw_deg:\n"
+        "      min: -180.0\n"
+        "      max: 180.0\n"
+        "    pitch_deg:\n"
+        "      min: 0.0\n"
+        "      max: 0.0\n"
+        "    roll_deg:\n"
+        "      min: 0.0\n"
+        "      max: 0.0\n",
+        1,
+    )
+    config_path.write_text(text, encoding="utf-8")
 
 
 def _write_test_wav(path: Path, *, duration_s: float, sample_rate_hz: int = 8000) -> None:

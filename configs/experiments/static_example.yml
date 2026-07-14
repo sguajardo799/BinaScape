@@ -86,6 +86,8 @@ receiver_outputs:
   #   required: false
 
 room_sampling:
+  # LÃ­mite Sabine estimado antes de generar receptor, fuentes y manifiesto.
+  max_rt30_s: 1.0
   dimensions_m:
     length:
       min: 3.5

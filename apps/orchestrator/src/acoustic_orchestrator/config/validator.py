@@ -49,6 +49,8 @@ def validate_config(config: AppConfig) -> None:
     _validate_range(errors, "room_sampling.dimensions_m.length", config.room_sampling.dimensions_m.length.min, config.room_sampling.dimensions_m.length.max)
     _validate_range(errors, "room_sampling.dimensions_m.width", config.room_sampling.dimensions_m.width.min, config.room_sampling.dimensions_m.width.max)
     _validate_range(errors, "room_sampling.dimensions_m.height", config.room_sampling.dimensions_m.height.min, config.room_sampling.dimensions_m.height.max)
+    if not isfinite(config.room_sampling.max_rt30_s) or config.room_sampling.max_rt30_s <= 0:
+        errors.append("room_sampling.max_rt30_s debe ser finito y > 0")
     _validate_range(errors, "receiver_sampling.position_strategy.fixed_height_m", config.receiver_sampling.position_strategy.fixed_height_m.min, config.receiver_sampling.position_strategy.fixed_height_m.max)
     _validate_range(errors, "source_sampling.timing.start_time_s", config.source_sampling.timing.start_time_s.min, config.source_sampling.timing.start_time_s.max)
     _validate_range(errors, "source_sampling.gain_db", config.source_sampling.gain_db.min, config.source_sampling.gain_db.max)
@@ -224,6 +226,23 @@ def resolve_background_audio_candidates(strategy: AudioFolderNoiseStrategyConfig
 
 def inspect_material_file(material_path: Path) -> list[str]:
     return list(_inspect_material_file_cached(material_path.resolve()))
+
+
+def load_material_absorption_coefficients(material_path: Path) -> tuple[float, ...]:
+    material_path = material_path.resolve()
+    errors = inspect_material_file(material_path)
+    if errors:
+        raise ValueError(f"Material invÃ¡lido {material_path}: {'; '.join(errors)}")
+
+    try:
+        content = material_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"No se pudo leer el material {material_path}: {exc}") from exc
+
+    values_raw = _extract_material_field(content, "absorp")
+    if values_raw is None:
+        raise ValueError(f"Material invÃ¡lido {material_path}: falta absorp")
+    return tuple(_parse_material_values(values_raw))
 
 
 def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingProfileDefinition]:

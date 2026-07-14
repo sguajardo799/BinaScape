@@ -94,6 +94,27 @@ def test_background_noise_defaults_to_disabled_when_omitted(tmp_path: Path) -> N
     assert config.background_noise.strategies == []
 
 
+def test_room_sampling_max_rt30_defaults_to_one_second(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+
+    validate_config(config)
+
+    assert config.room_sampling.max_rt30_s == 1.0
+
+
+@pytest.mark.parametrize("invalid_limit", [0.0, -1.0, float("nan"), float("inf")])
+def test_validate_config_rejects_invalid_room_sampling_max_rt30(tmp_path: Path, invalid_limit: float) -> None:
+    config_path = _write_config(tmp_path)
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+    config.room_sampling.max_rt30_s = invalid_limit
+
+    with pytest.raises(ValueError, match=r"room_sampling\.max_rt30_s debe ser finito y > 0"):
+        validate_config(config)
+
+
 def test_validate_config_rejects_enabled_background_noise_without_strategies(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path, background_noise_block="""
 background_noise:
@@ -421,3 +442,19 @@ def _material_file_text() -> str:
     absorp = ", ".join(["0.2"] * 31)
     scatter = ", ".join(["0.1"] * 31)
     return f"[Material]\nname=test\nnotes=test\nabsorp={absorp}\nscatter={scatter}\n"
+
+
+def _make_receiver_orientation_compatible(config_path: Path) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "    type: random_yaw\n"
+        "    yaw_deg: {min: -180.0, max: 180.0}\n"
+        "    pitch_deg: {fixed: 0.0}\n"
+        "    roll_deg: {fixed: 0.0}\n",
+        "    type: random_yaw_pitch\n"
+        "    yaw_deg: {min: -180.0, max: 180.0}\n"
+        "    pitch_deg: {min: 0.0, max: 0.0}\n"
+        "    roll_deg: {min: 0.0, max: 0.0}\n",
+        1,
+    )
+    config_path.write_text(text, encoding="utf-8")

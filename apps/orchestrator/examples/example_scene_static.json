@@ -104,6 +104,24 @@
     }
   ],
 
+  "reverberation_guard": {
+    "method": "sabine",
+    "aggregation": "arithmetic_mean",
+    "max_rt30_s": 1.0,
+    "estimated_rt30_s": 0.83,
+    "band_frequencies_hz": [500, 630, 800, 1000, 1250, 1600, 2000],
+    "rt30_by_band_s": {
+      "500": 0.96,
+      "630": 0.91,
+      "800": 0.86,
+      "1000": 0.82,
+      "1250": 0.79,
+      "1600": 0.76,
+      "2000": 0.71
+    },
+    "sampling_attempts": 2
+  },
+
   "background_noise": {
     "enabled": true,
     "layers": [

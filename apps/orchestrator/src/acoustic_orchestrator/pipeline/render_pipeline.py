@@ -302,11 +302,9 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
 
-    _ensure_output_directories(config, layout)
-
     rng = random.Random(config.experiment.random_seed)
     background_noise_plan = build_background_noise_plan(config, config.execution.num_simulations)
-    manifest_paths: list[Path] = []
+    planned_manifests: list[tuple[dict, Path]] = []
 
     for scene_index in range(config.execution.num_simulations):
         scene_id = f"{config.outputs.naming.scene_id_prefix}_{scene_index + 1:04d}"
@@ -317,13 +315,17 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
             continue
         sampled_scene["background_noise"] = background_noise_plan[scene_index]
         scene_manifest = build_static_manifest(config, sampled_scene, scene_index, manifest_path)
-        manifest_paths.append(
-            write_manifest(
-                scene_manifest=scene_manifest,
-                manifest_path=manifest_path,
-                overwrite=config.execution.overwrite_existing,
-            )
+        planned_manifests.append((scene_manifest, manifest_path))
+
+    _ensure_output_directories(config, layout)
+    manifest_paths = [
+        write_manifest(
+            scene_manifest=scene_manifest,
+            manifest_path=manifest_path,
+            overwrite=config.execution.overwrite_existing,
         )
+        for scene_manifest, manifest_path in planned_manifests
+    ]
 
     return config, manifest_paths
 

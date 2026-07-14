@@ -128,6 +128,7 @@ class SemanticSurfacesConfig(StrictConfigModel):
 
 
 class RoomSamplingConfig(StrictConfigModel):
+    max_rt30_s: float = 1.0
     dimensions_m: RoomDimensionsConfig
     materials: RoomMaterialsConfig
     semantic_surfaces: SemanticSurfacesConfig

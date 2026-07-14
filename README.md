@@ -108,6 +108,12 @@ Experiment configs control scene sampling, receiver outputs, source assets,
 room material choices, background noise planning, output naming, and optional
 hearing degradation.
 
+Room sampling also supports `room_sampling.max_rt30_s` (default `1.0` second).
+Before any manifest is written, the orchestrator rejects rooms whose
+500-2000 Hz arithmetic-mean Sabine estimate exceeds that limit. Exhausting the
+configured scene sampling attempts aborts the batch; the value is an estimate
+and does not replace RAVEN's rendered T30 calculation.
+
 ## Output Flow
 
 For the supported static workflow, the pipeline is:

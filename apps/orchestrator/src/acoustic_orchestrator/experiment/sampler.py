@@ -19,6 +19,10 @@ from acoustic_orchestrator.config.validator import (
     resolve_background_audio_candidates,
     resolve_material_candidates,
 )
+from acoustic_orchestrator.experiment.room_acoustics import (
+    RT30_GUARD_FREQUENCIES_HZ,
+    estimate_room_rt30_s,
+)
 
 
 SURFACE_ORDER = ("north_wall", "south_wall", "east_wall", "west_wall", "floor", "ceiling")
@@ -38,7 +42,7 @@ class PlannedSource:
 
 
 def sample_static_scene(config: AppConfig, rng: random.Random, scene_index: int) -> dict:
-    room = _sample_room(config, rng)
+    room, reverberation_guard = _sample_room_with_rt30_guard(config, rng, scene_index)
     receiver = _sample_receiver(config, room, rng)
     hrtfs = _sample_hrtfs(config, rng)
 
@@ -55,7 +59,56 @@ def sample_static_scene(config: AppConfig, rng: random.Random, scene_index: int)
         "room": room,
         "receiver": receiver | {"hrtfs": hrtfs},
         "sources": sources,
+        "reverberation_guard": reverberation_guard,
     }
+
+
+def _sample_room_with_rt30_guard(config: AppConfig, rng: random.Random, scene_index: int) -> tuple[dict, dict]:
+    attempts = config.scene_validation.max_sampling_attempts_per_scene
+    max_rt30_s = config.room_sampling.max_rt30_s
+    best_estimate_s: float | None = None
+    last_estimate_s: float | None = None
+    last_error: str | None = None
+
+    for attempt in range(1, attempts + 1):
+        room = _sample_room(config, rng)
+        try:
+            estimate = estimate_room_rt30_s(room)
+        except ValueError as exc:
+            last_estimate_s = None
+            last_error = str(exc)
+            continue
+
+        last_error = None
+        last_estimate_s = estimate["estimated_rt30_s"]
+        if best_estimate_s is None or last_estimate_s < best_estimate_s:
+            best_estimate_s = last_estimate_s
+        if last_estimate_s <= max_rt30_s:
+            return room, {
+                "method": "sabine",
+                "aggregation": "arithmetic_mean",
+                "max_rt30_s": max_rt30_s,
+                "estimated_rt30_s": last_estimate_s,
+                "band_frequencies_hz": list(RT30_GUARD_FREQUENCIES_HZ),
+                "rt30_by_band_s": {
+                    str(frequency): value
+                    for frequency, value in estimate["rt30_by_band_s"].items()
+                },
+                "sampling_attempts": attempt,
+            }
+
+    details = [
+        f"No se pudo muestrear una sala con RT30 estimado <= {max_rt30_s:.6g} s",
+        f"scene_index={scene_index}",
+        f"intentos={attempts}",
+    ]
+    if best_estimate_s is not None:
+        details.append(f"mejor_estimacion_s={best_estimate_s:.6g}")
+    if last_estimate_s is not None:
+        details.append(f"ultima_estimacion_s={last_estimate_s:.6g}")
+    if last_error is not None:
+        details.append(f"ultimo_error={last_error}")
+    raise RuntimeError("; ".join(details))
 
 
 def build_background_noise_plan(config: AppConfig, num_scenes: int) -> list[dict]:

@@ -64,6 +64,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
             _build_source_manifest(source)
             for source in sampled_scene["sources"]
         ],
+        "reverberation_guard": dict(sampled_scene["reverberation_guard"]),
         "background_noise": _build_background_noise_manifest(sampled_scene.get("background_noise")),
         "render": render,
     }
