@@ -232,8 +232,16 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
                 config.receiver_sampling.orientation_strategy.yaw_deg.min,
                 config.receiver_sampling.orientation_strategy.yaw_deg.max,
             ),
-            "pitch": config.receiver_sampling.orientation_strategy.pitch_deg.fixed,
-            "roll": config.receiver_sampling.orientation_strategy.roll_deg.fixed,
+            "pitch": _uniform(
+                rng,
+                config.receiver_sampling.orientation_strategy.pitch_deg.min,
+                config.receiver_sampling.orientation_strategy.pitch_deg.max,
+            ),
+            "roll": _uniform(
+                rng,
+                config.receiver_sampling.orientation_strategy.roll_deg.min,
+                config.receiver_sampling.orientation_strategy.roll_deg.max,
+            ),
         },
     }
 
@@ -616,8 +624,12 @@ def _max_allowed_start_time_s(config: AppConfig, audio_path: Path) -> float:
 
 
 def _wav_duration_s(audio_path: Path) -> float:
-    with wave.open(str(audio_path), "rb") as wav_file:
-        return wav_file.getnframes() / wav_file.getframerate()
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            return wav_file.getnframes() / wav_file.getframerate()
+    except:
+        print(f"Error with file in: {audio_path}")
+
 
 
 def _uniform(rng: random.Random, minimum: float, maximum: float) -> float:

@@ -1,21 +1,20 @@
 experiment:
-  experiment_id: pasillo_small_train_v0
+  experiment_id: pasillo_small_val_v0
   description: >
-    Dataset pasillo_small de 1 h limpia total. Diseñado para validar el pipeline completo antes de escalar. Split train. Usa los mismos eventos, geometria y perfiles que el resto de la familia pasillo_v0,
-    separando audios fuente por split para reducir leakage entre entrenamiento y validacion.
+    Dataset pasillo_small de 1 h limpia total. Diseñado para validar el pipeline completo antes de escalar. Split train.
   scene_type: static
   random_seed: 20260705
 
 execution:
-  num_simulations: 288   # 48.0 min de escenas limpias de 10 s; x4 perfiles = 1152 muestras degradadas
-  num_workers: 4
-  overwrite_existing: false
+  num_simulations: 720   # 12.0 min de escenas limpias de 10 s; x4 perfiles = 288 muestras degradadas
+  num_workers: 2
+  overwrite_existing: true
   resume_if_possible: true
   save_scene_manifest: true
   save_render_metadata: true
 
 raven:
-  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Corridor/Corridor_Base.rpf
+  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
 
 render:
   sample_rate_hz: 44100
@@ -36,8 +35,8 @@ background_noise:
     # - type: event_bed
     #   probability: 0.20
     #   audio_dirs:
-    #     - ../../assets/events_split/train/refrigerator_hum/
-    #     - ../../assets/events_split/train/fan_ac/
+    #     - ../../assets/events/val/refrigerator_hum/
+    #     - ../../assets/events/val/fan_ac/
 
 receiver_sampling:
   one_receiver_per_scene: true
@@ -104,9 +103,9 @@ source_sampling:
   timing:
     allow_offsets: true
     start_time_s:
-      min: 0.05
-      max: 7.5
-    total_duration_s: 10
+      min: 0.1
+      max: 5.5
+    total_duration_s: 10.0
   gain_db:
     min: -6.0
     max: 0.0
@@ -121,32 +120,32 @@ source_sampling:
       fixed: 0.0
   source_types:
     - event_type: footsteps
-      role: main
+      role: base
       min_count: 1
       max_count: 2
       probability: 0.85
-      audio_dir: ../../assets/events_split/validation/footsteps/
+      audio_dir: ../../assets/events/val/footsteps/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.1
 
     - event_type: speech
-      role: main
+      role: base
       min_count: 0
       max_count: 2
       probability: 0.65
-      audio_dir: ../../assets/events_split/validation/speech/
+      audio_dir: ../../assets/events/val/speech/
       directivity: ../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.1
 
     - event_type: door_knock
-      role: main
+      role: base
       min_count: 0
       max_count: 1
       probability: 0.60
-      audio_dir: ../../assets/events_split/validation/door_knock/
+      audio_dir: ../../assets/events/val/door_knock/
       spatial_policy:
         type: weighted_targets
         targets:
@@ -156,11 +155,11 @@ source_sampling:
         type: facing_surface_normal
 
     - event_type: door_move_slam
-      role: main
+      role: base
       min_count: 0
       max_count: 1
       probability: 0.55
-      audio_dir: ../../assets/events_split/validation/door_move_slam/
+      audio_dir: ../../assets/events/val/door_move_slam/
       spatial_policy:
         type: weighted_targets
         targets:
@@ -171,51 +170,51 @@ source_sampling:
         type: facing_surface_normal
 
     - event_type: phone_notification_vibration
-      role: secondary
+      role: optional
       min_count: 0
       max_count: 1
       probability: 0.08
-      audio_dir: ../../assets/events_split/validation/phone_notification_vibration/
+      audio_dir: ../../assets/events/val/phone_notification_vibration/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.1
 
     - event_type: dog
-      role: secondary
+      role: optional
       min_count: 0
       max_count: 1
       probability: 0.06
-      audio_dir: ../../assets/events_split/validation/dog/
+      audio_dir: ../../assets/events/val/dog/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.2
 
     - event_type: cat
-      role: secondary
+      role: optional
       min_count: 0
       max_count: 1
       probability: 0.04
-      audio_dir: ../../assets/events_split/validation/cat/
+      audio_dir: ../../assets/events/val/cat/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.2
 
     - event_type: siren
-      role: secondary
+      role: optional
       min_count: 0
       max_count: 1
       probability: 0.05
-      audio_dir: ../../assets/events_split/validation/siren/
+      audio_dir: ../../assets/events/val/siren/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.2
 
     - event_type: object_fall
-      role: secondary
+      role: optional
       min_count: 0
       max_count: 1
       probability: 0.08
-      audio_dir: ../../assets/events_split/validation/object_fall/
+      audio_dir: ../../assets/events/val/object_fall/
       spatial_policy:
         type: random_valid_away_from_receiver
         min_radius_from_receiver_m: 2.2
@@ -231,23 +230,18 @@ outputs:
   artifact_root: ../../outputs/
   run_name: pasillo_small_train_v0
   naming:
-    scene_id_prefix: scene_pasillo_small_train
+    scene_id_prefix: scene_pasillo_small_val
     wav_pattern: "{scene_id}__{output_type}.wav"
     metadata_pattern: "{scene_id}__{output_type}__render.json"
 
 hearing_degradation:
-  enabled: false
+  enabled: true
   input_targets:
     - binaural_hrtf
   hearing_profiles_path: ../hearing/hearing_profiles.yaml
-  selected_profile_ids:
-    - normal_hearing
-    - asymmetric_sloping_loss
-    - symmetric_moderate_loss
-    - mh_user
   runner:
     backend_project_path: ../../apps/clarity-backend
     entrypoint: clarity-backend
-    auto_submit: false
+    auto_submit: true
     use_uv: true
-    force_rerun: false
+    force_rerun: true
