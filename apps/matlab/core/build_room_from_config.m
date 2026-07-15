@@ -4,12 +4,12 @@ function ctx = build_room_from_config(ctx)
 
     rpf.setModelToShoebox(room.dimensions_m(1), room.dimensions_m(2), room.dimensions_m(3));
 
-    surface_order = {'ceiling', 'floor', 'north_wall', 'south_wall', 'east_wall', 'west_wall'};
-    room_material_names = rpf.getRoomMaterialNames;
-
-    if numel(room_material_names) < numel(surface_order)
-        error('RAVEN project does not expose enough room material slots.');
-    end
+    slot_names = {'matShoebox1', 'matShoebox2', 'matShoebox3', ...
+        'matShoebox4', 'matShoebox5', 'matShoebox6'};
+    surface_order = {'floor', 'ceiling', 'south_wall', ...
+        'west_wall', 'north_wall', 'east_wall'};
+    room_material_names = normalize_room_material_names(rpf.getRoomMaterialNames);
+    validate_shoebox_material_slots(room_material_names, slot_names);
 
     applied_room_materials = repmat(struct( ...
         'surface', '', ...
@@ -23,7 +23,7 @@ function ctx = build_room_from_config(ctx)
         surface = surface_order{iSurface};
         material_ref = room.material_files.(surface);
         material = parse_room_material_file(material_ref.material_path);
-        slot_name = room_material_names{iSurface};
+        slot_name = slot_names{iSurface};
 
         rpf.setMaterial(slot_name, material.absorp, material.scatter);
 
@@ -37,4 +37,57 @@ function ctx = build_room_from_config(ctx)
 
     ctx.rpf = rpf;
     ctx.applied_room_materials = applied_room_materials;
+end
+
+function names = normalize_room_material_names(candidate)
+    if isstring(candidate)
+        if any(ismissing(candidate), 'all')
+            error('BinaScape:Matlab:AmbiguousRoomMaterialSlots', ...
+                'RAVEN devolvió nombres de slots vacíos o no definidos.');
+        end
+        names = cellstr(candidate(:));
+    elseif iscell(candidate)
+        names = reshape(candidate, 1, []);
+        for iName = 1:numel(names)
+            if ~(ischar(names{iName}) || (isstring(names{iName}) && isscalar(names{iName})))
+                error('BinaScape:Matlab:AmbiguousRoomMaterialSlots', ...
+                    'RAVEN devolvió un nombre de slot no textual en la posición %d.', iName);
+            end
+            names{iName} = char(string(names{iName}));
+        end
+    else
+        error('BinaScape:Matlab:AmbiguousRoomMaterialSlots', ...
+            'getRoomMaterialNames debe devolver una lista de nombres de slots.');
+    end
+
+    if any(cellfun(@isempty, names))
+        error('BinaScape:Matlab:AmbiguousRoomMaterialSlots', ...
+            'RAVEN devolvió uno o más nombres de slots vacíos.');
+    end
+end
+
+function validate_shoebox_material_slots(actual_names, expected_names)
+    unique_actual_names = unique(actual_names);
+    if numel(unique_actual_names) ~= numel(actual_names)
+        duplicate_names = actual_names;
+        duplicate_names = duplicate_names(arrayfun(@(i) ...
+            sum(strcmp(actual_names{i}, actual_names)) > 1, 1:numel(actual_names)));
+        error('BinaScape:Matlab:DuplicateRoomMaterialSlot', ...
+            'RAVEN devolvió slots de material duplicados: %s.', ...
+            strjoin(unique(duplicate_names), ', '));
+    end
+
+    missing_names = expected_names(~ismember(expected_names, actual_names));
+    if ~isempty(missing_names)
+        error('BinaScape:Matlab:MissingRoomMaterialSlot', ...
+            'Faltan slots canónicos de shoebox RAVEN: %s. Recibidos: %s.', ...
+            strjoin(missing_names, ', '), strjoin(actual_names, ', '));
+    end
+
+    unexpected_names = actual_names(~ismember(actual_names, expected_names));
+    if numel(actual_names) ~= numel(expected_names) || ~isempty(unexpected_names)
+        error('BinaScape:Matlab:AmbiguousRoomMaterialSlots', ...
+            'Contrato de slots shoebox ambiguo. Esperados: %s. Recibidos: %s.', ...
+            strjoin(expected_names, ', '), strjoin(actual_names, ', '));
+    end
 end

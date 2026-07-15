@@ -2,44 +2,95 @@ function tests = test_build_room_from_config
     tests = functiontests(localfunctions);
 end
 
-function testAppliesExplicitRoomMaterialsInRavenOrder(testCase)
+function testMapsCanonicalShoeboxSlotsByIdentityRegardlessOfReturnedOrder(testCase)
+    [room, cleanup] = make_distinct_room_cfg(); %#ok<ASGLU>
     ctx = struct();
-    ctx.manifest = struct('room', make_room_cfg());
-    ctx.rpf = MockRavenProject({'ceiling-slot', 'floor-slot', 'north-slot', 'south-slot', 'east-slot', 'west-slot'});
+    ctx.manifest = struct('room', room);
+    ctx.rpf = MockRavenProject({ ...
+        'matShoebox4', 'matShoebox1', 'matShoebox6', ...
+        'matShoebox2', 'matShoebox5', 'matShoebox3'});
 
     ctx = build_room_from_config(ctx);
 
+    expected_surfaces = {'floor', 'ceiling', 'south_wall', ...
+        'west_wall', 'north_wall', 'east_wall'};
+    expected_slots = {'matShoebox1', 'matShoebox2', 'matShoebox3', ...
+        'matShoebox4', 'matShoebox5', 'matShoebox6'};
+    expected_absorption = [0.5 0.6 0.2 0.4 0.1 0.3];
+
     verifyEqual(testCase, ctx.rpf.shoebox_dims, [4.2 3.6 2.8]);
     verifyEqual(testCase, numel(ctx.rpf.material_calls), 6);
-    verifyEqual(testCase, {ctx.applied_room_materials.surface}, ...
-        {'ceiling', 'floor', 'north_wall', 'south_wall', 'east_wall', 'west_wall'});
-    verifyEqual(testCase, {ctx.rpf.material_calls.slot_name}, ...
-        {'ceiling-slot', 'floor-slot', 'north-slot', 'south-slot', 'east-slot', 'west-slot'});
-    verifyEqual(testCase, ctx.rpf.material_calls(1).absorp, parse_room_material_file(ctx.manifest.room.material_files.ceiling.material_path).absorp);
-    verifyEqual(testCase, ctx.rpf.material_calls(5).scatter, parse_room_material_file(ctx.manifest.room.material_files.east_wall.material_path).scatter);
+    verifyEqual(testCase, {ctx.applied_room_materials.surface}, expected_surfaces);
+    verifyEqual(testCase, {ctx.applied_room_materials.slot_name}, expected_slots);
+    verifyEqual(testCase, {ctx.rpf.material_calls.slot_name}, expected_slots);
+    for iSlot = 1:numel(expected_slots)
+        verifyEqual(testCase, ctx.rpf.material_calls(iSlot).absorp, ...
+            repmat(expected_absorption(iSlot), 1, 31), 'AbsTol', 1e-12);
+    end
 end
 
-function room = make_room_cfg()
-    repo_root = get_repo_root();
+function testRejectsMissingCanonicalShoeboxSlot(testCase)
+    [room, cleanup] = make_distinct_room_cfg(); %#ok<ASGLU>
+    ctx = struct('manifest', struct('room', room), ...
+        'rpf', MockRavenProject({'matShoebox1', 'matShoebox2', 'matShoebox3', ...
+            'matShoebox4', 'matShoebox5'}));
+
+    verifyError(testCase, @() build_room_from_config(ctx), ...
+        'BinaScape:Matlab:MissingRoomMaterialSlot');
+end
+
+function testRejectsDuplicateCanonicalShoeboxSlot(testCase)
+    [room, cleanup] = make_distinct_room_cfg(); %#ok<ASGLU>
+    ctx = struct('manifest', struct('room', room), ...
+        'rpf', MockRavenProject({'matShoebox1', 'matShoebox2', 'matShoebox3', ...
+            'matShoebox4', 'matShoebox5', 'matShoebox5'}));
+
+    verifyError(testCase, @() build_room_from_config(ctx), ...
+        'BinaScape:Matlab:DuplicateRoomMaterialSlot');
+end
+
+function testRejectsAmbiguousShoeboxContractWithExtraSlot(testCase)
+    [room, cleanup] = make_distinct_room_cfg(); %#ok<ASGLU>
+    ctx = struct('manifest', struct('room', room), ...
+        'rpf', MockRavenProject({'matShoebox1', 'matShoebox2', 'matShoebox3', ...
+            'matShoebox4', 'matShoebox5', 'matShoebox6', 'otherMaterial'}));
+
+    verifyError(testCase, @() build_room_from_config(ctx), ...
+        'BinaScape:Matlab:AmbiguousRoomMaterialSlots');
+end
+
+function [room, cleanup] = make_distinct_room_cfg()
+    temp_dir = tempname;
+    mkdir(temp_dir);
+    cleanup = onCleanup(@() rmdir(temp_dir, 's'));
+
+    surface_order = {'north_wall', 'south_wall', 'east_wall', ...
+        'west_wall', 'floor', 'ceiling'};
     room = struct();
     room.dimensions_m = [4.2 3.6 2.8];
-    room.materials = struct( ...
-        'north_wall', 'bricks', ...
-        'south_wall', 'bricks', ...
-        'east_wall', 'glass', ...
-        'west_wall', 'wood', ...
-        'floor', 'wood', ...
-        'ceiling', 'plaster');
-    room.material_files = struct( ...
-        'north_wall', struct('material_id', 'bricks', 'material_path', fullfile(repo_root, 'assets', 'materials', 'bricks', 'Bricks.mat')), ...
-        'south_wall', struct('material_id', 'bricks', 'material_path', fullfile(repo_root, 'assets', 'materials', 'bricks', 'Bricks.mat')), ...
-        'east_wall', struct('material_id', 'glass', 'material_path', fullfile(repo_root, 'assets', 'materials', 'glass', 'glass.mat')), ...
-        'west_wall', struct('material_id', 'wood', 'material_path', fullfile(repo_root, 'assets', 'materials', 'wood', 'Wood.mat')), ...
-        'floor', struct('material_id', 'wood', 'material_path', fullfile(repo_root, 'assets', 'materials', 'wood', 'woodfloor.mat')), ...
-        'ceiling', struct('material_id', 'plaster', 'material_path', fullfile(repo_root, 'assets', 'materials', 'plaster', 'mat_scene10_plaster.mat')));
+    room.materials = struct();
+    room.material_files = struct();
+
+    for iSurface = 1:numel(surface_order)
+        surface = surface_order{iSurface};
+        material_id = sprintf('material_%d', iSurface);
+        material_path = fullfile(temp_dir, [material_id '.mat']);
+        write_material_file(material_path, material_id, 0.1 * iSurface, 0.01 * iSurface);
+        room.materials.(surface) = material_id;
+        room.material_files.(surface) = struct( ...
+            'material_id', material_id, ...
+            'material_path', material_path);
+    end
 end
 
-function repo_root = get_repo_root()
-    test_dir = fileparts(mfilename('fullpath'));
-    repo_root = fileparts(fileparts(fileparts(test_dir)));
+function write_material_file(material_path, material_name, absorption, scattering)
+    absorption_values = strjoin(repmat({sprintf('%.3f', absorption)}, 1, 31), ', ');
+    scattering_values = strjoin(repmat({sprintf('%.3f', scattering)}, 1, 31), ', ');
+    fid = fopen(material_path, 'w');
+    if fid == -1
+        error('No se pudo crear material temporal: %s', material_path);
+    end
+    cleanup = onCleanup(@() fclose(fid)); %#ok<NASGU>
+    fprintf(fid, '[Material]\nname=%s\nabsorp=%s\nscatter=%s\n', ...
+        material_name, absorption_values, scattering_values);
 end

@@ -106,19 +106,27 @@
 
   "reverberation_guard": {
     "method": "sabine",
+    "estimator_version": "sabine_raven_octaves_v2",
     "aggregation": "arithmetic_mean",
+    "target_metric": "raven.mean_t30_s",
+    "band_resolution": "octave",
+    "frequency_mapping": "center_frequency",
     "max_rt30_s": 1.0,
-    "estimated_rt30_s": 0.83,
-    "band_frequencies_hz": [500, 630, 800, 1000, 1250, 1600, 2000],
+    "estimated_rt30_s": 0.78,
+    "band_frequencies_hz": [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
     "rt30_by_band_s": {
-      "500": 0.96,
-      "630": 0.91,
-      "800": 0.86,
-      "1000": 0.82,
-      "1250": 0.79,
-      "1600": 0.76,
-      "2000": 0.71
+      "31.5": 1.02,
+      "63": 0.96,
+      "125": 0.90,
+      "250": 0.85,
+      "500": 0.81,
+      "1000": 0.77,
+      "2000": 0.73,
+      "4000": 0.67,
+      "8000": 0.59,
+      "16000": 0.50
     },
+    "valid_band_count": 10,
     "sampling_attempts": 2
   },
 

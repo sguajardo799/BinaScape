@@ -99,9 +99,14 @@ def test_rt30_guard_accepts_the_inclusive_limit_and_records_diagnostics(
     assert guard["estimated_rt30_s"] == 0.75
     assert guard["sampling_attempts"] == 1
     assert guard["method"] == "sabine"
+    assert guard["estimator_version"] == "sabine_raven_octaves_v2"
     assert guard["aggregation"] == "arithmetic_mean"
+    assert guard["target_metric"] == "raven.mean_t30_s"
+    assert guard["band_resolution"] == "octave"
+    assert guard["frequency_mapping"] == "center_frequency"
     assert guard["max_rt30_s"] == 0.75
-    assert guard["band_frequencies_hz"] == [500, 630, 800, 1000, 1250, 1600, 2000]
+    assert guard["band_frequencies_hz"] == [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    assert guard["valid_band_count"] == 10
 
 
 def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
@@ -113,8 +118,20 @@ def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
     guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
 
     assert guard["estimated_rt30_s"] <= guard["max_rt30_s"]
-    assert set(guard["rt30_by_band_s"]) == {"500", "630", "800", "1000", "1250", "1600", "2000"}
+    assert set(guard["rt30_by_band_s"]) == {
+        "31.5",
+        "63",
+        "125",
+        "250",
+        "500",
+        "1000",
+        "2000",
+        "4000",
+        "8000",
+        "16000",
+    }
     assert all(value > 0 for value in guard["rt30_by_band_s"].values())
+    assert guard["valid_band_count"] == 10
 
 
 def test_rt30_guard_sampling_is_deterministic_for_the_same_seed(tmp_path: Path) -> None:

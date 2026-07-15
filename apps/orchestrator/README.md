@@ -120,13 +120,18 @@ Current material contract in generated manifests:
 Before sampling receivers or sources, the orchestrator applies a room
 reverberation guard. `room_sampling.max_rt30_s` defaults to `1.0` second and
 must be finite and greater than zero. The guard estimates RT30 with Sabine for
-all RAVEN third-octave bands from 500 Hz through 2000 Hz and accepts the room
-when their arithmetic mean is less than or equal to the configured limit. A
-rejected candidate resamples both dimensions and materials, up to
+RAVEN's ten octave center frequencies from 31.5 Hz through 16 kHz. Each octave
+uses the matching center-frequency coefficient from the 31 third-octave values
+in the material file. The room is accepted when the ten-band arithmetic mean is
+less than or equal to the configured limit. A rejected candidate resamples both
+dimensions and materials, up to
 `scene_validation.max_sampling_attempts_per_scene`. Exhausting those attempts
 aborts manifest generation without writing a partial new batch. Accepted
 manifests include an additive top-level `reverberation_guard` diagnostic. This
-is a pre-render estimate, not the T30 result later calculated by RAVEN.
+is a pre-render approximation aligned with the bands used by RAVEN's reported
+mean, not a guarantee of the T30 result later calculated by RAVEN. Use
+`execution.num_workers: 1` for RT30-sensitive runs until concurrent access to
+the shared RAVEN material slots is isolated.
 
 Coordinate note for RAVEN: receiver and source positions are serialized as
 `[x, y, -z]` because the MATLAB/RAVEN side expects that coordinate convention.

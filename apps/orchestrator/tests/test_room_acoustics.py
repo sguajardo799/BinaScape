@@ -1,17 +1,43 @@
 import math
 from pathlib import Path
 
+import pytest
+
 from acoustic_orchestrator.experiment.room_acoustics import (
+    RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ,
+    RAVEN_OCTAVE_CENTER_THIRD_INDEXES,
     RT30_GUARD_FREQUENCIES_HZ,
     SABINE_CONSTANT_M_S,
     estimate_room_rt30_s,
 )
 
 
-def test_estimate_room_rt30_uses_all_raven_bands_from_500_through_2000_hz(tmp_path: Path) -> None:
-    selected_absorptions = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+def test_raven_octave_centers_use_the_center_third_octave_coefficients() -> None:
+    assert RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ == (
+        31.5,
+        63,
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000,
+    )
+    assert RAVEN_OCTAVE_CENTER_THIRD_INDEXES == (2, 5, 8, 11, 14, 17, 20, 23, 26, 29)
+    assert RT30_GUARD_FREQUENCIES_HZ == RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ
+
+
+def test_estimate_room_rt30_uses_all_ten_raven_octave_bands(tmp_path: Path) -> None:
+    selected_absorptions = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     absorption_values = [0.99] * 31
-    absorption_values[14:21] = selected_absorptions
+    for index, absorption in zip(
+        RAVEN_OCTAVE_CENTER_THIRD_INDEXES,
+        selected_absorptions,
+        strict=True,
+    ):
+        absorption_values[index] = absorption
     material_path = tmp_path / "material.mat"
     material_path.write_text(_material_file_text(absorption_values), encoding="utf-8")
     room = {
@@ -82,6 +108,31 @@ def test_estimate_room_rt30_weights_each_surface_with_its_physical_area(tmp_path
         for rt30_s in estimate["rt30_by_band_s"].values()
     )
     assert math.isclose(estimate["estimated_rt30_s"], expected_rt30_s)
+
+
+def test_estimate_room_rt30_rejects_a_non_positive_selected_band(tmp_path: Path) -> None:
+    absorption_values = [0.2] * 31
+    absorption_values[RAVEN_OCTAVE_CENTER_THIRD_INDEXES[-1]] = 0.0
+    material_path = tmp_path / "material.mat"
+    material_path.write_text(_material_file_text(absorption_values), encoding="utf-8")
+
+    room = {
+        "dimensions": {"length": 5.0, "width": 4.0, "height": 3.0},
+        "material_files": {
+            surface_id: {"material_path": material_path}
+            for surface_id in (
+                "north_wall",
+                "south_wall",
+                "east_wall",
+                "west_wall",
+                "floor",
+                "ceiling",
+            )
+        },
+    }
+
+    with pytest.raises(ValueError, match="16000 Hz"):
+        estimate_room_rt30_s(room)
 
 
 def _material_file_text(absorption_values: list[float]) -> str:

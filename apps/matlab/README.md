@@ -88,8 +88,12 @@ The current static manifest contract includes these fields and behaviors:
 - The validator checks consistency between `room.materials.<surface>` and
   `room.material_files.<surface>.material_id`.
 - Material absorption and scattering coefficients are loaded from explicit
-  material files and applied to RAVEN using the wall order `north`, `south`,
-  `east`, `west`.
+  material files and applied by canonical shoebox slot identity, independently
+  of the order returned by RAVEN: `matShoebox1=floor`, `2=ceiling`, `3=south`,
+  `4=west`, `5=north`, and `6=east`.
+- Render metadata reports `t30_s` with the aligned octave centers
+  `[31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]` Hz while preserving
+  `mean_t30_s` as the arithmetic mean of finite positive values.
 
 ## Outputs Per HRTF
 

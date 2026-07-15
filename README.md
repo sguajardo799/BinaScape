@@ -110,9 +110,13 @@ hearing degradation.
 
 Room sampling also supports `room_sampling.max_rt30_s` (default `1.0` second).
 Before any manifest is written, the orchestrator rejects rooms whose
-500-2000 Hz arithmetic-mean Sabine estimate exceeds that limit. Exhausting the
-configured scene sampling attempts aborts the batch; the value is an estimate
-and does not replace RAVEN's rendered T30 calculation.
+arithmetic-mean Sabine estimate over RAVEN's ten octave centers (31.5 Hz through
+16 kHz) exceeds that limit. Each octave uses the corresponding center-frequency
+coefficient from the 31-value material data. Exhausting the configured scene
+sampling attempts aborts the batch; the value is an approximation and does not
+guarantee that RAVEN's rendered T30 will stay below the limit. Until the shared
+RAVEN material-state race is addressed, use `execution.num_workers: 1` for
+RT30-sensitive runs.
 
 ## Output Flow
 

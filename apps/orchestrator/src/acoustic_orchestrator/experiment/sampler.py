@@ -86,7 +86,11 @@ def _sample_room_with_rt30_guard(config: AppConfig, rng: random.Random, scene_in
         if last_estimate_s <= max_rt30_s:
             return room, {
                 "method": "sabine",
+                "estimator_version": "sabine_raven_octaves_v2",
                 "aggregation": "arithmetic_mean",
+                "target_metric": "raven.mean_t30_s",
+                "band_resolution": "octave",
+                "frequency_mapping": "center_frequency",
                 "max_rt30_s": max_rt30_s,
                 "estimated_rt30_s": last_estimate_s,
                 "band_frequencies_hz": list(RT30_GUARD_FREQUENCIES_HZ),
@@ -94,6 +98,7 @@ def _sample_room_with_rt30_guard(config: AppConfig, rng: random.Random, scene_in
                     str(frequency): value
                     for frequency, value in estimate["rt30_by_band_s"].items()
                 },
+                "valid_band_count": len(estimate["rt30_by_band_s"]),
                 "sampling_attempts": attempt,
             }
 

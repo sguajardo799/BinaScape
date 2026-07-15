@@ -38,11 +38,20 @@ RAVEN_THIRD_OCTAVE_FREQUENCIES_HZ = (
     16000,
     20000,
 )
-RT30_GUARD_FREQUENCIES_HZ = tuple(
-    frequency
-    for frequency in RAVEN_THIRD_OCTAVE_FREQUENCIES_HZ
-    if 500 <= frequency <= 2000
+RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ = (
+    31.5,
+    63,
+    125,
+    250,
+    500,
+    1000,
+    2000,
+    4000,
+    8000,
+    16000,
 )
+RAVEN_OCTAVE_CENTER_THIRD_INDEXES = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29)
+RT30_GUARD_FREQUENCIES_HZ = RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ
 
 
 def estimate_room_rt30_s(room: dict) -> dict:
@@ -64,15 +73,12 @@ def estimate_room_rt30_s(room: dict) -> dict:
         surface_id: load_material_absorption_coefficients(Path(material["material_path"]))
         for surface_id, material in room["material_files"].items()
     }
-    selected_band_indexes = [
-        index
-        for index, frequency in enumerate(RAVEN_THIRD_OCTAVE_FREQUENCIES_HZ)
-        if frequency in RT30_GUARD_FREQUENCIES_HZ
-    ]
-
     rt30_by_band_s: dict[int | float, float] = {}
-    for band_index in selected_band_indexes:
-        frequency_hz = RAVEN_THIRD_OCTAVE_FREQUENCIES_HZ[band_index]
+    for frequency_hz, band_index in zip(
+        RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ,
+        RAVEN_OCTAVE_CENTER_THIRD_INDEXES,
+        strict=True,
+    ):
         equivalent_absorption_m2 = sum(
             surface_areas_m2[surface_id] * coefficients[band_index]
             for surface_id, coefficients in absorption_by_surface.items()
@@ -81,7 +87,15 @@ def estimate_room_rt30_s(room: dict) -> dict:
             raise ValueError(
                 f"AbsorciÃ³n equivalente no positiva o no finita para la banda de {frequency_hz} Hz"
             )
-        rt30_by_band_s[frequency_hz] = SABINE_CONSTANT_M_S * volume_m3 / equivalent_absorption_m2
+        rt30_s = SABINE_CONSTANT_M_S * volume_m3 / equivalent_absorption_m2
+        if not math.isfinite(rt30_s) or rt30_s <= 0:
+            raise ValueError(
+                f"RT30 de Sabine no positivo o no finito para la banda de {frequency_hz} Hz"
+            )
+        rt30_by_band_s[frequency_hz] = rt30_s
+
+    if len(rt30_by_band_s) != len(RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ):
+        raise ValueError("La estimación RT30 de Sabine no contiene las 10 bandas de octava RAVEN")
 
     estimated_rt30_s = sum(rt30_by_band_s.values()) / len(rt30_by_band_s)
     if not math.isfinite(estimated_rt30_s):
