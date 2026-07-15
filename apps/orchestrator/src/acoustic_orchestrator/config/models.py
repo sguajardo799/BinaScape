@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -81,11 +81,24 @@ class ReceiverPositionStrategy(StrictConfigModel):
     fixed_height_m: RangeFloat
 
 
-class ReceiverOrientationStrategy(StrictConfigModel):
+class ReceiverRandomYawOrientationStrategy(StrictConfigModel):
+    type: Literal["random_yaw"]
+    yaw_deg: RangeFloat
+    pitch_deg: FixedFloat
+    roll_deg: FixedFloat
+
+
+class ReceiverRandomYawPitchOrientationStrategy(StrictConfigModel):
     type: Literal["random_yaw_pitch"]
     yaw_deg: RangeFloat
     pitch_deg: RangeFloat
     roll_deg: RangeFloat
+
+
+ReceiverOrientationStrategy = Annotated[
+    ReceiverRandomYawOrientationStrategy | ReceiverRandomYawPitchOrientationStrategy,
+    Field(discriminator="type"),
+]
 
 
 class ReceiverSamplingConfig(StrictConfigModel):

@@ -1,8 +1,13 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from acoustic_orchestrator.config.loader import load_config
+from acoustic_orchestrator.config.models import (
+    ReceiverRandomYawOrientationStrategy,
+    ReceiverRandomYawPitchOrientationStrategy,
+)
 from acoustic_orchestrator.config.validator import load_hearing_profile_catalog, validate_config
 
 
@@ -92,6 +97,89 @@ def test_background_noise_defaults_to_disabled_when_omitted(tmp_path: Path) -> N
 
     assert config.background_noise.enabled is False
     assert config.background_noise.strategies == []
+
+
+def test_load_config_accepts_random_yaw_receiver_orientation(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+
+    validate_config(config)
+
+    strategy = config.receiver_sampling.orientation_strategy
+    assert isinstance(strategy, ReceiverRandomYawOrientationStrategy)
+    assert strategy.type == "random_yaw"
+    assert strategy.yaw_deg.min == -180.0
+    assert strategy.yaw_deg.max == 180.0
+    assert strategy.pitch_deg.fixed == 0.0
+    assert strategy.roll_deg.fixed == 0.0
+
+
+def test_load_config_accepts_random_yaw_pitch_receiver_orientation(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _make_receiver_orientation_compatible(config_path)
+
+    config = load_config(config_path)
+    validate_config(config)
+
+    strategy = config.receiver_sampling.orientation_strategy
+    assert isinstance(strategy, ReceiverRandomYawPitchOrientationStrategy)
+    assert strategy.type == "random_yaw_pitch"
+    assert strategy.yaw_deg.min == -180.0
+    assert strategy.yaw_deg.max == 180.0
+    assert strategy.pitch_deg.min == strategy.pitch_deg.max == 0.0
+    assert strategy.roll_deg.min == strategy.roll_deg.max == 0.0
+
+
+def test_load_config_rejects_random_yaw_with_range_pitch(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "    pitch_deg: {fixed: 0.0}\n",
+            "    pitch_deg: {min: 0.0, max: 0.0}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match=r"receiver_sampling\.orientation_strategy\.random_yaw\.pitch_deg"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_random_yaw_pitch_with_fixed_pitch(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _make_receiver_orientation_compatible(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "    pitch_deg: {min: 0.0, max: 0.0}\n",
+            "    pitch_deg: {fixed: 0.0}\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match=r"receiver_sampling\.orientation_strategy\.random_yaw_pitch\.pitch_deg",
+    ):
+        load_config(config_path)
+
+
+def test_validate_config_rejects_reversed_random_yaw_pitch_ranges(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+    strategy = config.receiver_sampling.orientation_strategy
+    assert isinstance(strategy, ReceiverRandomYawPitchOrientationStrategy)
+    strategy.pitch_deg.min = 1.0
+    strategy.pitch_deg.max = -1.0
+    strategy.roll_deg.min = 2.0
+    strategy.roll_deg.max = -2.0
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_config(config)
+
+    message = str(exc_info.value)
+    assert "receiver_sampling.orientation_strategy.pitch_deg.min" in message
+    assert "receiver_sampling.orientation_strategy.roll_deg.min" in message
 
 
 def test_room_sampling_max_rt30_defaults_to_one_second(tmp_path: Path) -> None:

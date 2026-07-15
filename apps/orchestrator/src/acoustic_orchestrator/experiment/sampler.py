@@ -266,6 +266,7 @@ def _select_material_file(materials_root: Path, material_id: str, rng: random.Ra
 def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
     margins = config.receiver_sampling.position_strategy.margin_m
     dimensions = room["dimensions"]
+    orientation_strategy = config.receiver_sampling.orientation_strategy
     position = [
         _uniform(rng, margins.x, dimensions["length"] - margins.x),
         _uniform(
@@ -276,25 +277,33 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
         _uniform(rng, margins.z, dimensions["width"] - margins.z),
     ]
 
+    yaw = _uniform(
+        rng,
+        orientation_strategy.yaw_deg.min,
+        orientation_strategy.yaw_deg.max,
+    )
+    if orientation_strategy.type == "random_yaw":
+        pitch = orientation_strategy.pitch_deg.fixed
+        roll = orientation_strategy.roll_deg.fixed
+    else:
+        pitch = _uniform(
+            rng,
+            orientation_strategy.pitch_deg.min,
+            orientation_strategy.pitch_deg.max,
+        )
+        roll = _uniform(
+            rng,
+            orientation_strategy.roll_deg.min,
+            orientation_strategy.roll_deg.max,
+        )
+
     return {
         "receiver_id": "listener_001",
         "position_m": position,
         "orientation_deg": {
-            "yaw": _uniform(
-                rng,
-                config.receiver_sampling.orientation_strategy.yaw_deg.min,
-                config.receiver_sampling.orientation_strategy.yaw_deg.max,
-            ),
-            "pitch": _uniform(
-                rng,
-                config.receiver_sampling.orientation_strategy.pitch_deg.min,
-                config.receiver_sampling.orientation_strategy.pitch_deg.max,
-            ),
-            "roll": _uniform(
-                rng,
-                config.receiver_sampling.orientation_strategy.roll_deg.min,
-                config.receiver_sampling.orientation_strategy.roll_deg.max,
-            ),
+            "yaw": yaw,
+            "pitch": pitch,
+            "roll": roll,
         },
     }
 

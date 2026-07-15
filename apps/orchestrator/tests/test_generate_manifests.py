@@ -231,11 +231,52 @@ def test_sampler_uses_xyz_position_convention_for_receiver_and_sources(tmp_path:
     source_position = _sample_random_position(room, rng)
 
     assert receiver["position_m"] == [3.8, 1.4, 7.8]
+    assert receiver["orientation_deg"] == {"yaw": 180.0, "pitch": 0.0, "roll": 0.0}
     assert source_position == [3.5, 2.0, 7.5]
     assert receiver["position_m"][1] <= room["dimensions"]["height"]
     assert receiver["position_m"][2] > room["dimensions"]["height"]
     assert source_position[1] <= room["dimensions"]["height"]
     assert source_position[2] > room["dimensions"]["height"]
+
+
+def test_sample_receiver_random_yaw_is_reproducible_and_keeps_pitch_roll_fixed(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "receiver_random_yaw"))
+    strategy = config.receiver_sampling.orientation_strategy
+    strategy.pitch_deg.fixed = 12.5
+    strategy.roll_deg.fixed = -7.5
+    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+
+    first_receiver = _sample_receiver(config, room, random.Random(321))
+    second_receiver = _sample_receiver(config, room, random.Random(321))
+
+    assert first_receiver == second_receiver
+    assert -180.0 <= first_receiver["orientation_deg"]["yaw"] <= 180.0
+    assert first_receiver["orientation_deg"]["pitch"] == 12.5
+    assert first_receiver["orientation_deg"]["roll"] == -7.5
+
+
+def test_sample_receiver_random_yaw_pitch_is_reproducible_and_samples_all_axes(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "receiver_random_yaw_pitch")
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+    strategy = config.receiver_sampling.orientation_strategy
+    strategy.pitch_deg.min = -30.0
+    strategy.pitch_deg.max = 30.0
+    strategy.roll_deg.min = -10.0
+    strategy.roll_deg.max = 10.0
+    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+
+    first_receiver = _sample_receiver(config, room, random.Random(321))
+    second_receiver = _sample_receiver(config, room, random.Random(321))
+    max_receiver = _sample_receiver(config, room, _MaxUniformRng())
+
+    assert first_receiver == second_receiver
+    assert -180.0 <= first_receiver["orientation_deg"]["yaw"] <= 180.0
+    assert -30.0 <= first_receiver["orientation_deg"]["pitch"] <= 30.0
+    assert -10.0 <= first_receiver["orientation_deg"]["roll"] <= 10.0
+    assert max_receiver["orientation_deg"] == {"yaw": 180.0, "pitch": 30.0, "roll": 10.0}
 
 
 def test_background_noise_folder_layers_use_concrete_absolute_paths_and_are_deterministic(tmp_path: Path) -> None:

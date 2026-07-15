@@ -54,7 +54,26 @@ def validate_config(config: AppConfig) -> None:
     _validate_range(errors, "receiver_sampling.position_strategy.fixed_height_m", config.receiver_sampling.position_strategy.fixed_height_m.min, config.receiver_sampling.position_strategy.fixed_height_m.max)
     _validate_range(errors, "source_sampling.timing.start_time_s", config.source_sampling.timing.start_time_s.min, config.source_sampling.timing.start_time_s.max)
     _validate_range(errors, "source_sampling.gain_db", config.source_sampling.gain_db.min, config.source_sampling.gain_db.max)
-    _validate_range(errors, "receiver_sampling.orientation_strategy.yaw_deg", config.receiver_sampling.orientation_strategy.yaw_deg.min, config.receiver_sampling.orientation_strategy.yaw_deg.max)
+    receiver_orientation = config.receiver_sampling.orientation_strategy
+    _validate_range(
+        errors,
+        "receiver_sampling.orientation_strategy.yaw_deg",
+        receiver_orientation.yaw_deg.min,
+        receiver_orientation.yaw_deg.max,
+    )
+    if receiver_orientation.type == "random_yaw_pitch":
+        _validate_range(
+            errors,
+            "receiver_sampling.orientation_strategy.pitch_deg",
+            receiver_orientation.pitch_deg.min,
+            receiver_orientation.pitch_deg.max,
+        )
+        _validate_range(
+            errors,
+            "receiver_sampling.orientation_strategy.roll_deg",
+            receiver_orientation.roll_deg.min,
+            receiver_orientation.roll_deg.max,
+        )
 
     if (
         config.source_sampling.timing.total_duration_s is not None
