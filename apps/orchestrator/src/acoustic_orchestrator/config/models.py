@@ -170,6 +170,9 @@ class SpatialPolicyConfig(StrictConfigModel):
     type: str
     targets: dict[str, float] | None = None
     min_radius_from_receiver_m: float | None = None
+    azimuths_deg: list[float] | None = None
+    elevations_deg: list[float] | None = None
+    distances_m: list[float] | None = None
 
 
 class SourceTypeConfig(StrictConfigModel):

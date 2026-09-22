@@ -42,6 +42,7 @@ codegen/
 /checkpoints/
 /configs/experiments/*
 !/configs/experiments/static_example.yml
+!/configs/experiments/speech_fixed_position_e2e.yml
 *.wav
 *.flac
 *.mp3
