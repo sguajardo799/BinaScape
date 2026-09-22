@@ -330,6 +330,9 @@ def _validate_receiver_output(errors: list[str], output_name: str, output: Recei
     if output.num_channels <= 0:
         errors.append(f"receiver_outputs.{output_name}.num_channels debe ser > 0")
 
+    if output.num_hrtfs <= 0:
+        errors.append(f"receiver_outputs.{output_name}.num_hrtfs debe ser > 0")
+
     if not output.enabled:
         return
 
@@ -339,6 +342,11 @@ def _validate_receiver_output(errors: list[str], output_name: str, output: Recei
         if not matching_files:
             errors.append(
                 f"receiver_outputs.{output_name}.ir_catalog_path no contiene archivos para el patrón {output.file_pattern}"
+            )
+        elif len(matching_files) < output.num_hrtfs:
+            errors.append(
+                f"receiver_outputs.{output_name}.ir_catalog_path contiene {len(matching_files)} archivos, "
+                f"menos que num_hrtfs={output.num_hrtfs}"
             )
 
     if not is_safe_output_subdir(output.output_subdir):

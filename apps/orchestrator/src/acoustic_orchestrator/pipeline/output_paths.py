@@ -77,6 +77,10 @@ def resolve_output_paths(
 
 
 def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverOutputConfig:
+    if "__" in output_type:
+        base_type, suffix = output_type.rsplit("__", 1)
+        if suffix.isdecimal():
+            output_type = base_type
     receiver_output = {
         "binaural_hrtf": config.receiver_outputs.binaural_hrtf,
         "bte_rear_hartf": config.receiver_outputs.bte_rear_hartf,
