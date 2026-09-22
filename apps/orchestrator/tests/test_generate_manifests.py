@@ -21,7 +21,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     generate_static_manifests,
     render_static_scenes,
 )
-from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
+from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
 
 
 def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
@@ -78,6 +78,23 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert Path(manifest["render"]["output_wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "output_audio", "render")
     assert manifest["room"]["material_files"] == json.loads(second_paths[0].read_text(encoding="utf-8"))["room"]["material_files"]
     assert manifest["background_noise"] == {"enabled": False, "layers": []}
+
+
+def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    (workspace / "assets" / "hrtf" / "subject02.daff").write_text("dummy", encoding="utf-8")
+    config = load_config(_write_config(workspace, "multi_hrtf"))
+    config.receiver_outputs.binaural_hrtf.num_hrtfs = 2
+    validate_config(config)
+
+    hrtfs = sampler._sample_hrtfs(config, random.Random(42))
+    binaural = [hrtf for hrtf in hrtfs if hrtf["hrtf_id"].startswith("binaural_hrtf")]
+    assert [hrtf["hrtf_id"] for hrtf in binaural] == ["binaural_hrtf__1", "binaural_hrtf__2"]
+    assert len({hrtf["hrtf_path"] for hrtf in binaural}) == 2
+    assert all(get_receiver_output_config(config, hrtf["hrtf_id"]) is config.receiver_outputs.binaural_hrtf for hrtf in binaural)
+
+    config.receiver_outputs.binaural_hrtf.num_hrtfs = 1
+    assert sampler._sample_hrtfs(config, random.Random(42))[0]["hrtf_id"] == "binaural_hrtf"
 
 
 def test_rt30_guard_accepts_the_inclusive_limit_and_records_diagnostics(

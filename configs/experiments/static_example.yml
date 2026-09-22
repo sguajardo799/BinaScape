@@ -2,7 +2,7 @@ experiment:
   experiment_id: e2e_raven_rt30_binaural_20260921
   description: >
     Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
-    binaural_hrtf, dos fuentes y perfil symmetric_moderate_loss.
+    dos HRTF binaurales por escena, dos fuentes y perfil symmetric_moderate_loss.
     HARTF queda pendiente porque sus catalogos locales estan vacios.
   scene_type: static
   random_seed: 42
@@ -60,6 +60,7 @@ receiver_outputs:
     enabled: true
     ir_catalog_path: ../../assets/hrtf/
     file_pattern: "*.daff"
+    num_hrtfs: 2
     output_subdir: binaural_hrtf
     num_channels: 2
     required: true
@@ -150,7 +151,7 @@ scene_validation:
 
 outputs:
   artifact_root: ../../outputs/
-  run_name: e2e_raven_rt30_binaural_20260921
+  run_name: e2e_raven_rt30_binaural_multi_hrtf_20260922
   # Corrida nueva: no sobrescribir manifiestos ni reutilizar resultados.
 
   naming:

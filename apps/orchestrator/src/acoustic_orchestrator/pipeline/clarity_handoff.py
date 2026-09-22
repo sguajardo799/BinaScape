@@ -292,7 +292,12 @@ def get_clarity_job_issues(
 ) -> list[str]:
     issues: list[str] = []
 
-    if variant_record["output_type"] not in config.hearing_degradation.input_targets:
+    output_type = variant_record["output_type"]
+    if "__" in output_type:
+        base_type, suffix = output_type.rsplit("__", 1)
+        if suffix.isdecimal():
+            output_type = base_type
+    if output_type not in config.hearing_degradation.input_targets:
         issues.append("output_type_not_targeted")
 
     if variant_record["status"] != "completed":

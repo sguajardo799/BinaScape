@@ -317,13 +317,14 @@ def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
     hrtfs: list[dict] = []
     for output_name, output in _enabled_outputs(config).items():
         matches = sorted(output.ir_catalog_path.glob(output.file_pattern))
-        selected = rng.choice(matches)
-        hrtfs.append(
-            {
-                "hrtf_id": output_name,
-                "hrtf_path": selected,
-            }
-        )
+        selected_files = [rng.choice(matches)] if output.num_hrtfs == 1 else rng.sample(matches, output.num_hrtfs)
+        for index, selected in enumerate(selected_files, start=1):
+            hrtfs.append(
+                {
+                    "hrtf_id": output_name if output.num_hrtfs == 1 else f"{output_name}__{index}",
+                    "hrtf_path": selected,
+                }
+            )
     return hrtfs
 
 

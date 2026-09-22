@@ -111,6 +111,7 @@ class ReceiverOutputConfig(StrictConfigModel):
     enabled: bool
     ir_catalog_path: Path
     file_pattern: str
+    num_hrtfs: int = 1
     output_subdir: str
     num_channels: int
     required: bool = False
