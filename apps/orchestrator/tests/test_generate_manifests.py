@@ -31,6 +31,17 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
 
     first_paths = generate_static_manifests(first_config)
     second_paths = generate_static_manifests(second_config)
+    loaded_config = load_config(first_config)
+    layout = resolve_artifact_layout(loaded_config.outputs, "sim_test")
+    assert loaded_config.hearing_degradation.output_dir == layout["degraded_output_root"]
+    assert {path.name for path in layout["run_root"].iterdir()} == {"metadata"}
+    assert not layout["prepared_audio_dir"].exists()
+    assert not layout["runtime_manifest_dir"].exists()
+    assert not layout["render_index_path"].exists()
+    assert not layout["clarity_manifest_dir"].exists()
+    assert not layout["clarity_index_path"].exists()
+    assert not layout["render_outputs_root"].exists()
+    assert not layout["degraded_output_root"].exists()
 
     assert len(first_paths) == 2
     assert len(second_paths) == 2
@@ -64,7 +75,7 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
         "binaural_hrtf",
         "scene_static_0001__binaural_hrtf__render.json",
     )
-    assert Path(manifest["render"]["output_wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "outputs", "render")
+    assert Path(manifest["render"]["output_wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "output_audio", "render")
     assert manifest["room"]["material_files"] == json.loads(second_paths[0].read_text(encoding="utf-8"))["room"]["material_files"]
     assert manifest["background_noise"] == {"enabled": False, "layers": []}
 
@@ -983,6 +994,10 @@ def test_render_static_scenes_invokes_matlab_once_per_scene_hrtf(tmp_path: Path,
     index_path = layout["render_index_path"]
     assert index_path.is_file()
     assert len(index_path.read_text(encoding="utf-8").splitlines()) == 6
+    assert not layout["prepared_audio_dir"].exists()
+    assert not layout["clarity_manifest_dir"].exists()
+    assert not layout["clarity_index_path"].exists()
+    assert not layout["degraded_output_root"].exists()
 
     variant_manifest = json.loads(runtime_manifests[0].read_text(encoding="utf-8"))
     assert len(variant_manifest["receiver"]["hrtfs"]) == 1
@@ -1241,6 +1256,9 @@ def test_render_static_scenes_failure_summary_keeps_failed_variants_visible(
     assert exc_info.value.summary["failed_variants"] == 1
     assert exc_info.value.summary["planned_variants"] == 5
     assert exc_info.value.summary["total_variants"] == 6
+    layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
+    assert not layout["render_outputs_root"].exists()
+    assert not layout["prepared_audio_dir"].exists()
 
 
 def test_render_static_scenes_parallel_prepares_before_fanout_and_parent_indexes(
@@ -1443,7 +1461,7 @@ def test_render_static_cli_reports_summary_when_render_fails(tmp_path: Path, mon
             manifest_paths=[Path("scene_static_0001.json")],
             summary={
                 "render_jobs": 1,
-                "index_path": "artifacts/sim_test/indexes/render_index.jsonl",
+                "index_path": "artifacts/sim_test/metadata/indexes/render_index.jsonl",
                 "total_variants": 3,
                 "completed_variants": 1,
                 "partial_variants": 1,
@@ -1461,7 +1479,7 @@ def test_render_static_cli_reports_summary_when_render_fails(tmp_path: Path, mon
     result = runner.invoke(app, ["render-static", str(config_path)])
 
     assert result.exit_code == 1
-    assert "Índice: artifacts/sim_test/indexes/render_index.jsonl" in result.stdout
+    assert "Índice: artifacts/sim_test/metadata/indexes/render_index.jsonl" in result.stdout
     assert "fallidas=1" in result.stdout
     assert "planificadas=1" in result.stdout
     assert "inconsistencias=1" in result.stdout
@@ -1479,7 +1497,7 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
             RenderSummary(
                 {
                 "render_jobs": 3,
-                "index_path": "artifacts/sim_test/indexes/render_index.jsonl",
+                "index_path": "artifacts/sim_test/metadata/indexes/render_index.jsonl",
                 "total_variants": 3,
                 "completed_variants": 2,
                 "partial_variants": 1,
@@ -1497,7 +1515,7 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
 
     assert result.exit_code == 0
     assert "ejecutados 3 render(s) de MATLAB" in result.stdout
-    assert "Índice: artifacts/sim_test/indexes/render_index.jsonl" in result.stdout
+    assert "Índice: artifacts/sim_test/metadata/indexes/render_index.jsonl" in result.stdout
     assert "completadas=2" in result.stdout
     assert "planificadas=0" in result.stdout
 

@@ -40,8 +40,8 @@ def test_load_run_summarizes_degraded_metadata_without_audio_inspection(sample_r
 
 
 def test_load_run_uses_index_files_when_available(sample_run):
-    (sample_run / "indexes").mkdir()
-    (sample_run / "indexes" / "render_index.jsonl").write_text(
+    (sample_run / "metadata" / "indexes").mkdir()
+    (sample_run / "metadata" / "indexes" / "render_index.jsonl").write_text(
         json.dumps({"scene_id": "scene_static_0001", "status": "completed"}) + "\n",
         encoding="utf-8",
     )

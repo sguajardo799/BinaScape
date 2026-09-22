@@ -133,7 +133,7 @@ Example categories:
 
 ### 4. Hearing-degradation outputs
 When the optional Clarity stage is enabled, the public degraded-output contract is:
-- root: `{artifact_root}/{run_name}/outputs/degraded/`
+- root: `{artifact_root}/{run_name}/output_audio/degraded/`
 - nested directories: `{output_type}/{hearing_profile_id}/`
 - degraded WAV filename: exactly `Path(input_wav_path).name`
 - degraded metadata: sidecar in the same directory, named `{Path(input_wav_path).stem}.json`

@@ -240,7 +240,7 @@ Everything else is secondary until this path is stable.
 ## Hearing degradation output contract
 
 When `hearing_degradation.enabled=true`, keep the public degraded-output contract explicit in docs, examples, and code:
-- default root: `{artifact_root}/{run_name}/outputs/degraded/`
+- default root: `{artifact_root}/{run_name}/output_audio/degraded/`
 - per-profile directories: `{output_type}/{hearing_profile_id}/`
 - degraded WAV filename: preserve the rendered WAV basename exactly
 - degraded metadata: write a sidecar `{render_wav_stem}.json` in the same directory

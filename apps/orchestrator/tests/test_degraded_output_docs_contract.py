@@ -13,7 +13,7 @@ DOC_CONTRACT_FILES = [
 
 def test_degraded_output_docs_and_instructions_stay_aligned() -> None:
     required_markers = [
-        "outputs/degraded",
+        "output_audio/degraded",
         "{output_type}/{hearing_profile_id}",
     ]
     forbidden_legacy_markers = [
@@ -33,7 +33,7 @@ def test_readme_and_agent_guidance_describe_preserved_filenames_and_sidecars() -
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert "outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav" in readme
+    assert "output_audio/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav" in readme
     assert "{render_wav_stem}.json" in readme
     assert "preserve the rendered WAV basename exactly" in agents
     assert "{render_wav_stem}.json" in agents

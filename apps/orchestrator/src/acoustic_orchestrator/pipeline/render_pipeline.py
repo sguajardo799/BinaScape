@@ -25,7 +25,7 @@ from acoustic_orchestrator.pipeline.output_index import (
     summarize_variant_index,
     upsert_variant,
 )
-from acoustic_orchestrator.pipeline.output_paths import ArtifactLayout, get_receiver_output_config, resolve_artifact_layout
+from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
 from acoustic_orchestrator.pipeline.runtime_audio import prepare_scene_source_assets
 
 
@@ -142,8 +142,6 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
 def run_clarity_handoff(config_path: str | Path, *, submit: bool | None = None) -> ClaritySummary:
     config = load_config(config_path)
     validate_config(config)
-    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
-    _ensure_output_directories(config, layout)
     return prepare_clarity_handoff(config, submit=submit)
 
 
@@ -317,7 +315,6 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
         scene_manifest = build_static_manifest(config, sampled_scene, scene_index, manifest_path)
         planned_manifests.append((scene_manifest, manifest_path))
 
-    _ensure_output_directories(config, layout)
     manifest_paths = [
         write_manifest(
             scene_manifest=scene_manifest,
@@ -328,30 +325,6 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
     ]
 
     return config, manifest_paths
-
-
-def _ensure_output_directories(config: AppConfig, layout: ArtifactLayout) -> None:
-    output_dirs = [
-        layout["scene_manifest_dir"],
-        layout["runtime_manifest_dir"],
-        layout["prepared_audio_dir"],
-        layout["clarity_manifest_dir"],
-        layout["render_index_path"].parent,
-        layout["clarity_index_path"].parent,
-        layout["render_outputs_root"],
-        config.hearing_degradation.output_dir or layout["degraded_output_root"],
-    ]
-
-    for receiver_output in [
-        config.receiver_outputs.binaural_hrtf,
-        config.receiver_outputs.bte_rear_hartf,
-        config.receiver_outputs.bte_front_hartf,
-    ]:
-        if receiver_output is not None:
-            output_dirs.append(layout["render_outputs_root"] / receiver_output.output_subdir)
-
-    for output_dir in output_dirs:
-        output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _build_render_summary(

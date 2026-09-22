@@ -32,10 +32,10 @@ def test_resolve_output_paths_applies_templates_and_subdirectories(tmp_path: Pat
     resolved = resolve_output_paths("scene_static_0001", "bte_rear_hartf", outputs, receiver_output, "sim_test")
 
     assert resolved["variant_id"] == "scene_static_0001__bte_rear_hartf"
-    assert layout["scene_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "scene"
-    assert layout["runtime_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "runtime" / "render"
-    assert layout["prepared_audio_dir"] == tmp_path / "artifacts" / "run_a" / "audio" / "prepared"
-    assert layout["render_index_path"] == tmp_path / "artifacts" / "run_a" / "indexes" / "render_index.jsonl"
+    assert layout["scene_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "scene"
+    assert layout["runtime_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "runtime" / "render"
+    assert layout["prepared_audio_dir"] == tmp_path / "artifacts" / "run_a" / "cropped_audio"
+    assert layout["render_index_path"] == tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "render_index.jsonl"
     assert Path(resolved["wav_path"]).parts[-2:] == ("bte_rear_hartf", "scene_static_0001__bte_rear_hartf.wav")
     assert Path(resolved["metadata_path"]).parts[-2:] == (
         "bte_rear_hartf",
@@ -68,7 +68,7 @@ def test_resolve_output_paths_keeps_variant_id_stable_when_public_names_change(t
     assert resolved["variant_id"] == "scene_static_0001__binaural_hrtf"
     assert Path(resolved["wav_path"]).name == "wav-binaural_hrtf-scene_static_0001.wav"
     assert Path(resolved["metadata_path"]).name == "meta-binaural_hrtf-scene_static_0001.json"
-    assert Path(resolved["wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "outputs", "render")
+    assert Path(resolved["wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "output_audio", "render")
 
 
 def test_resolve_artifact_layout_includes_clarity_manifest_and_index_paths(tmp_path: Path) -> None:
@@ -84,15 +84,15 @@ def test_resolve_artifact_layout_includes_clarity_manifest_and_index_paths(tmp_p
 
     layout = resolve_artifact_layout(outputs, "sim_test")
 
-    assert layout["clarity_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "runtime" / "clarity"
+    assert layout["clarity_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "runtime" / "clarity"
     assert layout["clarity_jobs_path"] == layout["clarity_manifest_dir"] / "clarity_jobs.jsonl"
-    assert layout["clarity_index_path"] == tmp_path / "artifacts" / "run_a" / "indexes" / "clarity_index.jsonl"
-    assert layout["degraded_output_root"] == tmp_path / "artifacts" / "run_a" / "outputs" / "degraded"
+    assert layout["clarity_index_path"] == tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "clarity_index.jsonl"
+    assert layout["degraded_output_root"] == tmp_path / "artifacts" / "run_a" / "output_audio" / "degraded"
 
 
 def test_resolve_clarity_job_paths_is_deterministic_per_variant(tmp_path: Path) -> None:
     paths = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
         output_type="binaural_hrtf",
         variant_id="scene_static_0001__binaural_hrtf",
         hearing_profile_id="mild_loss",
@@ -110,14 +110,14 @@ def test_resolve_clarity_job_paths_is_deterministic_per_variant(tmp_path: Path) 
 
 def test_resolve_clarity_job_paths_keeps_multiple_sources_distinct_in_shared_profile_dir(tmp_path: Path) -> None:
     first = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
         output_type="binaural_hrtf",
         variant_id="scene_static_0001__binaural_hrtf",
         hearing_profile_id="mild_loss",
         input_wav_path=tmp_path / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav",
     )
     second = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
         output_type="binaural_hrtf",
         variant_id="scene_static_0002__binaural_hrtf",
         hearing_profile_id="mild_loss",

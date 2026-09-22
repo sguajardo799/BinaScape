@@ -69,8 +69,6 @@ def write_single_hrtf_render_manifest(
             source["audio_path"] = rewritten_path
 
     manifest_path = Path(variant_paths["runtime_manifest_path"])
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(variant_paths["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(variant_manifest, indent=2), encoding="utf-8")
     return manifest_path
 

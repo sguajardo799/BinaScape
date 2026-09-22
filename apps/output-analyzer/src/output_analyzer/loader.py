@@ -26,12 +26,12 @@ def load_run(run_dir: str | Path) -> AnalysisData:
     run_path = Path(run_dir).resolve()
     warnings: list[str] = []
     scene_manifests = _load_scene_manifests(run_path, warnings)
-    render_index = _read_jsonl(run_path / "indexes" / "render_index.jsonl", warnings)
-    clarity_index = _read_jsonl(run_path / "indexes" / "clarity_index.jsonl", warnings)
+    render_index = _read_jsonl(run_path / "metadata" / "indexes" / "render_index.jsonl", warnings)
+    clarity_index = _read_jsonl(run_path / "metadata" / "indexes" / "clarity_index.jsonl", warnings)
 
     render_scenes: list[JsonObject] = []
     render_sources: list[JsonObject] = []
-    for metadata_path in sorted((run_path / "outputs" / "render").glob("**/*__render.json")):
+    for metadata_path in sorted((run_path / "output_audio" / "render").glob("**/*__render.json")):
         metadata = _read_json(metadata_path, warnings)
         if not metadata:
             continue
@@ -42,7 +42,7 @@ def load_run(run_dir: str | Path) -> AnalysisData:
         render_sources.extend(_source_records(scene_record, metadata, manifest))
 
     degraded_records = []
-    for metadata_path in sorted((run_path / "outputs" / "degraded").glob("**/*.json")):
+    for metadata_path in sorted((run_path / "output_audio" / "degraded").glob("**/*.json")):
         metadata = _read_json(metadata_path, warnings)
         if metadata:
             degraded_records.append(_degraded_record(metadata, metadata_path, run_path))
@@ -229,7 +229,7 @@ def _degraded_record(metadata: JsonObject, metadata_path: Path, run_path: Path) 
 
 def _load_scene_manifests(run_path: Path, warnings: list[str]) -> dict[str, JsonObject]:
     manifests = {}
-    for path in sorted((run_path / "manifests" / "scene").glob("*.json")):
+    for path in sorted((run_path / "metadata" / "manifests" / "scene").glob("*.json")):
         data = _read_json(path, warnings)
         scene_id = data.get("scene_id") if data else None
         if scene_id:

@@ -18,11 +18,11 @@ uv run --project apps/output-analyzer output-analyzer analyze outputs/sim_001 --
 
 The analyzer reads these files when present:
 
-- `outputs/render/**/__render.json`
-- `manifests/scene/*.json`
-- `outputs/degraded/**/*.json`
-- `indexes/render_index.jsonl`
-- `indexes/clarity_index.jsonl`
+- `output_audio/render/**/__render.json`
+- `metadata/manifests/scene/*.json`
+- `output_audio/degraded/**/*.json`
+- `metadata/indexes/render_index.jsonl`
+- `metadata/indexes/clarity_index.jsonl`
 
 It does not inspect WAV audio. Degraded outputs are summarized from metadata only.
 

@@ -675,9 +675,9 @@ def _variant_paths(tmp_path: Path) -> RenderVariantPaths:
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
         "output_subdir": "binaural_hrtf",
-        "runtime_manifest_path": str(tmp_path / "artifacts" / "sim_test" / "manifests" / "runtime" / "render" / "scene_static_0001__binaural_hrtf.json"),
-        "rendered_wav_path": str(tmp_path / "artifacts" / "sim_test" / "outputs" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav"),
-        "render_metadata_path": str(tmp_path / "artifacts" / "sim_test" / "outputs" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf__render.json"),
+        "runtime_manifest_path": str(tmp_path / "artifacts" / "sim_test" / "metadata" / "manifests" / "runtime" / "render" / "scene_static_0001__binaural_hrtf.json"),
+        "rendered_wav_path": str(tmp_path / "artifacts" / "sim_test" / "output_audio" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav"),
+        "render_metadata_path": str(tmp_path / "artifacts" / "sim_test" / "output_audio" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf__render.json"),
         "receiver_ir_path": str(tmp_path / "catalog.daff"),
     }
 
