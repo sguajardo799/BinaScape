@@ -10,6 +10,9 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
     meta.scene_type = cfg.scene_type;
     meta.sample_rate_hz = result.fs;
     meta.summary = result.summary;
+    if isfield(meta.summary, 'scene_type')
+        meta.summary = rmfield(meta.summary, 'scene_type');
+    end
 
     if isfield(result, 'hrtf_id')
         meta.hrtf_id = result.hrtf_id;
@@ -29,9 +32,14 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
         meta.output_metadata_path = output_metadata_path;
     end
     if ~isempty(batch_summary)
-        meta.batch = batch_summary;
-    elseif isfield(result, 'summary') && isfield(result.summary, 'batch')
-        meta.batch = result.summary.batch;
+        meta.batch = struct('n_variants', batch_summary.n_variants);
+        if isfield(batch_summary, 'variants')
+            other_variants = batch_summary.variants;
+            other_variants = other_variants(~strcmp({other_variants.hrtf_id}, result.hrtf_id));
+            if ~isempty(other_variants)
+                meta.batch.other_variants = other_variants;
+            end
+        end
     end
 
     txt = jsonencode(meta, 'PrettyPrint', true);

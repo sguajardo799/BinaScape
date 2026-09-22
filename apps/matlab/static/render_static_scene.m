@@ -37,7 +37,8 @@ function result = render_static_scene(cfg)
     result = struct();
     result.fs = fs;
     result.runs = runs;
-    result.summary = build_batch_summary(cfg, runs);
+    result.batch = build_batch_summary(runs);
+    result.summary = result.batch;
 
     if n_runs == 1
         result.audio = runs(1).audio;
@@ -210,18 +211,14 @@ function target_duration_s = get_target_duration_s(manifest)
     end
 end
 
-function batch_summary = build_batch_summary(cfg, runs)
+function batch_summary = build_batch_summary(runs)
     batch_summary = struct();
-    batch_summary.scene_type = 'static';
-    batch_summary.scene_id = cfg.scene_id;
     batch_summary.n_variants = numel(runs);
-    batch_summary.hrtf_ids = {runs.hrtf_id};
-    batch_summary.output_wav_paths = cell(1, numel(runs));
-    batch_summary.output_metadata_paths = cell(1, numel(runs));
+    variants = repmat(struct('hrtf_id', '', 'output_wav_path', '', 'output_metadata_path', ''), 1, numel(runs));
     for i = 1:numel(runs)
-        batch_summary.output_wav_paths{i} = runs(i).output.wav_path;
-        batch_summary.output_metadata_paths{i} = runs(i).output.metadata_path;
+        variants(i).hrtf_id = runs(i).hrtf_id;
+        variants(i).output_wav_path = runs(i).output.wav_path;
+        variants(i).output_metadata_path = runs(i).output.metadata_path;
     end
-    batch_summary.effective_seed = cfg.render.effective_seed;
-    batch_summary.seed_source = cfg.render.seed_source;
+    batch_summary.variants = variants;
 end
