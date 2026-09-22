@@ -15,6 +15,7 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
 
     first_summary = run_clarity_handoff(config_path, submit=False)
     first_manifest_rows = _read_jsonl(layout["clarity_jobs_path"])
+    assert not layout["degraded_output_root"].exists()
 
     Path(first_manifest_rows[0]["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
     Path(first_manifest_rows[0]["expected_output_wav_path"]).write_text("wav", encoding="utf-8")

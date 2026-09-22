@@ -138,7 +138,7 @@ For the supported static workflow, the pipeline is:
    `apps/matlab/run_raven_static_render.m`.
 4. The MATLAB backend renders WAV files and render metadata.
 5. If hearing degradation is enabled, the orchestrator writes
-   `manifests/runtime/clarity/clarity_jobs.jsonl` and an index file.
+   `metadata/manifests/runtime/clarity/clarity_jobs.jsonl` and an index file.
 6. When submitted, `apps/clarity-backend` writes degraded WAV files and sidecar
    metadata to the explicit paths reserved by the orchestrator.
 

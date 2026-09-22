@@ -244,10 +244,10 @@ hearing_degradation:
     # - bte_front_hartf
   hearing_profiles_path: ../../../configs/hearing/hearing_profiles.yaml
   # output_dir es opcional. Si se omite, se reserva
-  # {artifact_root}/{run_name}/outputs/degraded para la etapa de degradación.
+  # {artifact_root}/{run_name}/output_audio/degraded para la etapa de degradación.
   # Luego el backend escribe {output_type}/{hearing_profile_id}/{render_wav_name}
   # y el sidecar {render_wav_stem}.json en ese mismo directorio.
-  # output_dir: ../../../outputs/artifacts/sim_001/outputs/degraded
+  # output_dir: ../../../outputs/artifacts/sim_001/output_audio/degraded
   runner:
     # Nuevo backend hermano. Cuando auto_submit=false, el orquestador
     # solo prepara manifests/indexes y no invoca el backend.

@@ -108,7 +108,12 @@ This command:
 2. Resolves relative paths from the config file location.
 3. Samples static scenes according to `execution.num_simulations`.
 4. Writes one scene manifest per generated scene under
-   `{outputs.artifact_root}/{run_name}/manifests/scene/`.
+   `{outputs.artifact_root}/{run_name}/metadata/manifests/scene/`.
+
+Run artifacts are grouped under `metadata/manifests/`, `metadata/indexes/`,
+and `output_audio/`. The optional `cropped_audio/` directory is created only when
+source audio must be trimmed. Output directories are created when a stage writes
+files, so a manifest-only run does not create empty render or Clarity directories.
 
 Current material contract in generated manifests:
 
@@ -203,18 +208,18 @@ uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs
 
 Expected artifacts:
 
-- `manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
+- `metadata/manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
   variant, including `run_id` and `backend_invocation`.
-- `indexes/clarity_index.jsonl`: status tracking for planned, submitted,
+- `metadata/indexes/clarity_index.jsonl`: status tracking for planned, submitted,
   completed, partial, failed, blocked, or skipped jobs.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
+- `output_audio/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
   degraded output from the backend.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
+- `output_audio/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
   metadata sidecar next to the degraded WAV.
 
 Current degradation output contract:
 
-- The default root is `{artifact_root}/{run_name}/outputs/degraded/`.
+- The default root is `{artifact_root}/{run_name}/output_audio/degraded/`.
 - Subdirectories are `{output_type}/{hearing_profile_id}/`.
 - `expected_output_wav_path` and `expected_output_metadata_path` in each JSONL
   job are authoritative for the backend.

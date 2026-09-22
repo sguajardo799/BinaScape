@@ -42,7 +42,7 @@ uv run --project apps/clarity-backend clarity-backend --help
 ## Relationship With The Pipeline
 
 - `apps/orchestrator` decides which Clarity jobs exist and writes
-  `manifests/runtime/clarity/clarity_jobs.jsonl`.
+  `metadata/manifests/runtime/clarity/clarity_jobs.jsonl`.
 - `apps/matlab` produces upstream rendered WAV files and render metadata.
 - `apps/clarity-backend` reads the explicit paths in each job, writes degraded
   audio and metadata, and exits with status `1` if any job fails.
@@ -56,7 +56,7 @@ uv run --project apps/clarity-backend clarity-backend run-manifest path/to/clari
 When called from `apps/orchestrator`, the sibling invocation is typically:
 
 ```sh
-uv run --project ../clarity-backend clarity-backend run-manifest .\manifests\runtime\clarity\clarity_jobs.jsonl
+uv run --project ../clarity-backend clarity-backend run-manifest .\metadata\manifests\runtime\clarity\clarity_jobs.jsonl
 ```
 
 ## CLI
@@ -101,7 +101,7 @@ by the orchestrator tests, including:
   },
   "input_wav_path": ".../scene_static_0001__binaural_hrtf.wav",
   "input_render_metadata_path": ".../scene_static_0001__binaural_hrtf__render.json",
-  "output_dir": ".../outputs/degraded/binaural_hrtf/mild_loss",
+  "output_dir": ".../output_audio/degraded/binaural_hrtf/mild_loss",
   "expected_output_wav_path": ".../scene_static_0001__binaural_hrtf.wav",
   "expected_output_metadata_path": ".../scene_static_0001__binaural_hrtf.json"
 }

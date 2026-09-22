@@ -40,15 +40,15 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
     run_root = (outputs.artifact_root / run_name).resolve()
     return {
         "run_root": run_root,
-        "scene_manifest_dir": run_root / "manifests" / "scene",
-        "runtime_manifest_dir": run_root / "manifests" / "runtime" / "render",
-        "prepared_audio_dir": run_root / "audio" / "prepared",
-        "clarity_manifest_dir": run_root / "manifests" / "runtime" / "clarity",
-        "clarity_jobs_path": run_root / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
-        "render_index_path": run_root / "indexes" / "render_index.jsonl",
-        "clarity_index_path": run_root / "indexes" / "clarity_index.jsonl",
-        "render_outputs_root": run_root / "outputs" / "render",
-        "degraded_output_root": run_root / "outputs" / "degraded",
+        "scene_manifest_dir": run_root / "metadata" / "manifests" / "scene",
+        "runtime_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "render",
+        "prepared_audio_dir": run_root / "cropped_audio",
+        "clarity_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "clarity",
+        "clarity_jobs_path": run_root / "metadata" / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
+        "render_index_path": run_root / "metadata" / "indexes" / "render_index.jsonl",
+        "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
+        "render_outputs_root": run_root / "output_audio" / "render",
+        "degraded_output_root": run_root / "output_audio" / "degraded",
     }
 
 

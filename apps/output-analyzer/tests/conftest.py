@@ -8,9 +8,9 @@ import pytest
 @pytest.fixture
 def sample_run(tmp_path):
     run = tmp_path / "sim_test"
-    render_dir = run / "outputs" / "render" / "binaural_hrtf"
-    scene_dir = run / "manifests" / "scene"
-    degraded_dir = run / "outputs" / "degraded" / "binaural_hrtf" / "mild_loss"
+    render_dir = run / "output_audio" / "render" / "binaural_hrtf"
+    scene_dir = run / "metadata" / "manifests" / "scene"
+    degraded_dir = run / "output_audio" / "degraded" / "binaural_hrtf" / "mild_loss"
     render_dir.mkdir(parents=True)
     scene_dir.mkdir(parents=True)
     degraded_dir.mkdir(parents=True)
@@ -52,7 +52,7 @@ def sample_run(tmp_path):
         "sample_rate_hz": 44100,
         "hrtf_id": "binaural_hrtf",
         "hrtf_path": "D:/assets/hrtf/id25_HRTF.v17.ir.daff",
-        "output_wav_path": "D:/outputs/sim_test/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
+        "output_wav_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
         "summary": {
             "n_sources": 2,
             "room": {"reverberation": {"mean_t30_s": 0.42}},
@@ -67,9 +67,9 @@ def sample_run(tmp_path):
         "output_type": "binaural_hrtf",
         "hearing_profile_id": "mild_loss",
         "status": "completed",
-        "input_render_metadata_path": "D:/outputs/sim_test/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json",
-        "input_wav_path": "D:/outputs/sim_test/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
-        "output_wav_path": "D:/outputs/sim_test/outputs/degraded/binaural_hrtf/mild_loss/scene_static_0001__binaural_hrtf.wav",
+        "input_render_metadata_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json",
+        "input_wav_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
+        "output_wav_path": "D:/outputs/sim_test/output_audio/degraded/binaural_hrtf/mild_loss/scene_static_0001__binaural_hrtf.wav",
         "processor": {"name": "msbg", "package": "pyclarity", "package_version": "0.8.0", "sample_rate_hz": 44100, "channels": 2},
         "degradation_applied": {
             "left": {"loss_db_by_band": {"250": 10.0, "500": 15.0, "1000": 20.0}},

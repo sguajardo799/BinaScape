@@ -53,7 +53,7 @@ def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
         config.hearing_degradation.output_dir = (
             config.outputs.artifact_root
             / config.outputs.run_name
-            / "outputs"
+            / "output_audio"
             / "degraded"
         ).resolve()
     else:
