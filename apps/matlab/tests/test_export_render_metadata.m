@@ -35,7 +35,9 @@ function testWritesCompactMetadataWithoutLegacyOutputCounters(testCase)
         'output_num_samples', 32, ...
         'output_num_channels', 2);
 
-    batch = struct('n_variants', 1, 'scene_type', 'static');
+    batch = struct('n_variants', 1, 'variants', struct( ...
+        'hrtf_id', 'subject-a', 'output_wav_path', 'out.wav', ...
+        'output_metadata_path', 'meta.json'));
     output_path = [tempname '.json'];
     cleanup = onCleanup(@() delete_if_exists(output_path)); %#ok<NASGU>
 
@@ -43,6 +45,9 @@ function testWritesCompactMetadataWithoutLegacyOutputCounters(testCase)
     meta = jsondecode(fileread(output_path));
 
     verifyEqual(testCase, meta.scene_id, 'scene_static_0001');
+    verifyEqual(testCase, meta.scene_type, 'static');
+    verifyFalse(testCase, isfield(meta.summary, 'scene_type'));
+    verifyEqual(testCase, meta.summary.render_backend, 'RAVEN + ITA');
     verifyEqual(testCase, meta.summary.sources.source_end_time_s, 1.0);
     verifyEqual(testCase, meta.summary.room.reverberation.mean_t30_s, 1.15, 'AbsTol', 1e-12);
     verifyEqual(testCase, transpose(meta.summary.room.reverberation.t30_s), ...
@@ -53,8 +58,37 @@ function testWritesCompactMetadataWithoutLegacyOutputCounters(testCase)
     verifyEqual(testCase, meta.summary.room.reverberation.frequency_mapping, 'center_frequency');
     verifyEqual(testCase, meta.summary.room.reverberation.valid_band_count, 10);
     verifyTrue(testCase, isfield(meta, 'batch'));
+    verifyEqual(testCase, meta.batch.n_variants, 1);
+    verifyFalse(testCase, isfield(meta.batch, 'other_variants'));
+    verifyFalse(testCase, isfield(meta.batch, 'scene_type'));
     verifyFalse(testCase, isfield(meta, 'output_num_samples'));
     verifyFalse(testCase, isfield(meta, 'output_num_channels'));
+end
+
+function testBatchOnlyListsOtherVariants(testCase)
+    cfg = struct('schema_version', '1.0', 'scene_id', 'scene_static_0001', ...
+        'job_id', 'job_001', 'scene_type', 'static', ...
+        'render', struct('effective_seed', 123, 'seed_source', 'render.seed'));
+    result = struct('fs', 44100, 'hrtf_id', 'subject-a', 'hrtf_path', 'a.daff', ...
+        'output', struct('wav_path', 'a.wav', 'metadata_path', 'a.json', 'project_name', 'project-a'), ...
+        'summary', struct('scene_type', 'static', 'n_sources', 2));
+    variants(1) = struct('hrtf_id', 'subject-a', 'output_wav_path', 'a.wav', 'output_metadata_path', 'a.json');
+    variants(2) = struct('hrtf_id', 'subject-b', 'output_wav_path', 'b.wav', 'output_metadata_path', 'b.json');
+    batch = struct('n_variants', 2, 'variants', variants);
+    output_path = [tempname '.json'];
+    cleanup = onCleanup(@() delete_if_exists(output_path)); %#ok<NASGU>
+
+    export_render_metadata(cfg, result, output_path, batch);
+    meta = jsondecode(fileread(output_path));
+
+    verifyEqual(testCase, meta.hrtf_id, 'subject-a');
+    verifyEqual(testCase, meta.output_wav_path, 'a.wav');
+    verifyEqual(testCase, meta.batch.n_variants, 2);
+    verifyEqual(testCase, meta.batch.other_variants.hrtf_id, 'subject-b');
+    verifyEqual(testCase, meta.batch.other_variants.output_wav_path, 'b.wav');
+    verifyEqual(testCase, meta.batch.other_variants.output_metadata_path, 'b.json');
+    verifyFalse(testCase, isfield(meta.batch, 'scene_id'));
+    verifyFalse(testCase, isfield(meta.batch, 'effective_seed'));
 end
 
 function delete_if_exists(path_value)

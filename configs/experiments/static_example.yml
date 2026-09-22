@@ -1,5 +1,5 @@
 experiment:
-  experiment_id: e2e_raven_rt30_binaural_20260921
+  experiment_id: e2e_raven_rt30_binaural_20260922
   description: >
     Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
     dos HRTF binaurales por escena, dos fuentes y perfil symmetric_moderate_loss.
@@ -8,7 +8,7 @@ experiment:
   random_seed: 42
 
 execution:
-  num_simulations: 2
+  num_simulations: 4
   num_workers: 1
   overwrite_existing: false
   resume_if_possible: false
@@ -103,7 +103,7 @@ room_sampling:
 
 source_sampling:
   min_sources: 2
-  max_sources: 2
+  max_sources: 5
   timing:
     allow_offsets: true
     start_time_s:
@@ -135,12 +135,44 @@ source_sampling:
 
     - event_type: keyboard_typing
       role: base
-      min_count: 1
-      max_count: 1
-      probability: 1.0
+      min_count: 0
+      max_count: 2
+      probability: 0.5
       audio_dir: ../../assets/events/train/keyboard_typing/
       spatial_policy:
         type: random_valid
+
+    - event_type: cough
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.15
+      audio_dir: ../../assets/events/train/cough/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.5
+
+    - event_type: sneeze
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.15
+      audio_dir: ../../assets/events/train/sneeze/
+      spatial_policy:
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.5
+
+    - event_type: clock_alarm
+      role: optional
+      min_count: 0
+      max_count: 1
+      probability: 0.3
+      audio_dir: ../../assets/events/train/clock_alarm/
+      spatial_policy:
+        type: weighted_targets
+        targets:
+          wall: 0.90
+          random_valid: 0.10
 
 scene_validation:
   min_distance_source_to_receiver_m: 0.5
@@ -151,7 +183,7 @@ scene_validation:
 
 outputs:
   artifact_root: ../../outputs/
-  run_name: e2e_raven_rt30_binaural_multi_hrtf_20260922
+  run_name: e2e_raven_rt30_binaural_20260922
   # Corrida nueva: no sobrescribir manifiestos ni reutilizar resultados.
 
   naming:

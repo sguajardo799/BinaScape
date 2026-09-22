@@ -105,6 +105,12 @@ The current static manifest contract includes these fields and behaviors:
 - Multi-HRTF output filenames receive a safe `__<hrtf_id>` suffix before the
   file extension.
 - Each HRTF variant writes its own WAV file and metadata JSON.
+- Each JSON keeps scene and output identifiers at the top level. `summary`
+  contains the simulation results for that variant, such as source details and
+  room reverberation. `batch` contains `n_variants` and, when applicable,
+  `other_variants` with the HRTF ID and output paths of each sibling variant.
+  The current variant is identified by the top-level fields and is not repeated
+  in `batch`.
 - `render.trim_reverb_tail` is optional and defaults to `false`. When `true`,
   each rendered source is trimmed before mixing.
 

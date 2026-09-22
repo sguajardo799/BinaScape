@@ -19,7 +19,7 @@ function run_raven_static_render(config_path)
         for i = 1:numel(result.runs)
             run_result = result.runs(i);
             write_output_wav(run_result.audio, run_result.fs, cfg.render.outputs(i).wav_path);
-            export_render_metadata(cfg, run_result, cfg.render.outputs(i).metadata_path, result.summary);
+            export_render_metadata(cfg, run_result, cfg.render.outputs(i).metadata_path, result.batch);
             fprintf('[INFO] Variant %s written to %s\n', run_result.hrtf_id, cfg.render.outputs(i).wav_path);
         end
 
