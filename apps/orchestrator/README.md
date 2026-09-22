@@ -263,6 +263,58 @@ Key modules:
 - `pipeline/output_paths.py`: output path reservation.
 - `pipeline/runtime_audio.py`: runtime audio preparation.
 
+## Fixed source positions
+
+`fixed_position` places a required source type at receiver-relative points
+defined by the Cartesian product of three non-empty lists:
+
+```yaml
+source_sampling:
+  min_sources: 1
+  max_sources: 1
+  source_types:
+    - event_type: speech
+      role: base
+      min_count: 1
+      max_count: 1
+      probability: 1.0
+      audio_dir: ../../../assets/events/speech/
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 0, 90]
+        elevations_deg: [0, 15]
+        distances_m: [1.0]
+```
+
+The example defines six cases. `execution.num_simulations` must be at least
+the largest case count of any configured `fixed_position` policy. For each
+policy, every block of six scenes uses a seed-reproducible shuffle and covers
+each case exactly once. A final partial block uses the prefix of a fresh
+shuffle. The scheduled case is preferred. If scheduled cases from simultaneous
+`fixed_position` policies conflict, the sampler tries deterministic local
+alternatives; this exceptional substitution can reduce that block's coverage.
+WAV selection remains independent and may reuse the same file.
+
+Angles follow MATLAB/RAVEN: at receiver yaw/pitch zero, azimuth/elevation zero
+points along `+X`; positive azimuth rotates toward RAVEN `+Z`; positive
+elevation rotates toward `+Y`. Azimuth is added to receiver yaw, elevation is
+added to receiver pitch, and receiver roll is ignored. The orchestrator stores
+canonical coordinates, so its runtime adapter negates Z before MATLAB receives
+the manifest.
+
+List values must be finite and unique. Azimuth is limited to `[-180, 180]`,
+elevation to `[-90, 90]`, and distance must be greater than zero. A fixed
+source type must have `min_count >= 1`. Multiple fixed sources in one scene use
+distinct points; the sampler searches alternate assignments when necessary to
+meet source-to-source separation. It aborts if there are too few unique points
+or no valid assignment.
+
+Assigned fixed points always enforce room bounds, the 0.5 m wall clearance,
+the configured receiver clearance, and source separation, including when
+`require_sources_inside_room` is false. An assigned point that violates a room,
+wall, or receiver constraint aborts the experiment instead of being resampled.
+Monophonic scenes are supported with `source_sampling.min_sources: 1`.
+
 ## Development
 
 Run tests:

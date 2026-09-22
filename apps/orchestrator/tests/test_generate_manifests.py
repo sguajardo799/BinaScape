@@ -14,7 +14,11 @@ from acoustic_orchestrator.cli import app
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
 from acoustic_orchestrator.experiment.sampler import _sample_random_position, _sample_receiver
-from acoustic_orchestrator.pipeline.matlab_runner import build_raven_project_name, build_render_variant_paths
+from acoustic_orchestrator.pipeline.matlab_runner import (
+    _flip_manifest_z_axis_for_raven,
+    build_raven_project_name,
+    build_render_variant_paths,
+)
 from acoustic_orchestrator.pipeline.render_pipeline import (
     RenderStaticRunError,
     RenderSummary,
@@ -469,6 +473,328 @@ def test_generate_static_manifests_places_away_policy_sources_at_configured_rece
     speech_sources = [source for source in manifest["sources"] if source["event_type"] == "speech"]
     assert speech_sources
     assert all(math.dist(source["position_m"], receiver_position) >= 1.0 for source in speech_sources)
+
+
+def test_fixed_position_uses_matlab_angles_and_runtime_z_conversion() -> None:
+    receiver = {
+        "position_m": [2.0, 1.0, 3.0],
+        "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 73.0},
+    }
+
+    forward = sampler._fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 1.0))
+    positive_azimuth = sampler._fixed_position_relative_to_receiver(receiver, (90.0, 0.0, 1.0))
+    positive_elevation = sampler._fixed_position_relative_to_receiver(receiver, (0.0, 90.0, 1.0))
+
+    assert forward == pytest.approx([3.0, 1.0, 3.0])
+    assert positive_azimuth == pytest.approx([2.0, 1.0, 2.0])
+    assert positive_elevation == pytest.approx([2.0, 2.0, 3.0])
+
+    runtime_manifest = {
+        "receiver": {"position_m": receiver["position_m"]},
+        "sources": [{"position_m": positive_azimuth}],
+    }
+    _flip_manifest_z_axis_for_raven(runtime_manifest)
+    assert runtime_manifest["sources"][0]["position_m"][2] - runtime_manifest["receiver"]["position_m"][2] == pytest.approx(1.0)
+
+
+def test_fixed_position_adds_angles_to_receiver_yaw_and_pitch() -> None:
+    receiver = {
+        "position_m": [0.0, 0.0, 0.0],
+        "orientation_deg": {"yaw": 10.0, "pitch": 5.0, "roll": -45.0},
+    }
+
+    position = sampler._fixed_position_relative_to_receiver(receiver, (20.0, 10.0, 2.0))
+
+    expected_pitch = math.radians(15.0)
+    expected_yaw = math.radians(30.0)
+    assert position == pytest.approx([
+        2.0 * math.cos(expected_pitch) * math.cos(expected_yaw),
+        2.0 * math.sin(expected_pitch),
+        -2.0 * math.cos(expected_pitch) * math.sin(expected_yaw),
+    ])
+
+
+def test_generate_static_manifests_covers_fixed_product_once_per_seeded_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path, speech_wav_names=["only.wav"])
+    config_path = _write_config(
+        workspace,
+        "fixed_blocks",
+        num_simulations=10,
+        min_sources=1,
+        max_sources=1,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_max_count=0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 0, 90]
+        elevations_deg: [0, 15]
+        distances_m: [0.75]
+""".rstrip())
+    receiver = {
+        "receiver_id": "listener_001",
+        "position_m": [2.0, 1.3, 1.5],
+        "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    }
+    monkeypatch.setattr(sampler, "_sample_receiver", lambda config, room, rng: receiver)
+
+    first_paths = generate_static_manifests(config_path)
+    manifests = [json.loads(path.read_text(encoding="utf-8")) for path in first_paths]
+    positions = [tuple(manifest["sources"][0]["position_m"]) for manifest in manifests]
+    expected = {
+        tuple(sampler._fixed_position_relative_to_receiver(receiver, case))
+        for case in sampler._fixed_position_cases(load_config(config_path).source_sampling.source_types[0])
+    }
+
+    assert len(manifests) == 10
+    assert set(positions[:6]) == expected
+    assert len(set(positions[:6])) == 6
+    assert len(set(positions[6:])) == 4
+    assert all(Path(manifest["sources"][0]["audio_path"]).name == "only.wav" for manifest in manifests)
+
+    second_workspace = _build_workspace(tmp_path / "second", speech_wav_names=["only.wav"])
+    second_config = _write_config(
+        second_workspace,
+        "fixed_blocks",
+        num_simulations=10,
+        min_sources=1,
+        max_sources=1,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_max_count=0,
+    )
+    _replace_speech_spatial_policy(second_config, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 0, 90]
+        elevations_deg: [0, 15]
+        distances_m: [0.75]
+""".rstrip())
+    monkeypatch.setattr(sampler, "_sample_receiver", lambda config, room, rng: receiver)
+    second_manifests = [json.loads(path.read_text(encoding="utf-8")) for path in generate_static_manifests(second_config)]
+    assert [manifest["sources"][0]["position_m"] for manifest in second_manifests] == [
+        manifest["sources"][0]["position_m"] for manifest in manifests
+    ]
+
+
+def test_fixed_position_multiple_sources_searches_distinct_separated_points(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "fixed_multiple",
+        num_simulations=3,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=2,
+        speech_max_count=2,
+        clapping_max_count=0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0, 5, 90]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip())
+    config = load_config(config_path)
+    config.scene_validation.min_distance_between_sources_m = 0.5
+    source_type = config.source_sampling.source_types[0]
+    receiver = {
+        "position_m": [2.0, 1.3, 1.5],
+        "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    }
+    room = {"dimensions": {"length": 5.0, "height": 3.0, "width": 5.0}}
+
+    for scene_index in range(3):
+        planned = [sampler.PlannedSource(source_type, True), sampler.PlannedSource(source_type, True)]
+        assigned = sampler._assign_fixed_positions(config, planned, room, receiver, scene_index)["speech"]
+        scheduled_case = sampler._scheduled_fixed_case(
+            config,
+            "speech",
+            sampler._fixed_position_cases(source_type),
+            scene_index,
+        )
+        scheduled_position = sampler._fixed_position_relative_to_receiver(receiver, scheduled_case)
+        assert any(position == pytest.approx(scheduled_position) for position in assigned)
+        assert math.dist(*assigned) >= 0.5
+        assert assigned[0] != pytest.approx(assigned[1])
+
+
+def test_multiple_fixed_policies_cover_their_products_independently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "fixed_parallel",
+        num_simulations=4,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_min_count=1,
+        clapping_max_count=1,
+        clapping_probability=1.0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 90]
+        elevations_deg: [0, 15]
+        distances_m: [0.75]
+""".rstrip())
+    _replace_clapping_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0, 180]
+        elevations_deg: [0]
+        distances_m: [0.75]
+""".rstrip())
+    receiver = {
+        "receiver_id": "listener_001",
+        "position_m": [2.0, 1.3, 1.5],
+        "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    }
+    monkeypatch.setattr(sampler, "_sample_receiver", lambda config, room, rng: receiver)
+
+    manifests = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in generate_static_manifests(config_path)
+    ]
+    positions_by_event = {
+        event_type: [
+            tuple(next(source["position_m"] for source in manifest["sources"] if source["event_type"] == event_type))
+            for manifest in manifests
+        ]
+        for event_type in ("speech", "clapping")
+    }
+
+    assert len(set(positions_by_event["speech"])) == 4
+    assert len(set(positions_by_event["clapping"][:2])) == 2
+    assert len(set(positions_by_event["clapping"][2:])) == 2
+
+
+def test_fixed_policies_try_local_alternative_when_scheduled_points_collide(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "fixed_scheduled_collision",
+        num_simulations=2,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_min_count=1,
+        clapping_max_count=1,
+        clapping_probability=1.0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip())
+    _replace_clapping_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0, 90]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip())
+    config = load_config(config_path)
+    speech, clapping = config.source_sampling.source_types
+    clapping_cases = sampler._fixed_position_cases(clapping)
+    colliding_scene = next(
+        scene_index
+        for scene_index in range(len(clapping_cases))
+        if sampler._scheduled_fixed_case(config, "clapping", clapping_cases, scene_index) == (0.0, 0.0, 1.0)
+    )
+    receiver = {
+        "position_m": [2.0, 1.3, 1.5],
+        "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+    }
+    room = {"dimensions": {"length": 5.0, "height": 3.0, "width": 5.0}}
+    planned = [sampler.PlannedSource(speech, True), sampler.PlannedSource(clapping, True)]
+
+    assigned = sampler._assign_fixed_positions(config, planned, room, receiver, colliding_scene)
+
+    scheduled_position = sampler._fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 1.0))
+    alternative_position = sampler._fixed_position_relative_to_receiver(receiver, (90.0, 0.0, 1.0))
+    assert assigned["speech"][0] == pytest.approx(scheduled_position)
+    assert assigned["clapping"][0] == pytest.approx(alternative_position)
+    assert math.dist(assigned["speech"][0], assigned["clapping"][0]) >= config.scene_validation.min_distance_between_sources_m
+
+
+def test_fixed_position_aborts_when_scene_requests_more_sources_than_points(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "fixed_capacity",
+        num_simulations=2,
+        min_sources=3,
+        max_sources=3,
+        speech_min_count=3,
+        speech_max_count=3,
+        clapping_max_count=0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0, 90]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip())
+
+    with pytest.raises(RuntimeError, match="requiere 3 fuentes fixed_position.*solo hay 2 puntos únicos"):
+        generate_static_manifests(config_path)
+
+
+def test_fixed_position_aborts_when_assigned_point_violates_wall_margin_even_if_inside_not_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "fixed_invalid",
+        num_simulations=1,
+        min_sources=1,
+        max_sources=1,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_max_count=0,
+    )
+    _replace_speech_spatial_policy(config_path, """
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip())
+    text = config_path.read_text(encoding="utf-8").replace(
+        "  require_sources_inside_room: true",
+        "  require_sources_inside_room: false",
+    )
+    config_path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(
+        sampler,
+        "_sample_receiver",
+        lambda config, room, rng: {
+            "receiver_id": "listener_001",
+            "position_m": [3.8, 1.3, 1.5],
+            "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="fixed_position asignado"):
+        generate_static_manifests(config_path)
 
 
 def test_generate_static_manifests_uses_farthest_corner_fallback_for_away_policy(

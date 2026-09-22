@@ -1,0 +1,143 @@
+experiment:
+  experiment_id: speech_fixed_position_e2e
+  description: >
+    Prueba E2E de speech monofonico en cuatro azimuts relativos al receptor,
+    sin ruido de fondo, en una sala de 3 x 3 x 2 m.
+  scene_type: static
+  random_seed: 42
+
+execution:
+  num_simulations: 4  # 4 azimuts x 1 elevacion x 1 distancia
+  num_workers: 1
+  overwrite_existing: true
+  resume_if_possible: false
+  save_scene_manifest: true
+  save_render_metadata: true
+
+raven:
+  base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
+
+render:
+  sample_rate_hz: 44100
+  generate_rir: false
+  generate_brir: true
+  simulation_type_rt: true
+  simulation_type_is: true
+  num_particles: 60000
+  is_order_ps: 2
+
+background_noise:
+  enabled: false
+  strategies: []
+
+receiver_sampling:
+  one_receiver_per_scene: true
+  position_strategy:
+    type: random_uniform_inside_room
+    # El receptor queda en x,z de [1.3, 1.7]. A 0.7 m, cada
+    # fuente queda al menos a 0.6 m de las paredes laterales.
+    margin_m:
+      x: 1.3
+      y: 0.0
+      z: 1.3
+    fixed_height_m:
+      min: 1.0
+      max: 1.0
+  orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: 0.0
+      max: 0.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+
+receiver_outputs:
+  binaural_hrtf:
+    enabled: true
+    ir_catalog_path: ../../assets/hrtf/
+    file_pattern: "*.daff"
+    num_hrtfs: 1
+    output_subdir: binaural_hrtf
+    num_channels: 2
+    required: true
+
+room_sampling:
+  max_rt30_s: 1.0
+  dimensions_m:
+    length:
+      min: 3.0
+      max: 3.0
+    width:
+      min: 3.0
+      max: 3.0
+    height:
+      min: 2.0
+      max: 2.0
+  materials:
+    walls:
+      - drywall
+    floor:
+      - carpet
+    ceiling:
+      - mineral_fiber_tiles
+  semantic_surfaces:
+    enable_walls: true
+    enable_floor: true
+    enable_ceiling: true
+
+source_sampling:
+  min_sources: 1
+  max_sources: 1
+  timing:
+    allow_offsets: false
+    start_time_s:
+      min: 0.0
+      max: 0.0
+    total_duration_s: 10.0
+  gain_db:
+    min: 0.0
+    max: 0.0
+  default_orientation_strategy:
+    type: random_yaw
+    yaw_deg:
+      min: 0.0
+      max: 0.0
+    pitch_deg:
+      fixed: 0.0
+    roll_deg:
+      fixed: 0.0
+  source_types:
+    - event_type: speech
+      role: base
+      min_count: 1
+      max_count: 1
+      probability: 1.0
+      audio_dir: ../../assets/events/train/speech/
+      directivity: ../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90.0, 0.0, 90.0, 180.0]
+        elevations_deg: [0.0]
+        distances_m: [0.7]
+
+scene_validation:
+  min_distance_source_to_receiver_m: 0.5
+  min_distance_between_sources_m: 0.2
+  require_sources_inside_room: true
+  require_receiver_inside_room: true
+  max_sampling_attempts_per_scene: 50
+
+outputs:
+  artifact_root: ../../outputs/
+  run_name: speech_fixed_position_e2e
+  naming:
+    scene_id_prefix: scene_speech_fixed
+    wav_pattern: "{scene_id}__{output_type}.wav"
+    metadata_pattern: "{scene_id}__{output_type}__render.json"
+
+hearing_degradation:
+  enabled: false
+  input_targets: [binaural_hrtf]
+  hearing_profiles_path: ../hearing/hearing_profiles.yaml

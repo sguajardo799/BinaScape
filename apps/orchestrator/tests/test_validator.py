@@ -390,17 +390,139 @@ def test_validate_config_rejects_away_radius_on_random_valid(tmp_path: Path) -> 
         validate_config(config)
 
 
-def test_validate_config_rejects_single_source_scenes(tmp_path: Path) -> None:
+def test_validate_config_accepts_single_source_scenes(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path, min_sources=1, max_sources=2, source_min_count=1, source_max_count=2))
 
-    with pytest.raises(ValueError, match="source_sampling.min_sources debe ser > 1"):
+    validate_config(config)
+
+
+def test_validate_config_rejects_zero_minimum_sources(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, min_sources=0, max_sources=2, source_min_count=1, source_max_count=2))
+
+    with pytest.raises(ValueError, match="source_sampling.min_sources debe ser >= 1"):
         validate_config(config)
+
+
+def test_validate_config_accepts_fixed_position_lists(tmp_path: Path) -> None:
+    config = load_config(_write_config(
+        tmp_path,
+        num_simulations=4,
+        min_sources=1,
+        max_sources=1,
+        source_min_count=1,
+        source_max_count=1,
+        spatial_policy_block="""      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 90]
+        elevations_deg: [0, 15]
+        distances_m: [1.0]
+""".rstrip(),
+    ))
+
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("azimuths_deg", "[]"),
+        ("azimuths_deg", "[-181]"),
+        ("azimuths_deg", "[0, 0]"),
+        ("azimuths_deg", "[.nan]"),
+        ("elevations_deg", "[91]"),
+        ("elevations_deg", "[0, 0]"),
+        ("distances_m", "[0]"),
+        ("distances_m", "[1.0, 1.0]"),
+        ("distances_m", "[.inf]"),
+    ],
+)
+def test_validate_config_rejects_invalid_fixed_position_lists(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    values = {
+        "azimuths_deg": "[0]",
+        "elevations_deg": "[0]",
+        "distances_m": "[1.0]",
+    }
+    values[field] = value
+    policy = "      spatial_policy:\n        type: fixed_position\n" + "".join(
+        f"        {name}: {configured}\n" for name, configured in values.items()
+    )
+    config = load_config(_write_config(
+        tmp_path,
+        min_sources=1,
+        max_sources=1,
+        source_min_count=1,
+        source_max_count=1,
+        spatial_policy_block=policy.rstrip(),
+    ))
+
+    with pytest.raises(ValueError, match=field):
+        validate_config(config)
+
+
+def test_validate_config_rejects_fixed_position_without_required_source(tmp_path: Path) -> None:
+    config = load_config(_write_config(
+        tmp_path,
+        min_sources=1,
+        source_min_count=0,
+        spatial_policy_block="""      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [0]
+        elevations_deg: [0]
+        distances_m: [1.0]
+""".rstrip(),
+    ))
+
+    with pytest.raises(ValueError, match="fixed_position requiere min_count >= 1"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_too_few_simulations_for_fixed_position_product(tmp_path: Path) -> None:
+    config = load_config(_write_config(
+        tmp_path,
+        num_simulations=3,
+        min_sources=1,
+        max_sources=1,
+        source_min_count=1,
+        source_max_count=1,
+        spatial_policy_block="""      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 90]
+        elevations_deg: [0, 15]
+        distances_m: [1.0]
+""".rstrip(),
+    ))
+
+    with pytest.raises(ValueError, match="num_simulations debe ser >="):
+        validate_config(config)
+
+
+def test_validate_config_rejects_duplicate_event_types(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    duplicate = """    - event_type: speech
+      role: optional
+      min_count: 0
+      max_count: 0
+      probability: 0.0
+      audio_dir: ./assets/audio
+      spatial_policy:
+        type: random_valid
+"""
+    config_path.write_text(text.replace("scene_validation:\n", f"{duplicate}scene_validation:\n"), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="event_type debe ser único"):
+        validate_config(load_config(config_path))
 
 
 def _write_config(
     tmp_path: Path,
     directivity: str | None = None,
     *,
+    num_simulations: int = 1,
     min_sources: int = 2,
     max_sources: int = 2,
     source_min_count: int = 2,
@@ -422,7 +544,7 @@ def _write_config(
             "  scene_type: static\n"
             "  random_seed: 1\n"
             "execution:\n"
-            "  num_simulations: 1\n"
+            f"  num_simulations: {num_simulations}\n"
             "  num_workers: 1\n"
             "  overwrite_existing: true\n"
             "  resume_if_possible: true\n"

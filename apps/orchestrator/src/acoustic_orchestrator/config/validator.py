@@ -93,8 +93,8 @@ def validate_config(config: AppConfig) -> None:
     if config.source_sampling.min_sources > config.source_sampling.max_sources:
         errors.append("source_sampling.min_sources no puede ser mayor que max_sources")
 
-    if config.source_sampling.min_sources <= 1:
-        errors.append("source_sampling.min_sources debe ser > 1")
+    if config.source_sampling.min_sources < 1:
+        errors.append("source_sampling.min_sources debe ser >= 1")
 
     for axis_name, dimension_range in {
         "length": config.room_sampling.dimensions_m.length,
@@ -157,10 +157,28 @@ def validate_config(config: AppConfig) -> None:
 
     min_total_sources = 0
     max_total_sources = 0
+    event_types: set[str] = set()
+    max_fixed_position_cases = 0
     for source_type in config.source_sampling.source_types:
         _validate_source_type(errors, source_type)
+        if source_type.event_type in event_types:
+            errors.append(f"source_types.event_type debe ser único; duplicado: {source_type.event_type}")
+        event_types.add(source_type.event_type)
         min_total_sources += source_type.min_count
         max_total_sources += source_type.max_count
+        if source_type.spatial_policy.type == "fixed_position":
+            policy = source_type.spatial_policy
+            if policy.azimuths_deg and policy.elevations_deg and policy.distances_m:
+                max_fixed_position_cases = max(
+                    max_fixed_position_cases,
+                    len(policy.azimuths_deg) * len(policy.elevations_deg) * len(policy.distances_m),
+                )
+
+    if config.execution.num_simulations < max_fixed_position_cases:
+        errors.append(
+            "execution.num_simulations debe ser >= al número de casos de cada política fixed_position "
+            f"(máximo configurado: {max_fixed_position_cases})"
+        )
 
     if min_total_sources > config.source_sampling.max_sources:
         errors.append("La suma de source_types.min_count excede source_sampling.max_sources")
@@ -463,16 +481,17 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
         if source_type.directivity.suffix.lower() != ".daff":
             errors.append(f"{directivity_field} debe apuntar a un archivo .daff")
 
-    if source_type.spatial_policy.type == "weighted_targets":
-        if not source_type.spatial_policy.targets:
+    policy = source_type.spatial_policy
+    if policy.type == "weighted_targets":
+        if not policy.targets:
             errors.append(f"{source_type.event_type}: weighted_targets requiere 'targets'")
         else:
-            total = sum(source_type.spatial_policy.targets.values())
+            total = sum(policy.targets.values())
             if not isclose(total, 1.0, rel_tol=1e-6, abs_tol=1e-6):
                 errors.append(f"{source_type.event_type}: targets debe sumar 1.0 y suma {total}")
 
-    radius = source_type.spatial_policy.min_radius_from_receiver_m
-    if source_type.spatial_policy.type == "random_valid_away_from_receiver":
+    radius = policy.min_radius_from_receiver_m
+    if policy.type == "random_valid_away_from_receiver":
         if radius is None or not isfinite(radius) or radius < 0.0:
             errors.append(
                 f"{source_type.event_type}: random_valid_away_from_receiver requiere "
@@ -483,6 +502,72 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
             f"{source_type.event_type}: min_radius_from_receiver_m solo se permite con "
             "random_valid_away_from_receiver"
         )
+
+    fixed_fields = {
+        "azimuths_deg": policy.azimuths_deg,
+        "elevations_deg": policy.elevations_deg,
+        "distances_m": policy.distances_m,
+    }
+    if policy.type == "fixed_position":
+        if source_type.min_count < 1:
+            errors.append(f"{source_type.event_type}: fixed_position requiere min_count >= 1")
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "azimuths_deg",
+            policy.azimuths_deg,
+            minimum=-180.0,
+            maximum=180.0,
+        )
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "elevations_deg",
+            policy.elevations_deg,
+            minimum=-90.0,
+            maximum=90.0,
+        )
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "distances_m",
+            policy.distances_m,
+            strictly_positive=True,
+        )
+        if policy.targets is not None:
+            errors.append(f"{source_type.event_type}: targets no se permite con fixed_position")
+    else:
+        for field_name, values in fixed_fields.items():
+            if values is not None:
+                errors.append(
+                    f"{source_type.event_type}: {field_name} solo se permite con fixed_position"
+                )
+
+
+def _validate_fixed_values(
+    errors: list[str],
+    event_type: str,
+    field_name: str,
+    values: list[float] | None,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    strictly_positive: bool = False,
+) -> None:
+    if not values:
+        errors.append(f"{event_type}: fixed_position requiere {field_name} con al menos un valor")
+        return
+
+    if any(not isfinite(value) for value in values):
+        errors.append(f"{event_type}: {field_name} debe contener solo valores finitos")
+    if minimum is not None and any(value < minimum for value in values):
+        errors.append(f"{event_type}: {field_name} debe ser >= {minimum:g}")
+    if maximum is not None and any(value > maximum for value in values):
+        errors.append(f"{event_type}: {field_name} debe ser <= {maximum:g}")
+    if strictly_positive and any(value <= 0.0 for value in values):
+        errors.append(f"{event_type}: {field_name} debe contener valores > 0")
+    if len(set(values)) != len(values):
+        errors.append(f"{event_type}: {field_name} no permite valores duplicados")
 
 
 def _validate_run_name(errors: list[str], run_name: str | None) -> None:

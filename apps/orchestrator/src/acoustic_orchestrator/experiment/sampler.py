@@ -2,6 +2,7 @@ import hashlib
 import math
 import random
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
 import wave
 from typing import TypeVar
@@ -29,6 +30,7 @@ SURFACE_ORDER = ("north_wall", "south_wall", "east_wall", "west_wall", "floor", 
 SOURCE_WALL_CLEARANCE_M = 0.5
 SOURCE_RECEIVER_CLEARANCE_M = 0.5
 T = TypeVar("T")
+FixedPositionCase = tuple[float, float, float]
 
 
 class SceneSamplingSkipped(RuntimeError):
@@ -49,7 +51,7 @@ def sample_static_scene(config: AppConfig, rng: random.Random, scene_index: int)
     sources = None
     attempts = config.scene_validation.max_sampling_attempts_per_scene
     for _ in range(attempts):
-        sources = _sample_sources(config, room, receiver, rng)
+        sources = _sample_sources(config, room, receiver, rng, scene_index)
         if _is_valid_scene(config, room, receiver, sources):
             break
     else:
@@ -328,15 +330,29 @@ def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
     return hrtfs
 
 
-def _sample_sources(config: AppConfig, room: dict, receiver: dict, rng: random.Random) -> list[dict]:
+def _sample_sources(
+    config: AppConfig,
+    room: dict,
+    receiver: dict,
+    rng: random.Random,
+    scene_index: int = 0,
+) -> list[dict]:
     target_count = rng.randint(config.source_sampling.min_sources, config.source_sampling.max_sources)
     planned_sources = _choose_source_types(config, target_count, rng)
     audio_pools = _build_audio_pools([planned.source_type for planned in planned_sources])
+    fixed_positions = _assign_fixed_positions(config, planned_sources, room, receiver, scene_index)
+    fixed_indexes: dict[str, int] = {}
     sources: list[dict] = []
 
     for planned_source in planned_sources:
         source_type = planned_source.source_type
-        placement = _sample_source_position(config, source_type, room, receiver, rng)
+        placement: tuple[list[float], str | None] | None
+        if source_type.spatial_policy.type == "fixed_position":
+            fixed_index = fixed_indexes.get(source_type.event_type, 0)
+            fixed_indexes[source_type.event_type] = fixed_index + 1
+            placement = (fixed_positions[source_type.event_type][fixed_index], None)
+        else:
+            placement = _sample_source_position(config, source_type, room, receiver, rng)
         if placement is None:
             if planned_source.is_required:
                 raise SceneSamplingSkipped(
@@ -360,8 +376,8 @@ def _sample_sources(config: AppConfig, room: dict, receiver: dict, rng: random.R
             }
         )
 
-    if len(sources) <= 1:
-        raise SceneSamplingSkipped("La escena generada debe contener más de una fuente")
+    if not sources:
+        raise SceneSamplingSkipped("La escena generada debe contener al menos una fuente")
 
     return sources
 
@@ -468,6 +484,8 @@ def _sample_source_position(
     rng: random.Random,
 ) -> tuple[list[float], str | None] | None:
     policy_type = source_type.spatial_policy.type
+    if policy_type == "fixed_position":
+        raise RuntimeError("fixed_position debe asignarse conjuntamente para preservar cobertura y separación")
     if policy_type == "weighted_targets":
         target = _weighted_choice(source_type.spatial_policy.targets or {}, rng)
         if target == "wall":
@@ -481,6 +499,176 @@ def _sample_source_position(
         return position, None
 
     return _sample_random_position(room, rng), None
+
+
+def _assign_fixed_positions(
+    config: AppConfig,
+    planned_sources: list[PlannedSource],
+    room: dict,
+    receiver: dict,
+    scene_index: int,
+) -> dict[str, list[list[float]]]:
+    counts: dict[str, int] = {}
+    source_types: dict[str, SourceTypeConfig] = {}
+    for planned_source in planned_sources:
+        source_type = planned_source.source_type
+        if source_type.spatial_policy.type != "fixed_position":
+            continue
+        counts[source_type.event_type] = counts.get(source_type.event_type, 0) + 1
+        source_types[source_type.event_type] = source_type
+
+    if not counts:
+        return {}
+
+    slots: list[tuple[str, int, list[FixedPositionCase]]] = []
+    cases_by_event: dict[str, list[FixedPositionCase]] = {}
+
+    # Prefer the scheduled case for every policy. If scheduled cases from
+    # different fixed policies conflict, backtracking may choose a deterministic
+    # alternative for this scene; that local exception can reduce block coverage.
+    for event_type, source_type in source_types.items():
+        cases = _fixed_position_cases(source_type)
+        count = counts[event_type]
+        if count > len(cases):
+            raise RuntimeError(
+                f"{event_type}: la escena requiere {count} fuentes fixed_position, "
+                f"pero solo hay {len(cases)} puntos únicos"
+            )
+        cases_by_event[event_type] = cases
+        scheduled = _scheduled_fixed_case(config, event_type, cases, scene_index)
+        alternatives = [candidate for candidate in cases if candidate != scheduled]
+        _fixed_rng(config, event_type, scene_index, "primary-alternatives").shuffle(alternatives)
+        slots.append((event_type, 0, [scheduled, *alternatives]))
+
+    for event_type, count in counts.items():
+        cases = cases_by_event[event_type]
+        for slot_index in range(1, count):
+            candidates = list(cases)
+            _fixed_rng(config, event_type, scene_index, f"extra-{slot_index}").shuffle(candidates)
+            slots.append((event_type, slot_index, candidates))
+
+    chosen_cases: dict[str, set[FixedPositionCase]] = {event_type: set() for event_type in counts}
+    chosen: list[tuple[str, int, FixedPositionCase, list[float]]] = []
+    minimum_separation = config.scene_validation.min_distance_between_sources_m
+
+    def search(slot_index: int) -> bool:
+        if slot_index == len(slots):
+            return True
+
+        event_type, source_index, candidates = slots[slot_index]
+        for candidate in candidates:
+            if candidate in chosen_cases[event_type]:
+                continue
+            position = _fixed_position_relative_to_receiver(receiver, candidate)
+            if any(
+                _same_position(position, other_position)
+                or _distance(position, other_position) < minimum_separation
+                for _, _, _, other_position in chosen
+            ):
+                continue
+
+            chosen_cases[event_type].add(candidate)
+            chosen.append((event_type, source_index, candidate, position))
+            if search(slot_index + 1):
+                return True
+            chosen.pop()
+            chosen_cases[event_type].remove(candidate)
+        return False
+
+    if not search(0):
+        raise RuntimeError(
+            "No existe una asignación de puntos fixed_position distintos que respete "
+            "scene_validation.min_distance_between_sources_m"
+        )
+
+    positions: dict[str, list[list[float]]] = {
+        event_type: [[0.0, 0.0, 0.0] for _ in range(count)]
+        for event_type, count in counts.items()
+    }
+    for event_type, source_index, _, position in chosen:
+        _validate_assigned_fixed_position(config, event_type, room, receiver, position, scene_index)
+        positions[event_type][source_index] = position
+    return positions
+
+
+def _fixed_position_cases(source_type: SourceTypeConfig) -> list[FixedPositionCase]:
+    policy = source_type.spatial_policy
+    if not policy.azimuths_deg or not policy.elevations_deg or not policy.distances_m:
+        raise RuntimeError(f"{source_type.event_type}: configuración fixed_position incompleta")
+    return list(product(policy.azimuths_deg, policy.elevations_deg, policy.distances_m))
+
+
+def _scheduled_fixed_case(
+    config: AppConfig,
+    event_type: str,
+    cases: list[FixedPositionCase],
+    scene_index: int,
+) -> FixedPositionCase:
+    block_index, offset = divmod(scene_index, len(cases))
+    shuffled = list(cases)
+    _fixed_rng(config, event_type, block_index, "block").shuffle(shuffled)
+    return shuffled[offset]
+
+
+def _fixed_rng(config: AppConfig, event_type: str, index: int, purpose: str) -> random.Random:
+    seed_material = (
+        f"{config.experiment.random_seed}|fixed_position|{event_type}|{purpose}|{index}"
+    ).encode("utf-8")
+    seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+    return random.Random(seed)
+
+
+def _fixed_position_relative_to_receiver(
+    receiver: dict,
+    fixed_case: FixedPositionCase,
+) -> list[float]:
+    azimuth_deg, elevation_deg, distance_m = fixed_case
+    orientation = receiver["orientation_deg"]
+    yaw = math.radians(orientation["yaw"] + azimuth_deg)
+    pitch = math.radians(orientation["pitch"] + elevation_deg)
+
+    # Manifests use canonical XYZ and the runtime adapter flips Z for RAVEN.
+    # Therefore this is MATLAB's [+X forward, +Y up, +Z at positive yaw]
+    # convention expressed before that adapter. Receiver roll is intentionally ignored.
+    offset = (
+        math.cos(pitch) * math.cos(yaw),
+        math.sin(pitch),
+        -math.cos(pitch) * math.sin(yaw),
+    )
+    return [
+        coordinate + distance_m * direction
+        for coordinate, direction in zip(receiver["position_m"], offset, strict=True)
+    ]
+
+
+def _validate_assigned_fixed_position(
+    config: AppConfig,
+    event_type: str,
+    room: dict,
+    receiver: dict,
+    position: list[float],
+    scene_index: int,
+) -> None:
+    dimensions = room["dimensions"]
+    invalid_reason: str | None = None
+    if not _inside_room(position, dimensions):
+        invalid_reason = "queda fuera de la sala"
+    elif _source_wall_clearance(position, dimensions) < SOURCE_WALL_CLEARANCE_M:
+        invalid_reason = f"no respeta {SOURCE_WALL_CLEARANCE_M:g} m de margen a paredes"
+    elif _distance(position, receiver["position_m"]) < max(
+        config.scene_validation.min_distance_source_to_receiver_m,
+        SOURCE_RECEIVER_CLEARANCE_M,
+    ):
+        invalid_reason = "no respeta la distancia mínima al receptor"
+
+    if invalid_reason is not None:
+        raise RuntimeError(
+            f"{event_type}: el punto fixed_position asignado en scene_index={scene_index} {invalid_reason}: {position}"
+        )
+
+
+def _same_position(point_a: list[float], point_b: list[float]) -> bool:
+    return _distance(point_a, point_b) <= 1e-12
 
 
 def _sample_random_position_away_from_receiver(
@@ -587,7 +775,7 @@ def _wall_normal_orientation(wall_name: str) -> dict:
 
 def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list[dict]) -> bool:
     dimensions = room["dimensions"]
-    if len(sources) <= 1:
+    if not sources:
         return False
 
     if config.scene_validation.require_receiver_inside_room and not _inside_room(receiver["position_m"], dimensions):
