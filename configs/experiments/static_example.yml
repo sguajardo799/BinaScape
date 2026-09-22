@@ -1,16 +1,16 @@
 experiment:
-  experiment_id: sim_001
+  experiment_id: e2e_raven_rt30_binaural_20260921
   description: >
-    Ejemplo canonico root-first del pipeline estatico con una sola salida
-    habilitada: binaural_hrtf. El runtime sigue soportando salidas HARTF
-    adicionales, pero no forman parte del ejemplo principal.
+    Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
+    binaural_hrtf, dos fuentes y perfil symmetric_moderate_loss.
+    HARTF queda pendiente porque sus catalogos locales estan vacios.
   scene_type: static
   random_seed: 42
 
 execution:
-  num_simulations: 30
-  num_workers: 2
-  overwrite_existing: true
+  num_simulations: 2
+  num_workers: 1
+  overwrite_existing: false
   resume_if_possible: false
   save_scene_manifest: true
   save_render_metadata: true
@@ -28,12 +28,9 @@ render:
   is_order_ps: 2
 
 background_noise:
-  enabled: true
-  snr_db: 40.0
+  enabled: false
   allow_multiple_layers: false
-  strategies:
-    - type: colored
-      colors: [white, pink]
+  strategies: []
 
 receiver_sampling:
   one_receiver_per_scene: true
@@ -67,23 +64,9 @@ receiver_outputs:
     num_channels: 2
     required: true
 
-  # Multi-output. Descomenta salidas adicionales para usar
-  # variantes HARTF, pero `binaural_hrtf` es el ejemplo canonico del contrato.
-  # bte_rear_hartf:
-  #   enabled: true
-  #   ir_catalog_path: ../../assets/hrtf/
-  #   file_pattern: "*.daff"
-  #   output_subdir: bte_rear_hartf
-  #   num_channels: 2
-  #   required: false
-
-  # bte_front_hartf:
-  #   enabled: true
-  #   ir_catalog_path: ../../assets/hrtf/
-  #   file_pattern: "*.daff"
-  #   output_subdir: bte_front_hartf
-  #   num_channels: 2
-  #   required: false
+  # HARTF no habilitado: assets/hartf/rear y assets/hartf/front estan vacios.
+  # Para cubrir tres salidas, aportar DAFF HARTF reales, configurar ambas
+  # salidas con esos catalogos y agregarlas a hearing_degradation.input_targets.
 
 room_sampling:
   # LÃ­mite Sabine estimado antes de generar receptor, fuentes y manifiesto.
@@ -118,20 +101,17 @@ room_sampling:
     enable_ceiling: true
 
 source_sampling:
-  min_sources: 3
-  max_sources: 6
-
+  min_sources: 2
+  max_sources: 2
   timing:
     allow_offsets: true
     start_time_s:
       min: 0.1
-      max: 3.0
-    total_duration_s: 10
-
+      max: 5.5
+    total_duration_s: 10.0
   gain_db:
-    min: -0.5
-    max: 0.1
-
+    min: -6.0
+    max: 0.0
   default_orientation_strategy:
     type: random_yaw
     yaw_deg:
@@ -141,74 +121,25 @@ source_sampling:
       fixed: 0.0
     roll_deg:
       fixed: 0.0
-
   source_types:
     - event_type: speech
       role: base
       min_count: 1
-      max_count: 2
+      max_count: 1
       probability: 1.0
-      audio_dir: ../../assets/events/speech/
+      audio_dir: ../../assets/events/train/speech/
       directivity: ../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
       spatial_policy:
         type: random_valid
 
-    - event_type: snoring
+    - event_type: keyboard_typing
       role: base
-      min_count: 0
+      min_count: 1
       max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/snoring/
-      spatial_policy:
-        type: random_valid_away_from_receiver
-        min_radius_from_receiver_m: 2.5
-
-    - event_type: breathing
-      role: base
-      min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/breathing/
+      probability: 1.0
+      audio_dir: ../../assets/events/train/keyboard_typing/
       spatial_policy:
         type: random_valid
-
-    - event_type: footsteps
-      role: optional
-      min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/footsteps/
-      spatial_policy:
-        type: random_valid_away_from_receiver
-        min_radius_from_receiver_m: 3.1
-
-    - event_type: door_knocking
-      role: optional
-      min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/door_knocking/
-      spatial_policy:
-        type: weighted_targets
-        targets:
-          wall: 0.95
-          random_valid: 0.05
-      orientation_strategy:
-        type: facing_surface_normal
-
-    - event_type: keyboard_typing
-      role: optional
-      min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/keyboard_typing/
-      spatial_policy:
-        type: weighted_targets
-        targets:
-          wall: 0.95
-          random_valid: 0.05
-      orientation_strategy:
-        type: facing_surface_normal
 
 scene_validation:
   min_distance_source_to_receiver_m: 0.5
@@ -219,8 +150,8 @@ scene_validation:
 
 outputs:
   artifact_root: ../../outputs/
-  # run_name es opcional. Si se omite, el loader usa experiment.experiment_id.
-  # El layout nuevo escribe solo dentro de {artifact_root}/{run_name}/...
+  run_name: e2e_raven_rt30_binaural_20260921
+  # Corrida nueva: no sobrescribir manifiestos ni reutilizar resultados.
 
   naming:
     scene_id_prefix: scene_static
@@ -231,10 +162,10 @@ hearing_degradation:
   enabled: true
   input_targets:
     - binaural_hrtf
-  hearing_profiles_path: ../hearing/hearing_profiles.yaml
+  hearing_profiles_path: ../hearing/example_profile.yaml
   runner:
     backend_project_path: ../../apps/clarity-backend
     entrypoint: clarity-backend
     auto_submit: true
     use_uv: true
-    force_rerun: true
+    force_rerun: false

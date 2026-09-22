@@ -98,6 +98,8 @@ uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs
 - `configs/experiments/static_example.yml`: root-first example for the supported
   static pipeline.
 - `configs/experiments/sim_config.yml`: additional root-level experiment config.
+- `configs/hearing/example_profile.yaml`: symmetric moderate-loss profile used
+  by `static_example.yml`; keep this file with the experiment config.
 - `configs/hearing/hearing_profiles.yaml`: hearing profile catalog used by the
   Clarity backend when degradation is enabled.
 - `apps/orchestrator/examples/`: app-local configs and scene examples used by
@@ -107,6 +109,13 @@ uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs
 Experiment configs control scene sampling, receiver outputs, source assets,
 room material choices, background noise planning, output naming, and optional
 hearing degradation.
+
+Source audio pools select `.wav` files (case-insensitive) and ignore sidecars.
+An empty WAV pool aborts sampling with the directory path. When
+`source_sampling.timing.total_duration_s` is set, duration inspection and runtime
+trimming require uncompressed PCM WAV supported by Python `wave`, including
+when offsets are disabled. Invalid or unsupported headers stop manifest
+generation with the source path and decoder cause; they are not silently skipped.
 
 Room sampling also supports `room_sampling.max_rt30_s` (default `1.0` second).
 Before any manifest is written, the orchestrator rejects rooms whose

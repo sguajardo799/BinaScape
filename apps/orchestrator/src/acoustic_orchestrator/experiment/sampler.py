@@ -436,6 +436,8 @@ def _build_audio_pools(selected_types: list[SourceTypeConfig]) -> dict[str, dict
         if source_type.event_type in audio_pools:
             continue
         files = _list_files(source_type.audio_dir)
+        if not files:
+            raise ValueError(f"No hay archivos WAV en audio_dir: {source_type.audio_dir}")
         audio_pools[source_type.event_type] = {
             "all_files": files,
             "unused_files": list(files),
@@ -662,16 +664,17 @@ def _enabled_outputs(config: AppConfig) -> dict[str, ReceiverOutputConfig]:
 
 
 def _list_files(directory: Path) -> list[Path]:
-    return sorted(path for path in directory.iterdir() if path.is_file())
+    return sorted(path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".wav")
 
 
 def _sample_start_time_s(config: AppConfig, audio_path: Path, rng: random.Random) -> float:
+    # Fixed-duration renders also read/trim audio when offsets are disabled.
+    effective_max = _max_allowed_start_time_s(config, audio_path)
     if not config.source_sampling.timing.allow_offsets:
         return 0.0
 
     configured_min = config.source_sampling.timing.start_time_s.min
     configured_max = config.source_sampling.timing.start_time_s.max
-    effective_max = _max_allowed_start_time_s(config, audio_path)
     allowed_max = min(configured_max, effective_max)
 
     if allowed_max <= configured_min:
@@ -694,9 +697,12 @@ def _wav_duration_s(audio_path: Path) -> float:
     try:
         with wave.open(str(audio_path), "rb") as wav_file:
             return wav_file.getnframes() / wav_file.getframerate()
-    except:
-        print(f"Error with file in: {audio_path}")
-
+    except (OSError, EOFError, wave.Error) as exc:
+        cause = str(exc) or type(exc).__name__
+        raise ValueError(
+            f"No se pudo leer la duracion del audio WAV {audio_path}: {cause}. "
+            "El calculo de duracion y recorte requiere WAV PCM sin compresion."
+        ) from exc
 
 
 def _uniform(rng: random.Random, minimum: float, maximum: float) -> float:
