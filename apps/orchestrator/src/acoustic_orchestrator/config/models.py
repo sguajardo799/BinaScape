@@ -123,10 +123,43 @@ class ReceiverOutputsConfig(StrictConfigModel):
     bte_front_hartf: ReceiverOutputConfig | None = None
 
 
-class RoomDimensionsConfig(StrictConfigModel):
-    length: RangeFloat
-    width: RangeFloat
-    height: RangeFloat
+class ShoeboxGeometryConfig(StrictConfigModel):
+    type: Literal["shoebox"]
+    probability: float
+    length_m: RangeFloat
+    width_m: RangeFloat
+
+
+class TrapezoidGeometryConfig(StrictConfigModel):
+    type: Literal["trapezoid"]
+    probability: float
+    base_a_m: RangeFloat
+    base_b_m: RangeFloat
+    depth_m: RangeFloat
+    top_offset_m: RangeFloat
+
+
+class LShapeGeometryConfig(StrictConfigModel):
+    type: Literal["l_shape"]
+    probability: float
+    outer_length_m: RangeFloat
+    outer_width_m: RangeFloat
+    cutout_length_m: RangeFloat
+    cutout_width_m: RangeFloat
+    removed_corners: list[
+        Literal["north_east", "north_west", "south_east", "south_west"]
+    ]
+
+
+RoomShapeConfig = Annotated[
+    ShoeboxGeometryConfig | TrapezoidGeometryConfig | LShapeGeometryConfig,
+    Field(discriminator="type"),
+]
+
+
+class RoomGeometryConfig(StrictConfigModel):
+    height_m: RangeFloat
+    shape_mix: list[RoomShapeConfig]
 
 
 class RoomMaterialsConfig(StrictConfigModel):
@@ -135,17 +168,10 @@ class RoomMaterialsConfig(StrictConfigModel):
     ceiling: list[str]
 
 
-class SemanticSurfacesConfig(StrictConfigModel):
-    enable_walls: bool = True
-    enable_floor: bool = True
-    enable_ceiling: bool = True
-
-
 class RoomSamplingConfig(StrictConfigModel):
     max_rt30_s: float = 1.0
-    dimensions_m: RoomDimensionsConfig
+    geometry: RoomGeometryConfig
     materials: RoomMaterialsConfig
-    semantic_surfaces: SemanticSurfacesConfig
 
 
 class TimingConfig(StrictConfigModel):
@@ -201,7 +227,8 @@ class SceneValidationConfig(StrictConfigModel):
     min_distance_between_sources_m: float
     require_sources_inside_room: bool = True
     require_receiver_inside_room: bool = True
-    max_sampling_attempts_per_scene: int = 50
+    max_scene_attempts: int = 50
+    max_receiver_attempts: int = 50
 
 
 class NamingConfig(StrictConfigModel):

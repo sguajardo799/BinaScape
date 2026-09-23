@@ -44,11 +44,14 @@ Generate manifests only:
 uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml
 ```
 
-Run the full static render:
+Run the official opt-in MATLAB/RAVEN smoke directly through the orchestrator:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
 ```
+
+This command samples all configured room-shape candidates and requires the
+referenced local assets, MATLAB, ITA Toolbox, and RAVEN.
 
 Prepare Clarity handoff artifacts without submission:
 
@@ -73,6 +76,11 @@ The local `main.py` entrypoint can also be used for development:
 ```sh
 uv run python .\main.py generate-manifests .\examples\example_config.yml
 ```
+
+For development inspection of sampled room footprints, install the optional
+`dev` extra (which includes matplotlib) and call
+`acoustic_orchestrator.experiment.geometry_visualization.plot_room_geometry`.
+The helper is intentionally not imported by the production pipeline.
 
 ## Config Examples
 
@@ -138,8 +146,10 @@ mean, not a guarantee of the T30 result later calculated by RAVEN. Use
 `execution.num_workers: 1` for RT30-sensitive runs until concurrent access to
 the shared RAVEN material slots is isolated.
 
-Coordinate note for RAVEN: receiver and source positions are serialized as
-`[x, y, -z]` because the MATLAB/RAVEN side expects that coordinate convention.
+Coordinate note for RAVEN: public manifests use `[x, y, z]` with the footprint
+in `[x, z]`. For schema 2.0, the MATLAB adapter applies the same explicit
+`[x, y, z] -> [x, y, -z]` reflection to positions and orientation vectors.
+Legacy schema 1.0 keeps its existing shoebox contract.
 
 ## Background Noise Planning
 
@@ -298,9 +308,9 @@ WAV selection remains independent and may reuse the same file.
 Angles follow MATLAB/RAVEN: at receiver yaw/pitch zero, azimuth/elevation zero
 points along `+X`; positive azimuth rotates toward RAVEN `+Z`; positive
 elevation rotates toward `+Y`. Azimuth is added to receiver yaw, elevation is
-added to receiver pitch, and receiver roll is ignored. The orchestrator stores
-canonical coordinates, so its runtime adapter negates Z before MATLAB receives
-the manifest.
+added to receiver pitch, and receiver roll is ignored. Python preserves the
+public coordinates in the manifest; the MATLAB schema 2.0 adapter reflects Z
+consistently for room geometry, poses, and orientation vectors.
 
 List values must be finite and unique. Azimuth is limited to `[-180, 180]`,
 elevation to `[-90, 90]`, and distance must be greater than zero. A fixed
@@ -330,8 +340,10 @@ uv run --project apps/orchestrator ruff check .
 uv run --project apps/orchestrator mypy src
 ```
 
-The example configs use `execution.overwrite_existing: true`, so repeated runs
-can replace generated manifests and outputs for the same run.
+The canonical `configs/experiments/static_example.yml` smoke config uses
+`execution.overwrite_existing: false`. Give a repeated smoke run a fresh
+`outputs.run_name`, then execute the `render-static` command above directly.
+Other examples may choose overwrite behavior independently.
 
 ## Practical Notes
 

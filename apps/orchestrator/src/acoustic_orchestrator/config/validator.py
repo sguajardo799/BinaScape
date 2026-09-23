@@ -6,12 +6,24 @@ from typing import Any, TypedDict
 
 import yaml
 
-from .models import AppConfig, AudioFolderNoiseStrategyConfig, ClarityRunnerConfig, ReceiverOutputConfig, SourceTypeConfig
+from .models import (
+    AppConfig,
+    AudioFolderNoiseStrategyConfig,
+    ClarityRunnerConfig,
+    LShapeGeometryConfig,
+    ReceiverOutputConfig,
+    RoomShapeConfig,
+    ShoeboxGeometryConfig,
+    SourceTypeConfig,
+    TrapezoidGeometryConfig,
+)
 from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeholders, is_safe_output_subdir
 
 
 MIN_SOURCE_WALL_CLEARANCE_M = 0.5
 MIN_SOURCE_RECEIVER_DISTANCE_M = 0.5
+PROBABILITY_ABS_TOL = 1e-6
+PROBABILITY_REL_TOL = 1e-9
 HEARING_PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SUPPORTED_BACKGROUND_AUDIO_SUFFIXES = {".wav"}
 
@@ -20,6 +32,138 @@ class HearingProfileDefinition(TypedDict):
     hearing_profile_id: str
     left_loss_db_by_band: dict[str, float]
     right_loss_db_by_band: dict[str, float]
+
+
+def _validate_room_geometry(errors: list[str], config: AppConfig) -> None:
+    geometry = config.room_sampling.geometry
+    _validate_numeric_range(
+        errors,
+        "room_sampling.geometry.height_m",
+        geometry.height_m.min,
+        geometry.height_m.max,
+        strictly_positive=True,
+    )
+
+    if not geometry.shape_mix:
+        errors.append("room_sampling.geometry.shape_mix no puede estar vacío")
+        return
+
+    shape_types = [shape.type for shape in geometry.shape_mix]
+    if len(set(shape_types)) != len(shape_types):
+        errors.append("room_sampling.geometry.shape_mix no permite tipos duplicados")
+
+    probabilities = [shape.probability for shape in geometry.shape_mix]
+    for index, probability in enumerate(probabilities):
+        if not isfinite(probability) or probability <= 0.0:
+            errors.append(
+                f"room_sampling.geometry.shape_mix[{index}].probability debe ser finita y > 0"
+            )
+    total_probability = sum(probabilities)
+    if not isclose(
+        total_probability,
+        1.0,
+        rel_tol=PROBABILITY_REL_TOL,
+        abs_tol=PROBABILITY_ABS_TOL,
+    ):
+        errors.append(
+            "room_sampling.geometry.shape_mix probabilities debe sumar 1.0 "
+            f"y suma {total_probability}"
+        )
+
+    for index, shape in enumerate(geometry.shape_mix):
+        _validate_room_shape(errors, shape, index)
+
+    materials = config.room_sampling.materials
+    for pool_name, pool in (
+        ("walls", materials.walls),
+        ("floor", materials.floor),
+        ("ceiling", materials.ceiling),
+    ):
+        if not pool:
+            errors.append(f"room_sampling.materials.{pool_name} no puede estar vacío")
+
+
+def _validate_room_shape(errors: list[str], shape: RoomShapeConfig, index: int) -> None:
+    prefix = f"room_sampling.geometry.shape_mix[{index}]"
+    if isinstance(shape, ShoeboxGeometryConfig):
+        _validate_positive_shape_ranges(errors, prefix, shape, ("length_m", "width_m"))
+        if shape.length_m.max <= 1.0 or shape.width_m.max <= 1.0:
+            errors.append(f"{prefix} no puede producir una región útil con margen de 0.5 m")
+        return
+
+    if isinstance(shape, TrapezoidGeometryConfig):
+        _validate_positive_shape_ranges(
+            errors,
+            prefix,
+            shape,
+            ("base_a_m", "base_b_m", "depth_m"),
+        )
+        _validate_numeric_range(
+            errors,
+            f"{prefix}.top_offset_m",
+            shape.top_offset_m.min,
+            shape.top_offset_m.max,
+        )
+        if shape.depth_m.max <= 1.0 or max(shape.base_a_m.max, shape.base_b_m.max) <= 1.0:
+            errors.append(f"{prefix} no puede producir una región útil con margen de 0.5 m")
+        return
+
+
+    assert isinstance(shape, LShapeGeometryConfig)
+    _validate_positive_shape_ranges(
+        errors,
+        prefix,
+        shape,
+        (
+            "outer_length_m",
+            "outer_width_m",
+            "cutout_length_m",
+            "cutout_width_m",
+        ),
+    )
+    if not shape.removed_corners:
+        errors.append(f"{prefix}.removed_corners no puede estar vacío")
+    elif len(set(shape.removed_corners)) != len(shape.removed_corners):
+        errors.append(f"{prefix}.removed_corners no permite duplicados")
+
+    if shape.outer_length_m.max - shape.cutout_length_m.min <= 1.0:
+        errors.append(f"{prefix} no puede producir un brazo horizontal útil mayor que 1.0 m")
+    if shape.outer_width_m.max - shape.cutout_width_m.min <= 1.0:
+        errors.append(f"{prefix} no puede producir un brazo vertical útil mayor que 1.0 m")
+
+
+def _validate_positive_shape_ranges(
+    errors: list[str],
+    prefix: str,
+    shape: object,
+    field_names: tuple[str, ...],
+) -> None:
+    for field_name in field_names:
+        value_range = getattr(shape, field_name)
+        _validate_numeric_range(
+            errors,
+            f"{prefix}.{field_name}",
+            value_range.min,
+            value_range.max,
+            strictly_positive=True,
+        )
+
+
+def _validate_numeric_range(
+    errors: list[str],
+    field_name: str,
+    min_value: float,
+    max_value: float,
+    *,
+    strictly_positive: bool = False,
+) -> None:
+    if not isfinite(min_value) or not isfinite(max_value):
+        errors.append(f"{field_name} debe contener valores finitos")
+        return
+    if min_value > max_value:
+        errors.append(f"{field_name}.min no puede ser mayor que .max")
+    if strictly_positive and (min_value <= 0.0 or max_value <= 0.0):
+        errors.append(f"{field_name} debe contener longitudes > 0")
 
 
 def validate_config(config: AppConfig) -> None:
@@ -40,15 +184,15 @@ def validate_config(config: AppConfig) -> None:
 
     _validate_background_noise(errors, config)
 
-    if config.scene_validation.max_sampling_attempts_per_scene <= 0:
-        errors.append("scene_validation.max_sampling_attempts_per_scene debe ser > 0")
+    if config.scene_validation.max_scene_attempts <= 0:
+        errors.append("scene_validation.max_scene_attempts debe ser > 0")
+    if config.scene_validation.max_receiver_attempts <= 0:
+        errors.append("scene_validation.max_receiver_attempts debe ser > 0")
 
     if not config.receiver_sampling.one_receiver_per_scene:
         errors.append("Este MVP requiere receiver_sampling.one_receiver_per_scene=true")
 
-    _validate_range(errors, "room_sampling.dimensions_m.length", config.room_sampling.dimensions_m.length.min, config.room_sampling.dimensions_m.length.max)
-    _validate_range(errors, "room_sampling.dimensions_m.width", config.room_sampling.dimensions_m.width.min, config.room_sampling.dimensions_m.width.max)
-    _validate_range(errors, "room_sampling.dimensions_m.height", config.room_sampling.dimensions_m.height.min, config.room_sampling.dimensions_m.height.max)
+    _validate_room_geometry(errors, config)
     if not isfinite(config.room_sampling.max_rt30_s) or config.room_sampling.max_rt30_s <= 0:
         errors.append("room_sampling.max_rt30_s debe ser finito y > 0")
     _validate_range(errors, "receiver_sampling.position_strategy.fixed_height_m", config.receiver_sampling.position_strategy.fixed_height_m.min, config.receiver_sampling.position_strategy.fixed_height_m.max)
@@ -81,14 +225,16 @@ def validate_config(config: AppConfig) -> None:
     ):
         errors.append("source_sampling.timing.total_duration_s debe ser > 0")
 
-    if config.receiver_sampling.position_strategy.margin_m.x * 2 >= config.room_sampling.dimensions_m.length.max:
-        errors.append("receiver_sampling.position_strategy.margin_m.x es demasiado grande para la longitud máxima del cuarto")
+    receiver_margins = config.receiver_sampling.position_strategy.margin_m
+    if receiver_margins.x < MIN_SOURCE_WALL_CLEARANCE_M or receiver_margins.z < MIN_SOURCE_WALL_CLEARANCE_M:
+        errors.append("receiver_sampling.position_strategy.margin_m.x y .z deben ser >= 0.5")
 
-    if config.receiver_sampling.position_strategy.margin_m.z * 2 >= config.room_sampling.dimensions_m.width.max:
-        errors.append("receiver_sampling.position_strategy.margin_m.z es demasiado grande para el ancho máximo del cuarto")
-
-    if config.receiver_sampling.position_strategy.fixed_height_m.max > config.room_sampling.dimensions_m.height.max:
-        errors.append("receiver_sampling.position_strategy.fixed_height_m.max no puede exceder room_sampling.dimensions_m.height.max")
+    room_height = config.room_sampling.geometry.height_m
+    receiver_height = config.receiver_sampling.position_strategy.fixed_height_m
+    if receiver_height.min < 0.0 or receiver_height.max > room_height.min:
+        errors.append(
+            "receiver_sampling.position_strategy.fixed_height_m debe quedar entre piso y la altura mínima de la sala"
+        )
 
     if config.source_sampling.min_sources > config.source_sampling.max_sources:
         errors.append("source_sampling.min_sources no puede ser mayor que max_sources")
@@ -96,16 +242,10 @@ def validate_config(config: AppConfig) -> None:
     if config.source_sampling.min_sources < 1:
         errors.append("source_sampling.min_sources debe ser >= 1")
 
-    for axis_name, dimension_range in {
-        "length": config.room_sampling.dimensions_m.length,
-        "width": config.room_sampling.dimensions_m.width,
-        "height": config.room_sampling.dimensions_m.height,
-    }.items():
-        if dimension_range.min < MIN_SOURCE_WALL_CLEARANCE_M * 2:
-            errors.append(
-                f"room_sampling.dimensions_m.{axis_name}.min debe ser >= {MIN_SOURCE_WALL_CLEARANCE_M * 2:.1f} "
-                "para mantener 0.5 m de separación mínima entre fuentes y paredes"
-            )
+    if room_height.min <= MIN_SOURCE_WALL_CLEARANCE_M * 2:
+        errors.append(
+            "room_sampling.geometry.height_m.min debe ser > 1.0 para mantener 0.5 m de separación vertical"
+        )
 
     if config.scene_validation.min_distance_source_to_receiver_m < MIN_SOURCE_RECEIVER_DISTANCE_M:
         errors.append(

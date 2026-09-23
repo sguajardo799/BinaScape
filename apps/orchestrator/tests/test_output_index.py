@@ -716,7 +716,7 @@ receiver_sampling:
   one_receiver_per_scene: true
   position_strategy:
     type: random_uniform_inside_room
-    margin_m: {x: 0.2, y: 0.2, z: 0.2}
+    margin_m: {x: 0.5, y: 0.2, z: 0.5}
     fixed_height_m: {min: 1.2, max: 1.4}
   orientation_strategy:
     type: random_yaw

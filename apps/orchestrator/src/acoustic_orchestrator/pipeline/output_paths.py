@@ -23,6 +23,7 @@ class ArtifactLayout(TypedDict):
     clarity_manifest_dir: Path
     clarity_jobs_path: Path
     render_index_path: Path
+    sampling_failures_path: Path
     clarity_index_path: Path
     render_outputs_root: Path
     degraded_output_root: Path
@@ -46,6 +47,7 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
         "clarity_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "clarity",
         "clarity_jobs_path": run_root / "metadata" / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
         "render_index_path": run_root / "metadata" / "indexes" / "render_index.jsonl",
+        "sampling_failures_path": run_root / "metadata" / "indexes" / "scene_sampling_failures.jsonl",
         "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
         "render_outputs_root": run_root / "output_audio" / "render",
         "degraded_output_root": run_root / "output_audio" / "degraded",

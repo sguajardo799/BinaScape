@@ -72,16 +72,29 @@ receiver_outputs:
 room_sampling:
   # LÃ­mite Sabine estimado antes de generar receptor, fuentes y manifiesto.
   max_rt30_s: 1.0
-  dimensions_m:
-    length:
-      min: 3.5
-      max: 6.5
-    width:
-      min: 3.5
-      max: 6.5
-    height:
-      min: 1.8
-      max: 2.5
+  geometry:
+    height_m:
+      min: 2.4
+      max: 3.0
+    # La mezcla determinista cubre las tres geometrías en este ejemplo.
+    shape_mix:
+      - type: shoebox
+        probability: 0.34
+        length_m: {min: 4.0, max: 5.0}
+        width_m: {min: 3.0, max: 4.0}
+      - type: trapezoid
+        probability: 0.33
+        base_a_m: {min: 4.0, max: 5.0}
+        base_b_m: {min: 3.0, max: 4.0}
+        depth_m: {min: 3.0, max: 4.0}
+        top_offset_m: {min: -0.5, max: 0.5}
+      - type: l_shape
+        probability: 0.33
+        outer_length_m: {min: 5.0, max: 6.0}
+        outer_width_m: {min: 4.0, max: 5.0}
+        cutout_length_m: {min: 1.0, max: 2.0}
+        cutout_width_m: {min: 1.0, max: 2.0}
+        removed_corners: [north_east]
 
   materials:
     walls:
@@ -95,11 +108,6 @@ room_sampling:
     ceiling:
       - wood
       - plaster
-
-  semantic_surfaces:
-    enable_walls: true
-    enable_floor: true
-    enable_ceiling: true
 
 source_sampling:
   min_sources: 2

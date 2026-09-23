@@ -518,6 +518,173 @@ def test_validate_config_rejects_duplicate_event_types(tmp_path: Path) -> None:
         validate_config(load_config(config_path))
 
 
+def test_legacy_room_and_retry_budget_are_normalized_once(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+
+    assert config.room_sampling.geometry.height_m.min == 2.4
+    assert len(config.room_sampling.geometry.shape_mix) == 1
+    shoebox = config.room_sampling.geometry.shape_mix[0]
+    assert shoebox.type == "shoebox"
+    assert shoebox.probability == 1.0
+    assert shoebox.length_m.min == 4.0
+    assert shoebox.width_m.max == 3.5
+    assert config.scene_validation.max_scene_attempts == 5
+    assert config.scene_validation.max_receiver_attempts == 5
+
+
+def test_load_and_validate_all_room_geometry_variants(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _replace_room_sampling_with_geometry(config_path)
+
+    config = load_config(config_path)
+    validate_config(config)
+
+    assert [shape.type for shape in config.room_sampling.geometry.shape_mix] == [
+        "shoebox",
+        "trapezoid",
+        "l_shape",
+    ]
+
+
+@pytest.mark.parametrize("probabilities", [(0.2, 0.2, 0.2), (0.5, 0.5, 0.0), (0.5, 0.5, float("nan"))])
+def test_validate_config_rejects_invalid_shape_probabilities(
+    tmp_path: Path,
+    probabilities: tuple[float, float, float],
+) -> None:
+    config_path = _write_config(tmp_path)
+    _replace_room_sampling_with_geometry(config_path)
+    config = load_config(config_path)
+    for shape, probability in zip(config.room_sampling.geometry.shape_mix, probabilities, strict=True):
+        shape.probability = probability
+
+    with pytest.raises(ValueError, match="probabil"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_duplicate_or_empty_shape_mix(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _replace_room_sampling_with_geometry(config_path)
+    config = load_config(config_path)
+    config.room_sampling.geometry.shape_mix[1].type = "shoebox"  # type: ignore[assignment]
+
+    with pytest.raises(ValueError, match="tipos duplicados"):
+        validate_config(config)
+
+    config = load_config(config_path)
+    config.room_sampling.geometry.shape_mix = []
+    with pytest.raises(ValueError, match="shape_mix no puede estar vacío"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_invalid_ranges_and_l_shape_corners(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _replace_room_sampling_with_geometry(config_path)
+    config = load_config(config_path)
+    trapezoid = config.room_sampling.geometry.shape_mix[1]
+    trapezoid.depth_m.min = float("inf")  # type: ignore[union-attr]
+    l_shape = config.room_sampling.geometry.shape_mix[2]
+    l_shape.removed_corners = []  # type: ignore[union-attr]
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_config(config)
+
+    message = str(exc_info.value)
+    assert "depth_m debe contener valores finitos" in message
+    assert "removed_corners no puede estar vacío" in message
+
+
+def test_new_geometry_rejects_legacy_semantic_surfaces(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    _replace_room_sampling_with_geometry(config_path, include_semantic_surfaces=True)
+
+    with pytest.raises(ValueError, match="semantic_surfaces solo se admite"):
+        load_config(config_path)
+
+
+def test_legacy_semantic_surfaces_are_consumed_by_normalization(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("    enable_floor: true", "    enable_floor: false"),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert not hasattr(config.room_sampling, "semantic_surfaces")
+
+
+def test_validate_config_rejects_receiver_lateral_margin_below_half_meter(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_sampling.position_strategy.margin_m.x = 0.49
+
+    with pytest.raises(ValueError, match=r"margin_m\.x y \.z deben ser >= 0\.5"):
+        validate_config(config)
+
+
+def test_loads_separate_scene_and_receiver_retry_budgets(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  max_sampling_attempts_per_scene: 5",
+            "  max_scene_attempts: 7\n  max_receiver_attempts: 11",
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    validate_config(config)
+
+    assert config.scene_validation.max_scene_attempts == 7
+    assert config.scene_validation.max_receiver_attempts == 11
+
+
+def _replace_room_sampling_with_geometry(
+    config_path: Path,
+    *,
+    include_semantic_surfaces: bool = False,
+) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    start = text.index("room_sampling:\n")
+    end = text.index("source_sampling:\n")
+    semantic_surfaces = (
+        "  semantic_surfaces:\n"
+        "    enable_walls: true\n"
+        "    enable_floor: true\n"
+        "    enable_ceiling: true\n"
+        if include_semantic_surfaces
+        else ""
+    )
+    replacement = (
+        "room_sampling:\n"
+        "  geometry:\n"
+        "    height_m: {min: 2.4, max: 2.8}\n"
+        "    shape_mix:\n"
+        "      - type: shoebox\n"
+        "        probability: 0.3\n"
+        "        length_m: {min: 4.0, max: 5.0}\n"
+        "        width_m: {min: 3.0, max: 4.0}\n"
+        "      - type: trapezoid\n"
+        "        probability: 0.3\n"
+        "        base_a_m: {min: 4.0, max: 5.0}\n"
+        "        base_b_m: {min: 3.0, max: 5.0}\n"
+        "        depth_m: {min: 3.0, max: 4.0}\n"
+        "        top_offset_m: {min: -1.0, max: 1.0}\n"
+        "      - type: l_shape\n"
+        "        probability: 0.4\n"
+        "        outer_length_m: {min: 6.0, max: 7.0}\n"
+        "        outer_width_m: {min: 5.0, max: 6.0}\n"
+        "        cutout_length_m: {min: 1.0, max: 2.0}\n"
+        "        cutout_width_m: {min: 1.0, max: 2.0}\n"
+        "        removed_corners: [north_east, south_west]\n"
+        "  materials:\n"
+        "    walls: [brick]\n"
+        "    floor: [wood]\n"
+        "    ceiling: [plaster]\n"
+        f"{semantic_surfaces}"
+    )
+    config_path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+
 def _write_config(
     tmp_path: Path,
     directivity: str | None = None,
@@ -559,7 +726,7 @@ def _write_config(
             "  one_receiver_per_scene: true\n"
             "  position_strategy:\n"
             "    type: random_uniform_inside_room\n"
-            "    margin_m: {x: 0.1, y: 0.1, z: 0.1}\n"
+            "    margin_m: {x: 0.5, y: 0.1, z: 0.5}\n"
             "    fixed_height_m: {min: 1.2, max: 1.3}\n"
             "  orientation_strategy:\n"
             "    type: random_yaw\n"

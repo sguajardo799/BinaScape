@@ -13,9 +13,17 @@ import acoustic_orchestrator.experiment.sampler as sampler
 from acoustic_orchestrator.cli import app
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
-from acoustic_orchestrator.experiment.sampler import _sample_random_position, _sample_receiver
+from acoustic_orchestrator.experiment.sampler import (
+    SceneSamplingFailure,
+    _sample_random_position,
+    _sample_receiver,
+)
+from acoustic_orchestrator.experiment.geometry import (
+    inset_polygon,
+    point_in_polygon,
+    wall_clearance,
+)
 from acoustic_orchestrator.pipeline.matlab_runner import (
-    _flip_manifest_z_axis_for_raven,
     build_raven_project_name,
     build_render_variant_paths,
 )
@@ -23,6 +31,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     RenderStaticRunError,
     RenderSummary,
     generate_static_manifests,
+    generate_static_manifests_with_summary,
     render_static_scenes,
 )
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
@@ -63,15 +72,14 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert Path(manifest["sources"][0]["audio_path"]).is_absolute()
     speech_source = next(source for source in manifest["sources"] if source["event_type"] == "speech")
     assert Path(speech_source["directivity_path"]).is_absolute()
+    assert manifest["schema_version"] == "2.0"
+    assert "dimensions_m" not in manifest["room"]
     assert list(manifest["room"]["material_files"]) == [
-        "north_wall",
-        "south_wall",
-        "east_wall",
-        "west_wall",
+        *manifest["room"]["geometry"]["wall_ids"],
         "floor",
         "ceiling",
     ]
-    assert Path(manifest["room"]["material_files"]["north_wall"]["material_path"]).is_absolute()
+    assert Path(manifest["room"]["material_files"]["wall_001"]["material_path"]).is_absolute()
     assert Path(manifest["render"]["output_wav_path"]).is_absolute()
     assert Path(manifest["render"]["output_metadata_path"]).is_absolute()
     assert Path(manifest["render"]["output_wav_path"]).parts[-2:] == ("binaural_hrtf", "scene_static_0001__binaural_hrtf.wav")
@@ -131,7 +139,7 @@ def test_rt30_guard_accepts_the_inclusive_limit_and_records_diagnostics(
     assert guard["estimated_rt30_s"] == 0.75
     assert guard["sampling_attempts"] == 1
     assert guard["method"] == "sabine"
-    assert guard["estimator_version"] == "sabine_raven_octaves_v2"
+    assert guard["estimator_version"] == "sabine_polygon_octaves_v3"
     assert guard["aggregation"] == "arithmetic_mean"
     assert guard["target_metric"] == "raven.mean_t30_s"
     assert guard["band_resolution"] == "octave"
@@ -217,7 +225,7 @@ def test_rt30_guard_resamples_room_before_accepting_candidate(
     assert receiver_calls == 1
 
 
-def test_rt30_guard_exhaustion_aborts_without_writing_partial_manifest_batch(
+def test_rt30_guard_exhaustion_skips_failed_index_and_keeps_successful_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -237,11 +245,97 @@ def test_rt30_guard_exhaustion_aborts_without_writing_partial_manifest_batch(
 
     monkeypatch.setattr(sampler, "estimate_room_rt30_s", estimate_room_rt30_s)
 
-    with pytest.raises(RuntimeError, match=r"scene_index=1; intentos=10; mejor_estimacion_s=1.5"):
-        generate_static_manifests(config_path)
+    manifest_paths = generate_static_manifests(config_path)
 
-    artifact_root = workspace / "artifacts"
-    assert not artifact_root.exists() or not list(artifact_root.rglob("*.json"))
+    assert [path.name for path in manifest_paths] == ["scene_static_0001.json"]
+    assert estimate_calls == 11
+
+
+def test_partial_sampling_persists_diagnostics_and_keeps_original_scene_indices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "partial_sampling", num_simulations=3)
+    original_sample = render_pipeline.sample_static_scene
+
+    def sample_with_middle_failure(config: object, rng: object, scene_index: int) -> dict:
+        if scene_index == 1:
+            raise SceneSamplingFailure(
+                {
+                    "scene_index": 1,
+                    "effective_seed": 987654,
+                    "shape_type": "l_shape",
+                    "stage": "receiver",
+                    "scene_attempts": 10,
+                    "receiver_attempts_per_scene": 5,
+                    "last_parameters": {"removed_corner": "top_right"},
+                    "last_reason": "sin región útil",
+                    "best_estimated_rt30_s": 0.82,
+                }
+            )
+        return original_sample(config, rng, scene_index)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_with_middle_failure)
+
+    manifest_paths, summary = generate_static_manifests_with_summary(config_path)
+    layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
+    failure_lines = layout["sampling_failures_path"].read_text(encoding="utf-8").splitlines()
+    failure = json.loads(failure_lines[0])
+
+    assert [path.name for path in manifest_paths] == ["scene_static_0001.json", "scene_static_0003.json"]
+    assert summary == {
+        "requested_scenes": 3,
+        "generated_scenes": 2,
+        "failed_scenes": 1,
+        "failed_scene_indices": [1],
+        "status": "partial",
+        "failures_path": layout["sampling_failures_path"].resolve().as_posix(),
+    }
+    assert len(failure_lines) == 1
+    assert failure["scene_index"] == 1
+    assert failure["scene_id"] == "scene_static_0002"
+    assert failure["stage"] == "receiver"
+    assert failure["failure_record_path"] == layout["sampling_failures_path"].resolve().as_posix()
+
+
+def test_sampling_failure_log_is_deterministic_across_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "failure_resume", num_simulations=2)
+    original_sample = render_pipeline.sample_static_scene
+
+    def always_fail_second(config: object, rng: object, scene_index: int) -> dict:
+        if scene_index == 1:
+            raise SceneSamplingFailure(
+                {
+                    "scene_index": 1,
+                    "effective_seed": 1234,
+                    "shape_type": "trapezoid",
+                    "stage": "rt30",
+                    "scene_attempts": 10,
+                    "receiver_attempts_per_scene": 5,
+                    "last_parameters": {"base_a_m": 4.0},
+                    "last_reason": "RT30 excedido",
+                    "best_estimated_rt30_s": 1.2,
+                }
+            )
+        return original_sample(config, rng, scene_index)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", always_fail_second)
+
+    first_paths, first_summary = generate_static_manifests_with_summary(config_path)
+    failure_path = Path(first_summary["failures_path"])
+    first_contents = failure_path.read_bytes()
+    second_paths, second_summary = generate_static_manifests_with_summary(config_path)
+
+    assert [path.name for path in first_paths] == ["scene_static_0001.json"]
+    assert [path.name for path in second_paths] == ["scene_static_0001.json"]
+    assert second_summary == first_summary
+    assert failure_path.read_bytes() == first_contents
+    assert len(failure_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_background_noise_does_not_perturb_existing_static_sampling(tmp_path: Path) -> None:
@@ -273,19 +367,21 @@ def test_generate_static_manifests_allows_omitting_optional_hartf_outputs(tmp_pa
 def test_sampler_uses_xyz_position_convention_for_receiver_and_sources(tmp_path: Path) -> None:
     workspace = _build_workspace(tmp_path)
     config = load_config(_write_config(workspace, "coordinate_convention"))
-    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+    room = _sampled_shoebox_room(4.0, 8.0, 2.5)
     rng = _MaxUniformRng()
 
     receiver = _sample_receiver(config, room, rng)
     source_position = _sample_random_position(room, rng)
 
-    assert receiver["position_m"] == [3.8, 1.4, 7.8]
+    assert 0.5 <= receiver["position_m"][0] <= 3.5
+    assert 0.5 <= receiver["position_m"][2] <= 7.5
     assert receiver["orientation_deg"] == {"yaw": 180.0, "pitch": 0.0, "roll": 0.0}
-    assert source_position == [3.5, 2.0, 7.5]
-    assert receiver["position_m"][1] <= room["dimensions"]["height"]
-    assert receiver["position_m"][2] > room["dimensions"]["height"]
-    assert source_position[1] <= room["dimensions"]["height"]
-    assert source_position[2] > room["dimensions"]["height"]
+    assert 0.5 <= source_position[0] <= 3.5
+    assert 0.5 <= source_position[2] <= 7.5
+    assert receiver["position_m"][1] <= room["geometry"]["height_m"]
+    assert receiver["position_m"][2] > room["geometry"]["height_m"]
+    assert source_position[1] <= room["geometry"]["height_m"]
+    assert source_position[2] > room["geometry"]["height_m"]
 
 
 def test_sample_receiver_random_yaw_is_reproducible_and_keeps_pitch_roll_fixed(tmp_path: Path) -> None:
@@ -294,7 +390,7 @@ def test_sample_receiver_random_yaw_is_reproducible_and_keeps_pitch_roll_fixed(t
     strategy = config.receiver_sampling.orientation_strategy
     strategy.pitch_deg.fixed = 12.5
     strategy.roll_deg.fixed = -7.5
-    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+    room = _sampled_shoebox_room(4.0, 8.0, 2.5)
 
     first_receiver = _sample_receiver(config, room, random.Random(321))
     second_receiver = _sample_receiver(config, room, random.Random(321))
@@ -315,7 +411,7 @@ def test_sample_receiver_random_yaw_pitch_is_reproducible_and_samples_all_axes(t
     strategy.pitch_deg.max = 30.0
     strategy.roll_deg.min = -10.0
     strategy.roll_deg.max = 10.0
-    room = {"dimensions": {"length": 4.0, "width": 8.0, "height": 2.5}}
+    room = _sampled_shoebox_room(4.0, 8.0, 2.5)
 
     first_receiver = _sample_receiver(config, room, random.Random(321))
     second_receiver = _sample_receiver(config, room, random.Random(321))
@@ -445,16 +541,16 @@ def test_generate_static_manifests_keeps_sources_at_least_half_meter_from_walls_
     config_path = _write_config(workspace, "source_clearance")
 
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
-    room_dimensions = manifest["room"]["dimensions_m"]
+    geometry = manifest["room"]["geometry"]
+    footprint = [tuple(vertex) for vertex in geometry["footprint_vertices_m"]]
     receiver_position = manifest["receiver"]["position_m"]
-    room_length, room_width, room_height = room_dimensions
 
     assert len(manifest["sources"]) >= 2
     for source in manifest["sources"]:
         x, y, z = source["position_m"]
-        assert 0.5 <= x <= room_length - 0.5
-        assert 0.5 <= y <= room_height - 0.5
-        assert 0.5 <= z <= room_width - 0.5
+        assert point_in_polygon((x, z), footprint)
+        assert wall_clearance((x, z), footprint) >= 0.5 - 1e-6
+        assert 0.5 <= y <= geometry["height_m"] - 0.5
         assert math.dist(source["position_m"], receiver_position) >= 0.5
 
 
@@ -475,7 +571,7 @@ def test_generate_static_manifests_places_away_policy_sources_at_configured_rece
     assert all(math.dist(source["position_m"], receiver_position) >= 1.0 for source in speech_sources)
 
 
-def test_fixed_position_uses_matlab_angles_and_runtime_z_conversion() -> None:
+def test_fixed_position_uses_public_coordinate_convention() -> None:
     receiver = {
         "position_m": [2.0, 1.0, 3.0],
         "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 73.0},
@@ -489,12 +585,7 @@ def test_fixed_position_uses_matlab_angles_and_runtime_z_conversion() -> None:
     assert positive_azimuth == pytest.approx([2.0, 1.0, 2.0])
     assert positive_elevation == pytest.approx([2.0, 2.0, 3.0])
 
-    runtime_manifest = {
-        "receiver": {"position_m": receiver["position_m"]},
-        "sources": [{"position_m": positive_azimuth}],
-    }
-    _flip_manifest_z_axis_for_raven(runtime_manifest)
-    assert runtime_manifest["sources"][0]["position_m"][2] - runtime_manifest["receiver"]["position_m"][2] == pytest.approx(1.0)
+    assert positive_azimuth[2] - receiver["position_m"][2] == pytest.approx(-1.0)
 
 
 def test_fixed_position_adds_angles_to_receiver_yaw_and_pitch() -> None:
@@ -608,7 +699,7 @@ def test_fixed_position_multiple_sources_searches_distinct_separated_points(tmp_
         "position_m": [2.0, 1.3, 1.5],
         "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     }
-    room = {"dimensions": {"length": 5.0, "height": 3.0, "width": 5.0}}
+    room = _sampled_shoebox_room(5.0, 5.0, 3.0)
 
     for scene_index in range(3):
         planned = [sampler.PlannedSource(source_type, True), sampler.PlannedSource(source_type, True)]
@@ -720,7 +811,7 @@ def test_fixed_policies_try_local_alternative_when_scheduled_points_collide(tmp_
         "position_m": [2.0, 1.3, 1.5],
         "orientation_deg": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
     }
-    room = {"dimensions": {"length": 5.0, "height": 3.0, "width": 5.0}}
+    room = _sampled_shoebox_room(5.0, 5.0, 3.0)
     planned = [sampler.PlannedSource(speech, True), sampler.PlannedSource(clapping, True)]
 
     assigned = sampler._assign_fixed_positions(config, planned, room, receiver, colliding_scene)
@@ -793,8 +884,7 @@ def test_fixed_position_aborts_when_assigned_point_violates_wall_margin_even_if_
         },
     )
 
-    with pytest.raises(RuntimeError, match="fixed_position asignado"):
-        generate_static_manifests(config_path)
+    assert generate_static_manifests(config_path) == []
 
 
 def test_generate_static_manifests_uses_farthest_corner_fallback_for_away_policy(
@@ -825,9 +915,14 @@ def test_generate_static_manifests_uses_farthest_corner_fallback_for_away_policy
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
     speech_source = next(source for source in manifest["sources"] if source["event_type"] == "speech")
     receiver_position = manifest["receiver"]["position_m"]
-    room_length, room_width, room_height = manifest["room"]["dimensions_m"]
+    geometry = manifest["room"]["geometry"]
+    room_height = geometry["height_m"]
+    inset = inset_polygon(
+        [tuple(vertex) for vertex in geometry["footprint_vertices_m"]],
+        0.5,
+    )
     expected_corner = max(
-        ([x, y, z] for x in (0.5, room_length - 0.5) for y in (0.5, room_height - 0.5) for z in (0.5, room_width - 0.5)),
+        ([x, y, z] for x, z in inset for y in (0.5, room_height - 0.5)),
         key=lambda position: math.dist(position, receiver_position),
     )
 
@@ -904,17 +999,15 @@ def test_generate_static_manifests_places_wall_targets_half_meter_from_the_selec
 
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
 
-    source_position = next(source["position_m"] for source in manifest["sources"] if source["event_type"] == "clapping")
-    room_length, room_width, room_height = manifest["room"]["dimensions_m"]
-
-    wall_distances = [
-        source_position[0],
-        room_length - source_position[0],
-        source_position[2],
-        room_width - source_position[2],
-    ]
-    assert min(wall_distances) == pytest.approx(0.5)
-    assert 0.5 <= source_position[1] <= room_height - 0.5
+    source = next(source for source in manifest["sources"] if source["event_type"] == "clapping")
+    source_position = source["position_m"]
+    geometry = manifest["room"]["geometry"]
+    assert source["target_wall_id"] in geometry["wall_ids"]
+    assert wall_clearance(
+        (source_position[0], source_position[2]),
+        [tuple(vertex) for vertex in geometry["footprint_vertices_m"]],
+    ) == pytest.approx(0.5, abs=1e-6)
+    assert 0.5 <= source_position[1] <= geometry["height_m"] - 0.5
 
 
 def test_generate_static_manifests_probability_one_keeps_variability_above_minimum(tmp_path: Path) -> None:
@@ -1191,7 +1284,7 @@ def test_generate_static_manifests_fails_when_material_folder_has_no_mat_files(t
         generate_static_manifests(config_path)
 
 
-def test_generate_static_manifests_emits_only_enabled_surface_material_files(tmp_path: Path) -> None:
+def test_schema_2_manifests_emit_all_surfaces_even_for_legacy_flags(tmp_path: Path) -> None:
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(
         workspace,
@@ -1204,15 +1297,173 @@ def test_generate_static_manifests_emits_only_enabled_surface_material_files(tmp
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert list(manifest["room"]["material_files"]) == [
-        "north_wall",
-        "south_wall",
-        "east_wall",
-        "west_wall",
+        *manifest["room"]["geometry"]["wall_ids"],
+        "floor",
+        "ceiling",
     ]
     for surface_id, material_entry in manifest["room"]["material_files"].items():
         assert material_entry["material_id"] == manifest["room"]["materials"][surface_id]
         assert Path(material_entry["material_path"]).is_absolute()
         assert "surface_id" not in material_entry
+
+
+@pytest.mark.parametrize(
+    ("shape_type", "shape_block", "expected_vertices"),
+    [
+        (
+            "shoebox",
+            """      - type: shoebox
+        probability: 1.0
+        length_m: {min: 5.0, max: 5.0}
+        width_m: {min: 4.0, max: 4.0}""",
+            4,
+        ),
+        (
+            "trapezoid",
+            """      - type: trapezoid
+        probability: 1.0
+        base_a_m: {min: 6.0, max: 6.0}
+        base_b_m: {min: 4.0, max: 4.0}
+        depth_m: {min: 4.0, max: 4.0}
+        top_offset_m: {min: -1.0, max: -1.0}""",
+            4,
+        ),
+        (
+            "l_shape",
+            """      - type: l_shape
+        probability: 1.0
+        outer_length_m: {min: 7.0, max: 7.0}
+        outer_width_m: {min: 6.0, max: 6.0}
+        cutout_length_m: {min: 2.0, max: 2.0}
+        cutout_width_m: {min: 2.0, max: 2.0}
+        removed_corners: [north_east]""",
+            6,
+        ),
+    ],
+)
+def test_schema_2_contract_for_each_geometry(
+    tmp_path: Path,
+    shape_type: str,
+    shape_block: str,
+    expected_vertices: int,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, f"shape_{shape_type}", num_simulations=1)
+    _replace_room_sampling_geometry(config_path, shape_block)
+
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+    geometry = manifest["room"]["geometry"]
+
+    assert manifest["schema_version"] == "2.0"
+    assert "dimensions_m" not in manifest["room"]
+    assert geometry["type"] == shape_type
+    assert len(geometry["footprint_vertices_m"]) == expected_vertices
+    assert geometry["wall_ids"] == [f"wall_{index:03d}" for index in range(1, expected_vertices + 1)]
+    assert set(manifest["room"]["materials"]) == {*geometry["wall_ids"], "floor", "ceiling"}
+    assert set(manifest["room"]["material_files"]) == set(manifest["room"]["materials"])
+    assert all(
+        entry["material_id"] == manifest["room"]["materials"][surface]
+        for surface, entry in manifest["room"]["material_files"].items()
+    )
+
+
+def test_scene_rng_depends_only_on_seed_and_scene_index(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "scene_rng", num_simulations=1))
+
+    first = sampler.sample_static_scene(config, random.Random(1), scene_index=7)
+    second = sampler.sample_static_scene(config, random.Random(999999), scene_index=7)
+    other_index = sampler.sample_static_scene(config, random.Random(1), scene_index=8)
+
+    assert first == second
+    assert first["room"]["room_id"] == "room_0008"
+    assert other_index["room"]["room_id"] == "room_0009"
+    assert first["sampling"]["effective_seed"] != other_index["sampling"]["effective_seed"]
+
+
+def test_shape_type_is_fixed_across_rt30_scene_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "fixed_shape_retry", num_simulations=1)
+    _replace_room_sampling_geometry(
+        config_path,
+        """      - type: trapezoid
+        probability: 1.0
+        base_a_m: {min: 6.0, max: 6.0}
+        base_b_m: {min: 4.0, max: 4.0}
+        depth_m: {min: 4.0, max: 4.0}
+        top_offset_m: {min: 1.0, max: 1.0}""",
+        max_rt30_s=1.0,
+    )
+    config = load_config(config_path)
+    sampled_types: list[str] = []
+    original_sample_room = sampler._sample_room
+    estimates = iter([2.0, 0.5])
+
+    def recording_sample_room(config, shape, rng, scene_index):
+        sampled_types.append(shape.type)
+        return original_sample_room(config, shape, rng, scene_index)
+
+    monkeypatch.setattr(sampler, "_sample_room", recording_sample_room)
+    monkeypatch.setattr(
+        sampler,
+        "estimate_room_rt30_s",
+        lambda room: {
+            "estimated_rt30_s": (estimate := next(estimates)),
+            "rt30_by_band_s": {frequency: estimate for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+        },
+    )
+
+    scene = sampler.sample_static_scene(config, None, scene_index=0)
+
+    assert sampled_types == ["trapezoid", "trapezoid"]
+    assert scene["sampling"]["scene_attempt"] == 2
+
+
+def test_l_shape_receiver_sources_and_wall_target_respect_real_segments(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(
+        workspace,
+        "l_shape_clearance",
+        num_simulations=1,
+        min_sources=2,
+        max_sources=2,
+        speech_min_count=1,
+        speech_max_count=1,
+        clapping_min_count=1,
+        clapping_max_count=1,
+        clapping_probability=1.0,
+    )
+    _replace_room_sampling_geometry(
+        config_path,
+        """      - type: l_shape
+        probability: 1.0
+        outer_length_m: {min: 7.0, max: 7.0}
+        outer_width_m: {min: 6.0, max: 6.0}
+        cutout_length_m: {min: 2.0, max: 2.0}
+        cutout_width_m: {min: 2.0, max: 2.0}
+        removed_corners: [north_east]""",
+    )
+
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+    geometry = manifest["room"]["geometry"]
+    footprint = [tuple(vertex) for vertex in geometry["footprint_vertices_m"]]
+
+    for position in [manifest["receiver"]["position_m"], *[source["position_m"] for source in manifest["sources"]]]:
+        assert point_in_polygon((position[0], position[2]), footprint)
+        assert wall_clearance((position[0], position[2]), footprint) >= 0.5 - 1e-6
+
+    wall_source = next(source for source in manifest["sources"] if "target_wall_id" in source)
+    wall_index = geometry["wall_ids"].index(wall_source["target_wall_id"])
+    start = footprint[wall_index]
+    end = footprint[(wall_index + 1) % len(footprint)]
+    length = math.dist(start, end)
+    expected_normal = (-(end[1] - start[1]) / length, (end[0] - start[0]) / length)
+    yaw = math.radians(wall_source["orientation_deg"]["yaw"])
+    view_xz = (math.cos(yaw), -math.sin(yaw))
+    assert view_xz == pytest.approx(expected_normal, abs=1e-6)
 
 
 def test_generate_static_manifests_skips_invalid_material_candidates_when_valid_alternative_exists(tmp_path: Path) -> None:
@@ -1435,7 +1686,7 @@ def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_
         assert all(sources[source_id]["start_time_s"] == runtime_source["start_time_s"] for sources in runtime_sources_by_manifest)
 
 
-def test_render_static_scenes_negates_receiver_and_source_z_coordinates_in_runtime_manifests(
+def test_render_static_scenes_preserves_public_geometry_poses_and_orientations_in_runtime_manifests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1454,27 +1705,29 @@ def test_render_static_scenes_negates_receiver_and_source_z_coordinates_in_runti
     render_static_scenes(config_path)
 
     scene_manifest = json.loads((layout["scene_manifest_dir"] / "scene_static_0001.json").read_text(encoding="utf-8"))
-    room_length, room_width, room_height = scene_manifest["room"]["dimensions_m"]
+    geometry = scene_manifest["room"]["geometry"]
+    footprint = [tuple(vertex) for vertex in geometry["footprint_vertices_m"]]
     runtime_manifest = json.loads(
         next(layout["runtime_manifest_dir"].glob("scene_static_0001__*.json")).read_text(encoding="utf-8")
     )
 
-    assert 0.0 <= scene_manifest["receiver"]["position_m"][0] <= room_length
-    assert 0.0 <= scene_manifest["receiver"]["position_m"][1] <= room_height
-    assert 0.0 <= scene_manifest["receiver"]["position_m"][2] <= room_width
+    assert point_in_polygon(
+        (scene_manifest["receiver"]["position_m"][0], scene_manifest["receiver"]["position_m"][2]),
+        footprint,
+    )
+    assert 0.0 <= scene_manifest["receiver"]["position_m"][1] <= geometry["height_m"]
     for source in scene_manifest["sources"]:
-        assert 0.0 <= source["position_m"][0] <= room_length
-        assert 0.0 <= source["position_m"][1] <= room_height
-        assert 0.0 <= source["position_m"][2] <= room_width
+        assert point_in_polygon((source["position_m"][0], source["position_m"][2]), footprint)
+        assert 0.0 <= source["position_m"][1] <= geometry["height_m"]
 
-    assert runtime_manifest["receiver"]["position_m"] == [
-        scene_manifest["receiver"]["position_m"][0],
-        scene_manifest["receiver"]["position_m"][1],
-        -scene_manifest["receiver"]["position_m"][2],
-    ]
+    assert runtime_manifest["room"]["geometry"] == scene_manifest["room"]["geometry"]
+    assert runtime_manifest["receiver"]["position_m"] == scene_manifest["receiver"]["position_m"]
+    assert runtime_manifest["receiver"]["orientation_deg"] == scene_manifest["receiver"]["orientation_deg"]
     assert [source["position_m"] for source in runtime_manifest["sources"]] == [
-        [source["position_m"][0], source["position_m"][1], -source["position_m"][2]]
-        for source in scene_manifest["sources"]
+        source["position_m"] for source in scene_manifest["sources"]
+    ]
+    assert [source["orientation_deg"] for source in runtime_manifest["sources"]] == [
+        source["orientation_deg"] for source in scene_manifest["sources"]
     ]
 
 
@@ -1812,6 +2065,14 @@ def test_render_static_cli_reports_summary_when_render_fails(tmp_path: Path, mon
                 "planned_variants": 1,
                 "resumed_variants": 0,
                 "inconsistent_variants": 1,
+                "sampling": {
+                    "requested_scenes": 1,
+                    "generated_scenes": 1,
+                    "failed_scenes": 0,
+                    "failed_scene_indices": [],
+                    "status": "complete",
+                    "failures_path": "artifacts/sim_test/metadata/indexes/scene_sampling_failures.jsonl",
+                },
                 "clarity": None,
             },
             cause=RuntimeError("matlab failed hard"),
@@ -1848,6 +2109,14 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
                 "planned_variants": 0,
                 "resumed_variants": 1,
                 "inconsistent_variants": 0,
+                "sampling": {
+                    "requested_scenes": 1,
+                    "generated_scenes": 1,
+                    "failed_scenes": 0,
+                    "failed_scene_indices": [],
+                    "status": "complete",
+                    "failures_path": "artifacts/sim_test/metadata/indexes/scene_sampling_failures.jsonl",
+                },
                 "clarity": None,
                 }
             ),
@@ -1868,7 +2137,85 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
     assert "Generados 2 manifiestos" in generate_result.stdout
 
 
+def test_render_static_cli_returns_partial_exit_code_for_sampling_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = RenderSummary(
+        {
+            "render_jobs": 1,
+            "index_path": "artifacts/sim_test/metadata/indexes/render_index.jsonl",
+            "total_variants": 1,
+            "completed_variants": 1,
+            "partial_variants": 0,
+            "failed_variants": 0,
+            "planned_variants": 0,
+            "resumed_variants": 0,
+            "inconsistent_variants": 0,
+            "sampling": {
+                "requested_scenes": 2,
+                "generated_scenes": 1,
+                "failed_scenes": 1,
+                "failed_scene_indices": [1],
+                "status": "partial",
+                "failures_path": "artifacts/sim_test/metadata/indexes/scene_sampling_failures.jsonl",
+            },
+            "clarity": None,
+        }
+    )
+    monkeypatch.setattr(
+        "acoustic_orchestrator.cli.render_static_scenes",
+        lambda config: ([tmp_path / "scene_static_0001.json"], summary),
+    )
+
+    result = CliRunner().invoke(app, ["render-static", str(tmp_path / "config.yml")])
+
+    assert result.exit_code == 2
+    assert "muestreo_generadas=1" in result.stdout
+    assert "muestreo_fallidos=[1]" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("generated_scenes", "failed_indices", "expected_exit_code"),
+    [
+        (2, [], 0),
+        (1, [1], 2),
+        (0, [0, 1], 1),
+    ],
+)
+def test_generate_manifests_cli_exit_code_reflects_sampling_batch_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    generated_scenes: int,
+    failed_indices: list[int],
+    expected_exit_code: int,
+) -> None:
+    config_path = tmp_path / "config.yml"
+    manifests = [tmp_path / f"scene_static_{index + 1:04d}.json" for index in range(generated_scenes)]
+    status = "complete" if not failed_indices else "partial" if generated_scenes else "failed"
+    summary = {
+        "requested_scenes": 2,
+        "generated_scenes": generated_scenes,
+        "failed_scenes": len(failed_indices),
+        "failed_scene_indices": failed_indices,
+        "status": status,
+        "failures_path": (tmp_path / "scene_sampling_failures.jsonl").as_posix(),
+    }
+    monkeypatch.setattr(
+        "acoustic_orchestrator.cli.generate_static_manifests_with_summary",
+        lambda config: (manifests, summary),
+    )
+
+    result = CliRunner().invoke(app, ["generate-manifests", str(config_path)])
+
+    assert result.exit_code == expected_exit_code
+    assert f"fallidos={failed_indices}" in result.stdout
+
+
 class _MaxUniformRng:
+    def random(self) -> float:
+        return 1.0
+
     def uniform(self, minimum: float, maximum: float) -> float:
         return maximum
 
@@ -1920,6 +2267,30 @@ def _build_workspace(
         file_path.write_text(_material_file_text(), encoding="utf-8")
 
     return workspace
+
+
+def _replace_room_sampling_geometry(
+    config_path: Path,
+    shape_block: str,
+    *,
+    max_rt30_s: float = 10.0,
+) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    start = text.index("room_sampling:\n")
+    end = text.index("source_sampling:\n")
+    replacement = f"""room_sampling:
+  max_rt30_s: {max_rt30_s}
+  geometry:
+    height_m: {{min: 2.6, max: 2.6}}
+    shape_mix:
+{shape_block}
+  materials:
+    walls: [painted_brick, window_glass]
+    floor: [wood]
+    ceiling: [plaster]
+
+"""
+    config_path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
 
 
 def _write_config(
@@ -2011,9 +2382,9 @@ receiver_sampling:
   position_strategy:
     type: random_uniform_inside_room
     margin_m:
-      x: 0.2
+      x: 0.5
       y: 0.2
-      z: 0.2
+      z: 0.5
     fixed_height_m:
       min: 1.2
       max: 1.4
@@ -2171,6 +2542,23 @@ background_noise:
     - type: colored
       colors: [white, pink, brown]
 """.strip()
+
+
+def _sampled_shoebox_room(length_m: float, width_m: float, height_m: float) -> dict:
+    return {
+        "geometry": {
+            "type": "shoebox",
+            "height_m": height_m,
+            "footprint_vertices_m": [
+                [0.0, 0.0],
+                [length_m, 0.0],
+                [length_m, width_m],
+                [0.0, width_m],
+            ],
+            "wall_ids": ["wall_001", "wall_002", "wall_003", "wall_004"],
+            "generated_from": {"length_m": length_m, "width_m": width_m},
+        }
+    }
 
 
 def _material_file_text(*, absorp_values: list[float] | None = None, scatter_values: list[float] | None = None) -> str:

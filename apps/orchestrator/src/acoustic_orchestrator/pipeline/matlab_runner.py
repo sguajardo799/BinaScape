@@ -58,7 +58,6 @@ def write_single_hrtf_render_manifest(
         scene_manifest["project_name"],
         variant_paths["variant_id"],
     )
-    _flip_manifest_z_axis_for_raven(variant_manifest)
     variant_manifest["receiver"]["hrtfs"] = [deepcopy(hrtf)]
     variant_manifest["render"]["output_wav_path"] = variant_paths["rendered_wav_path"]
     variant_manifest["render"]["output_metadata_path"] = variant_paths["render_metadata_path"]
@@ -84,19 +83,6 @@ def _filesystem_safe_name(value: str) -> str:
     if not safe_value:
         raise ValueError("RAVEN project name cannot be empty")
     return safe_value
-
-
-def _flip_manifest_z_axis_for_raven(manifest: dict) -> None:
-    manifest["receiver"]["position_m"] = _negate_z_coordinate(manifest["receiver"]["position_m"])
-    for source in manifest["sources"]:
-        source["position_m"] = _negate_z_coordinate(source["position_m"])
-
-
-def _negate_z_coordinate(position_m: list[float]) -> list[float]:
-    if len(position_m) != 3:
-        raise ValueError(f"Se esperaba una posición XYZ de 3 elementos, pero se recibió: {position_m}")
-
-    return [position_m[0], position_m[1], -position_m[2]]
 
 
 def build_render_variant_paths(

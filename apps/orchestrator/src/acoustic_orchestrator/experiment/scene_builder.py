@@ -26,7 +26,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
         render["target_duration_s"] = config.source_sampling.timing.total_duration_s
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "scene_type": config.experiment.scene_type,
         "base_rpf_file": config.raven.base_rpf_file.as_posix(),
         "project_name": config.experiment.experiment_id,
@@ -34,11 +34,16 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
         "job_id": f"render_job_static_{sequence:04d}",
         "room": {
             "room_id": sampled_scene["room"]["room_id"],
-            "dimensions_m": [
-                sampled_scene["room"]["dimensions"]["length"],
-                sampled_scene["room"]["dimensions"]["width"],
-                sampled_scene["room"]["dimensions"]["height"],
-            ],
+            "geometry": {
+                "type": sampled_scene["room"]["geometry"]["type"],
+                "height_m": sampled_scene["room"]["geometry"]["height_m"],
+                "footprint_vertices_m": [
+                    list(vertex)
+                    for vertex in sampled_scene["room"]["geometry"]["footprint_vertices_m"]
+                ],
+                "wall_ids": list(sampled_scene["room"]["geometry"]["wall_ids"]),
+                "generated_from": dict(sampled_scene["room"]["geometry"]["generated_from"]),
+            },
             "materials": sampled_scene["room"]["materials"],
             "material_files": {
                 surface_id: {
@@ -65,6 +70,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
             for source in sampled_scene["sources"]
         ],
         "reverberation_guard": dict(sampled_scene["reverberation_guard"]),
+        "sampling": dict(sampled_scene["sampling"]),
         "background_noise": _build_background_noise_manifest(sampled_scene.get("background_noise")),
         "render": render,
     }
@@ -82,6 +88,8 @@ def _build_source_manifest(source: dict) -> dict:
     }
     if "directivity" in source:
         manifest_source["directivity_path"] = _absolute_path(source["directivity"])
+    if "target_wall_id" in source:
+        manifest_source["target_wall_id"] = source["target_wall_id"]
     return manifest_source
 
 
