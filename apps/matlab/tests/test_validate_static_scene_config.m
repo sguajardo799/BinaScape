@@ -97,6 +97,55 @@ function testNormalizesRoomMaterialFiles(testCase)
     verifyTrue(testCase, isfile(normalized.room.material_files.ceiling.material_path));
 end
 
+function testNormalizesSchema2PolygonRoom(testCase)
+    cfg = make_schema2_cfg();
+
+    normalized = validate_static_scene_config(cfg);
+
+    verifyEqual(testCase, normalized.schema_version, '2.0');
+    verifyEqual(testCase, normalized.room.geometry.type, 'trapezoid');
+    verifyEqual(testCase, normalized.room.geometry.height_m, 3.0);
+    verifyEqual(testCase, normalized.room.geometry.footprint_vertices_m, ...
+        [0 0; 5 0; 4 3; 1 3]);
+    verifyEqual(testCase, normalized.room.geometry.wall_ids, ...
+        {'wall_001', 'wall_002', 'wall_003', 'wall_004'});
+    verifyFalse(testCase, isfield(normalized.room, 'dimensions_m'));
+end
+
+function testSchema2RejectsMixedLegacyDimensionsAndInvalidGeometry(testCase)
+    cfg = make_schema2_cfg();
+    cfg.room.dimensions_m = [4 3 3];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.geometry.footprint_vertices_m = [0 0; 4 3; 4 0; 0 3];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.geometry.wall_ids{4} = 'wall_003';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema2RejectsMissingOrExtraMaterialSurface(testCase)
+    cfg = make_schema2_cfg();
+    cfg.room.materials = rmfield(cfg.room.materials, 'wall_004');
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.material_files.unexpected = cfg.room.material_files.floor;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema2RejectsReceiverOrSourceOutsideFootprint(testCase)
+    cfg = make_schema2_cfg();
+    cfg.receiver.position_m = [0.25 1.5 1.5];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.sources.position_m = [4.8 1.0 2.8];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
 function testNormalizesOptionalSourceDirectivityPath(testCase)
     cfg = make_base_cfg();
     cfg.sources.directivity_path = "C:/directivity/source-pattern.daff";
@@ -245,6 +294,33 @@ function cfg = make_base_cfg()
         'orientation_deg', struct('yaw', 0.0, 'pitch', 0.0, 'roll', 0.0));
     cfg.render = struct('sample_rate_hz', 44100, 'output_wav_path', 'out.wav', ...
         'output_metadata_path', 'out.json', 'seed', 123);
+end
+
+function cfg = make_schema2_cfg()
+    cfg = make_base_cfg();
+    cfg.schema_version = '2.0';
+    legacy_room = cfg.room;
+    wall_ids = {'wall_001', 'wall_002', 'wall_003', 'wall_004'};
+    legacy_surfaces = {'north_wall', 'south_wall', 'east_wall', 'west_wall'};
+    room = struct();
+    room.geometry = struct( ...
+        'type', 'trapezoid', ...
+        'height_m', 3.0, ...
+        'footprint_vertices_m', [0 0; 5 0; 4 3; 1 3], ...
+        'wall_ids', {wall_ids}, ...
+        'generated_from', struct('base_a_m', 5.0, 'base_b_m', 3.0));
+    room.materials = struct();
+    room.material_files = struct();
+    for iWall = 1:numel(wall_ids)
+        room.materials.(wall_ids{iWall}) = legacy_room.materials.(legacy_surfaces{iWall});
+        room.material_files.(wall_ids{iWall}) = legacy_room.material_files.(legacy_surfaces{iWall});
+    end
+    room.materials.floor = legacy_room.materials.floor;
+    room.materials.ceiling = legacy_room.materials.ceiling;
+    room.material_files.floor = legacy_room.material_files.floor;
+    room.material_files.ceiling = legacy_room.material_files.ceiling;
+    cfg.room = room;
+    cfg.sources.position_m = [2.0 1.0 1.5];
 end
 
 function room = make_room_cfg(repo_root)

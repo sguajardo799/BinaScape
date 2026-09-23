@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 
 from acoustic_orchestrator.config.validator import load_material_absorption_coefficients
+from acoustic_orchestrator.experiment.geometry import edge_lengths, polygon_area
 
 
 SABINE_CONSTANT_M_S = 0.161
@@ -55,19 +56,28 @@ RT30_GUARD_FREQUENCIES_HZ = RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ
 
 
 def estimate_room_rt30_s(room: dict) -> dict:
-    dimensions = room["dimensions"]
-    length = dimensions["length"]
-    width = dimensions["width"]
-    height = dimensions["height"]
-    volume_m3 = length * width * height
+    geometry = room["geometry"]
+    footprint = [tuple(vertex) for vertex in geometry["footprint_vertices_m"]]
+    height_m = geometry["height_m"]
+    floor_area_m2 = polygon_area(footprint)
+    volume_m3 = floor_area_m2 * height_m
     surface_areas_m2 = {
-        "north_wall": length * height,
-        "south_wall": length * height,
-        "east_wall": width * height,
-        "west_wall": width * height,
-        "floor": length * width,
-        "ceiling": length * width,
+        wall_id: length_m * height_m
+        for wall_id, length_m in zip(
+            geometry["wall_ids"],
+            edge_lengths(footprint),
+            strict=True,
+        )
     }
+    surface_areas_m2["floor"] = floor_area_m2
+    surface_areas_m2["ceiling"] = floor_area_m2
+
+    expected_surfaces = set(surface_areas_m2)
+    actual_surfaces = set(room["material_files"])
+    if actual_surfaces != expected_surfaces:
+        missing = sorted(expected_surfaces - actual_surfaces)
+        extra = sorted(actual_surfaces - expected_surfaces)
+        raise ValueError(f"Superficies acústicas inconsistentes; faltantes={missing}; extra={extra}")
 
     absorption_by_surface = {
         surface_id: load_material_absorption_coefficients(Path(material["material_path"]))
@@ -104,4 +114,7 @@ def estimate_room_rt30_s(room: dict) -> dict:
     return {
         "estimated_rt30_s": estimated_rt30_s,
         "rt30_by_band_s": rt30_by_band_s,
+        "floor_area_m2": floor_area_m2,
+        "volume_m3": volume_m3,
+        "surface_areas_m2": surface_areas_m2,
     }

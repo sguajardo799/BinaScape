@@ -392,7 +392,7 @@ def _write_config(
             "  one_receiver_per_scene: true\n"
             "  position_strategy:\n"
             "    type: random_uniform_inside_room\n"
-            "    margin_m: {x: 0.1, y: 0.1, z: 0.1}\n"
+            "    margin_m: {x: 0.5, y: 0.1, z: 0.5}\n"
             "    fixed_height_m: {min: 1.2, max: 1.3}\n"
             "  orientation_strategy:\n"
             "    type: random_yaw\n"

@@ -2,13 +2,13 @@ import random
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from acoustic_orchestrator.config.models import AppConfig, ReceiverOutputConfig
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
 from acoustic_orchestrator.experiment.manifest_writer import write_manifest
-from acoustic_orchestrator.experiment.sampler import SceneSamplingSkipped, build_background_noise_plan, sample_static_scene
+from acoustic_orchestrator.experiment.sampler import SceneSamplingFailure, build_background_noise_plan, sample_static_scene
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.clarity_handoff import ClaritySummary, prepare_clarity_handoff
 from acoustic_orchestrator.pipeline.matlab_runner import (
@@ -47,16 +47,31 @@ class RenderSummary(TypedDict):
     inconsistent_variants: int
     render_jobs: int
     index_path: str
+    sampling: "SamplingSummary"
     clarity: ClaritySummary | None
 
 
+class SamplingSummary(TypedDict):
+    requested_scenes: int
+    generated_scenes: int
+    failed_scenes: int
+    failed_scene_indices: list[int]
+    status: Literal["complete", "partial", "failed"]
+    failures_path: str
+
+
 def generate_static_manifests(config_path: str | Path) -> list[Path]:
-    _, manifest_paths = _prepare_static_manifests(config_path)
+    manifest_paths, _ = generate_static_manifests_with_summary(config_path)
     return manifest_paths
 
 
+def generate_static_manifests_with_summary(config_path: str | Path) -> tuple[list[Path], SamplingSummary]:
+    _, manifest_paths, sampling_summary = _prepare_static_manifests(config_path)
+    return manifest_paths, sampling_summary
+
+
 def render_static_scenes(config_path: str | Path, matlab_executable: str = "matlab") -> tuple[list[Path], RenderSummary]:
-    config, manifest_paths = _prepare_static_manifests(config_path)
+    config, manifest_paths, sampling_summary = _prepare_static_manifests(config_path)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     runtime_manifest_dir = layout["runtime_manifest_dir"]
     index_path = layout["render_index_path"]
@@ -128,7 +143,13 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
     if first_render_error is not None:
         raise RenderStaticRunError(
             manifest_paths=manifest_paths,
-            summary=_build_render_summary(variant_records, render_jobs, index_path, clarity_summary=None),
+            summary=_build_render_summary(
+                variant_records,
+                render_jobs,
+                index_path,
+                sampling_summary=sampling_summary,
+                clarity_summary=None,
+            ),
             cause=first_render_error,
         ) from first_render_error
 
@@ -136,7 +157,13 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
     if config.hearing_degradation.enabled:
         clarity_summary = prepare_clarity_handoff(config)
 
-    return manifest_paths, _build_render_summary(variant_records, render_jobs, index_path, clarity_summary=clarity_summary)
+    return manifest_paths, _build_render_summary(
+        variant_records,
+        render_jobs,
+        index_path,
+        sampling_summary=sampling_summary,
+        clarity_summary=clarity_summary,
+    )
 
 
 def run_clarity_handoff(config_path: str | Path, *, submit: bool | None = None) -> ClaritySummary:
@@ -295,7 +322,7 @@ def _build_planned_variants(config: AppConfig, manifest_paths: list[Path], runti
     return planned_variants
 
 
-def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[Path]]:
+def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[Path], SamplingSummary]:
     config = load_config(config_path)
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
@@ -303,13 +330,22 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
     rng = random.Random(config.experiment.random_seed)
     background_noise_plan = build_background_noise_plan(config, config.execution.num_simulations)
     planned_manifests: list[tuple[dict, Path]] = []
+    sampling_failures: list[dict] = []
+    failures_path = layout["sampling_failures_path"].resolve()
 
     for scene_index in range(config.execution.num_simulations):
         scene_id = f"{config.outputs.naming.scene_id_prefix}_{scene_index + 1:04d}"
         manifest_path = layout["scene_manifest_dir"] / f"{scene_id}.json"
         try:
             sampled_scene = sample_static_scene(config, rng, scene_index)
-        except SceneSamplingSkipped:
+        except SceneSamplingFailure as exc:
+            sampling_failures.append(
+                {
+                    **exc.diagnostics,
+                    "scene_id": scene_id,
+                    "failure_record_path": failures_path.as_posix(),
+                }
+            )
             continue
         sampled_scene["background_noise"] = background_noise_plan[scene_index]
         scene_manifest = build_static_manifest(config, sampled_scene, scene_index, manifest_path)
@@ -324,7 +360,37 @@ def _prepare_static_manifests(config_path: str | Path) -> tuple[AppConfig, list[
         for scene_manifest, manifest_path in planned_manifests
     ]
 
-    return config, manifest_paths
+    _write_sampling_failures(failures_path, sampling_failures)
+    failed_scene_indices = [failure["scene_index"] for failure in sampling_failures]
+    generated_scenes = len(manifest_paths)
+    if not sampling_failures:
+        status: Literal["complete", "partial", "failed"] = "complete"
+    elif generated_scenes:
+        status = "partial"
+    else:
+        status = "failed"
+    sampling_summary: SamplingSummary = {
+        "requested_scenes": config.execution.num_simulations,
+        "generated_scenes": generated_scenes,
+        "failed_scenes": len(sampling_failures),
+        "failed_scene_indices": failed_scene_indices,
+        "status": status,
+        "failures_path": failures_path.as_posix(),
+    }
+
+    return config, manifest_paths, sampling_summary
+
+
+def _write_sampling_failures(path: Path, failures: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered_failures = sorted(failures, key=lambda failure: failure["scene_index"])
+    contents = "".join(
+        f"{json.dumps(failure, sort_keys=True, ensure_ascii=False)}\n"
+        for failure in ordered_failures
+    )
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(contents, encoding="utf-8")
+    temporary_path.replace(path)
 
 
 def _build_render_summary(
@@ -332,6 +398,7 @@ def _build_render_summary(
     render_jobs: int,
     index_path: Path,
     *,
+    sampling_summary: SamplingSummary,
     clarity_summary: ClaritySummary | None,
 ) -> RenderSummary:
     index_summary = summarize_variant_index(variant_records)
@@ -345,6 +412,7 @@ def _build_render_summary(
         "inconsistent_variants": index_summary["inconsistent_variants"],
         "render_jobs": render_jobs,
         "index_path": index_path.resolve().as_posix(),
+        "sampling": sampling_summary,
         "clarity": clarity_summary,
     }
     return summary

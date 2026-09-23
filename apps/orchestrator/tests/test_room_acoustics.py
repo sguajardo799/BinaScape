@@ -40,20 +40,7 @@ def test_estimate_room_rt30_uses_all_ten_raven_octave_bands(tmp_path: Path) -> N
         absorption_values[index] = absorption
     material_path = tmp_path / "material.mat"
     material_path.write_text(_material_file_text(absorption_values), encoding="utf-8")
-    room = {
-        "dimensions": {"length": 5.0, "width": 4.0, "height": 3.0},
-        "material_files": {
-            surface_id: {"material_path": material_path}
-            for surface_id in (
-                "north_wall",
-                "south_wall",
-                "east_wall",
-                "west_wall",
-                "floor",
-                "ceiling",
-            )
-        },
-    }
+    room = _shoebox_room({surface: material_path for surface in _surface_ids()})
 
     estimate = estimate_room_rt30_s(room)
 
@@ -73,10 +60,10 @@ def test_estimate_room_rt30_uses_all_ten_raven_octave_bands(tmp_path: Path) -> N
 
 def test_estimate_room_rt30_weights_each_surface_with_its_physical_area(tmp_path: Path) -> None:
     absorption_by_surface = {
-        "north_wall": 0.10,
-        "south_wall": 0.20,
-        "east_wall": 0.30,
-        "west_wall": 0.40,
+        "wall_001": 0.10,
+        "wall_002": 0.20,
+        "wall_003": 0.30,
+        "wall_004": 0.40,
         "floor": 0.50,
         "ceiling": 0.60,
     }
@@ -87,17 +74,14 @@ def test_estimate_room_rt30_weights_each_surface_with_its_physical_area(tmp_path
         material_files[surface_id] = {"material_path": material_path}
 
     estimate = estimate_room_rt30_s(
-        {
-            "dimensions": {"length": 5.0, "width": 4.0, "height": 3.0},
-            "material_files": material_files,
-        }
+        _shoebox_room({surface: ref["material_path"] for surface, ref in material_files.items()})
     )
 
     equivalent_absorption_m2 = (
-        15.0 * absorption_by_surface["north_wall"]
-        + 15.0 * absorption_by_surface["south_wall"]
-        + 12.0 * absorption_by_surface["east_wall"]
-        + 12.0 * absorption_by_surface["west_wall"]
+        15.0 * absorption_by_surface["wall_001"]
+        + 12.0 * absorption_by_surface["wall_002"]
+        + 15.0 * absorption_by_surface["wall_003"]
+        + 12.0 * absorption_by_surface["wall_004"]
         + 20.0 * absorption_by_surface["floor"]
         + 20.0 * absorption_by_surface["ceiling"]
     )
@@ -116,23 +100,58 @@ def test_estimate_room_rt30_rejects_a_non_positive_selected_band(tmp_path: Path)
     material_path = tmp_path / "material.mat"
     material_path.write_text(_material_file_text(absorption_values), encoding="utf-8")
 
-    room = {
-        "dimensions": {"length": 5.0, "width": 4.0, "height": 3.0},
-        "material_files": {
-            surface_id: {"material_path": material_path}
-            for surface_id in (
-                "north_wall",
-                "south_wall",
-                "east_wall",
-                "west_wall",
-                "floor",
-                "ceiling",
-            )
-        },
-    }
+    room = _shoebox_room({surface: material_path for surface in _surface_ids()})
 
     with pytest.raises(ValueError, match="16000 Hz"):
         estimate_room_rt30_s(room)
+
+
+def test_estimate_room_rt30_uses_real_l_shape_area_volume_and_edges(tmp_path: Path) -> None:
+    material_path = tmp_path / "material.mat"
+    material_path.write_text(_material_file_text([0.5] * 31), encoding="utf-8")
+    vertices = [[0.0, 0.0], [7.0, 0.0], [7.0, 4.0], [5.0, 4.0], [5.0, 6.0], [0.0, 6.0]]
+    wall_ids = [f"wall_{index:03d}" for index in range(1, 7)]
+    room = {
+        "geometry": {
+            "type": "l_shape",
+            "height_m": 3.0,
+            "footprint_vertices_m": vertices,
+            "wall_ids": wall_ids,
+            "generated_from": {},
+        },
+        "material_files": {
+            surface: {"material_path": material_path}
+            for surface in [*wall_ids, "floor", "ceiling"]
+        },
+    }
+
+    estimate = estimate_room_rt30_s(room)
+
+    assert estimate["floor_area_m2"] == pytest.approx(38.0)
+    assert estimate["volume_m3"] == pytest.approx(114.0)
+    assert list(estimate["surface_areas_m2"].values()) == pytest.approx(
+        [21.0, 12.0, 6.0, 6.0, 15.0, 18.0, 38.0, 38.0]
+    )
+
+
+def _surface_ids() -> list[str]:
+    return ["wall_001", "wall_002", "wall_003", "wall_004", "floor", "ceiling"]
+
+
+def _shoebox_room(material_paths: dict[str, Path]) -> dict:
+    return {
+        "geometry": {
+            "type": "shoebox",
+            "height_m": 3.0,
+            "footprint_vertices_m": [[0.0, 0.0], [5.0, 0.0], [5.0, 4.0], [0.0, 4.0]],
+            "wall_ids": ["wall_001", "wall_002", "wall_003", "wall_004"],
+            "generated_from": {"length_m": 5.0, "width_m": 4.0},
+        },
+        "material_files": {
+            surface: {"material_path": path}
+            for surface, path in material_paths.items()
+        },
+    }
 
 
 def _material_file_text(absorption_values: list[float]) -> str:

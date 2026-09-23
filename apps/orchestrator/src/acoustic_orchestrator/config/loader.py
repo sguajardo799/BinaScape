@@ -20,6 +20,7 @@ def load_config(config_path: str | Path) -> AppConfig:
         raw_config = yaml.safe_load(file)
 
     _reject_legacy_output_roots(raw_config)
+    _normalize_legacy_config(raw_config)
 
     config = AppConfig.model_validate(raw_config)
     return resolve_relative_paths(config, config_path.parent)
@@ -100,3 +101,68 @@ def _reject_legacy_output_roots(raw_config: object) -> None:
             + ", ".join(legacy_keys)
             + ". Usa outputs.artifact_root y outputs.run_name."
         )
+
+
+def _normalize_legacy_config(raw_config: object) -> None:
+    if not isinstance(raw_config, dict):
+        return
+
+    room_sampling = raw_config.get("room_sampling")
+    if isinstance(room_sampling, dict):
+        _normalize_legacy_room_sampling(room_sampling)
+
+    scene_validation = raw_config.get("scene_validation")
+    if isinstance(scene_validation, dict):
+        _normalize_legacy_retry_budget(scene_validation)
+
+
+def _normalize_legacy_room_sampling(room_sampling: dict) -> None:
+    has_dimensions = "dimensions_m" in room_sampling
+    has_geometry = "geometry" in room_sampling
+    has_semantic_surfaces = "semantic_surfaces" in room_sampling
+
+    if has_dimensions and has_geometry:
+        raise ValueError("room_sampling no puede mezclar dimensions_m legacy con geometry")
+
+    if not has_dimensions:
+        if has_semantic_surfaces:
+            raise ValueError("room_sampling.semantic_surfaces solo se admite junto a dimensions_m legacy")
+        return
+
+    dimensions = room_sampling.pop("dimensions_m")
+    if not isinstance(dimensions, dict):
+        raise ValueError("room_sampling.dimensions_m legacy debe ser un objeto")
+
+    semantic_surfaces = room_sampling.pop("semantic_surfaces", None)
+    if semantic_surfaces is not None:
+        if not isinstance(semantic_surfaces, dict):
+            raise ValueError("room_sampling.semantic_surfaces legacy debe ser un objeto")
+
+    missing = [name for name in ("length", "width", "height") if name not in dimensions]
+    if missing:
+        raise ValueError("room_sampling.dimensions_m legacy incompleto: " + ", ".join(missing))
+
+    room_sampling["geometry"] = {
+        "height_m": dimensions["height"],
+        "shape_mix": [
+            {
+                "type": "shoebox",
+                "probability": 1.0,
+                "length_m": dimensions["length"],
+                "width_m": dimensions["width"],
+            }
+        ],
+    }
+
+
+def _normalize_legacy_retry_budget(scene_validation: dict) -> None:
+    legacy_key = "max_sampling_attempts_per_scene"
+    if legacy_key not in scene_validation:
+        return
+    if "max_scene_attempts" in scene_validation or "max_receiver_attempts" in scene_validation:
+        raise ValueError(
+            "scene_validation no puede mezclar max_sampling_attempts_per_scene legacy con los presupuestos nuevos"
+        )
+    attempts = scene_validation.pop(legacy_key)
+    scene_validation["max_scene_attempts"] = attempts
+    scene_validation["max_receiver_attempts"] = attempts

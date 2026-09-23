@@ -41,11 +41,14 @@ function ctx = build_sources_from_config(ctx)
         src_cfg = cfg.sources(i);
 
         % Posición
-        pos = double(src_cfg.position_m(:)).';
-
-        % Orientación -> vectores
         ori = src_cfg.orientation_deg;
-        [viewVec, upVec] = orientation_deg_to_vectors(src_cfg.orientation_deg.pitch, src_cfg.orientation_deg.yaw);
+        if isfield(cfg, 'schema_version') && strcmp(char(string(cfg.schema_version)), '2.0')
+            [pos, viewVec, upVec] = transform_schema2_pose_to_raven( ...
+                src_cfg.position_m, ori);
+        else
+            pos = double(src_cfg.position_m(:)).';
+            [viewVec, upVec] = orientation_deg_to_vectors(ori.pitch, ori.yaw);
+        end
 
         % Nombre visible en RAVEN
         src_name = char(string(src_cfg.source_id));

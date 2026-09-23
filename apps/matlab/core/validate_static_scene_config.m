@@ -12,7 +12,16 @@ function cfg = validate_static_scene_config(cfg)
         error('Expected scene_type = static');
     end
 
-    cfg.room = normalize_room_config(cfg.room);
+    if ~isfield(cfg, 'schema_version') || isempty(cfg.schema_version)
+        cfg.schema_version = '1.0';
+    else
+        cfg.schema_version = char(string(cfg.schema_version));
+    end
+    if ~any(strcmp(cfg.schema_version, {'1.0', '2.0'}))
+        error('Unsupported schema_version: %s', cfg.schema_version);
+    end
+
+    cfg.room = normalize_room_config(cfg.room, cfg.schema_version);
 
     if ~isfield(cfg.receiver, 'position_m') || ~isfield(cfg.receiver, 'orientation_deg')
         error('Static receiver must define position_m and orientation_deg');
@@ -21,6 +30,17 @@ function cfg = validate_static_scene_config(cfg)
     cfg.receiver.position_m = double(cfg.receiver.position_m(:)).';
     cfg.receiver.orientation_deg = normalize_orientation(cfg.receiver.orientation_deg);
     cfg.sources = normalize_static_sources(cfg.sources);
+    if strcmp(cfg.schema_version, '2.0')
+        validate_schema2_pose(cfg.receiver.position_m, cfg.room.geometry, ...
+            'receiver.position_m', false);
+        for iSource = 1:numel(cfg.sources)
+            if ~isfield(cfg.sources(iSource), 'position_m') || isempty(cfg.sources(iSource).position_m)
+                error('sources(%d).position_m is required for schema 2.0.', iSource);
+            end
+            validate_schema2_pose(cfg.sources(iSource).position_m, cfg.room.geometry, ...
+                sprintf('sources(%d).position_m', iSource), true);
+        end
+    end
     cfg.background_noise = normalize_background_noise_config(getfield_if_present(cfg, 'background_noise')); %#ok<GFLD>
 
     if ~isfield(cfg.render, 'sample_rate_hz') || ~isfield(cfg.render, 'output_wav_path') ...
@@ -318,14 +338,135 @@ function value = normalize_optional_logical_field(value, default_value, field_na
     error('%s must be a logical scalar.', field_name);
 end
 
-function room = normalize_room_config(room)
+function room = normalize_room_config(room, schema_version)
+    if strcmp(schema_version, '1.0')
+        room = normalize_legacy_room_config(room);
+        return;
+    end
+
+    room = normalize_polygon_room_config(room);
+end
+
+function room = normalize_legacy_room_config(room)
     if ~isfield(room, 'dimensions_m') || numel(room.dimensions_m) ~= 3
         error('room.dimensions_m must define exactly three values.');
     end
-
+    if isfield(room, 'geometry')
+        error('schema 1.0 room cannot contain geometry.');
+    end
     room.dimensions_m = double(room.dimensions_m(:)).';
+    if any(~isfinite(room.dimensions_m)) || any(room.dimensions_m <= 0)
+        error('room.dimensions_m values must be finite and positive.');
+    end
+    required_surfaces = get_legacy_room_surfaces();
+    room = normalize_room_materials(room, required_surfaces, false);
+end
 
-    required_surfaces = get_required_room_surfaces();
+function room = normalize_polygon_room_config(room)
+    if isfield(room, 'dimensions_m')
+        error('schema 2.0 room cannot contain dimensions_m.');
+    end
+    if ~isfield(room, 'geometry') || ~isstruct(room.geometry) || ~isscalar(room.geometry)
+        error('room.geometry is required for schema 2.0.');
+    end
+
+    geometry = room.geometry;
+    required_geometry = {'type', 'height_m', 'footprint_vertices_m', 'wall_ids'};
+    for iField = 1:numel(required_geometry)
+        if ~isfield(geometry, required_geometry{iField})
+            error('room.geometry.%s is required.', required_geometry{iField});
+        end
+    end
+
+    geometry.type = char(string(geometry.type));
+    if ~any(strcmp(geometry.type, {'shoebox', 'trapezoid', 'l_shape'}))
+        error('room.geometry.type is unsupported: %s', geometry.type);
+    end
+    if ~isnumeric(geometry.height_m) || ~isscalar(geometry.height_m) || ...
+            ~isfinite(geometry.height_m) || geometry.height_m <= 0
+        error('room.geometry.height_m must be a finite positive scalar.');
+    end
+    geometry.height_m = double(geometry.height_m);
+
+    vertices = geometry.footprint_vertices_m;
+    if ~isnumeric(vertices) || size(vertices, 2) ~= 2 || any(~isfinite(vertices), 'all')
+        error('room.geometry.footprint_vertices_m must be a finite N-by-2 matrix.');
+    end
+    vertices = double(vertices);
+    expected_vertices = 4;
+    if strcmp(geometry.type, 'l_shape')
+        expected_vertices = 6;
+    end
+    if size(vertices, 1) ~= expected_vertices
+        error('room.geometry.%s requires exactly %d footprint vertices.', ...
+            geometry.type, expected_vertices);
+    end
+    if any(vecnorm(vertices - circshift(vertices, -1, 1), 2, 2) <= 1e-6)
+        error('room.geometry footprint contains a zero-length edge.');
+    end
+    signed_area = polygon_signed_area(vertices);
+    if signed_area <= 1e-8
+        error('room.geometry footprint must be simple, non-degenerate and counter-clockwise.');
+    end
+    if polygon_has_self_intersection(vertices)
+        error('room.geometry footprint must be simple.');
+    end
+    if abs(min(vertices(:, 1))) > 1e-6 || abs(min(vertices(:, 2))) > 1e-6
+        error('room.geometry footprint must be normalized to min(x)=min(z)=0.');
+    end
+
+    wall_ids = normalize_wall_ids(geometry.wall_ids);
+    if numel(wall_ids) ~= size(vertices, 1)
+        error('room.geometry.wall_ids must match the footprint vertex count.');
+    end
+    expected_wall_ids = arrayfun(@(index) sprintf('wall_%03d', index), ...
+        1:size(vertices, 1), 'UniformOutput', false);
+    if ~isequal(wall_ids, expected_wall_ids)
+        error('room.geometry.wall_ids must be canonical and ordered.');
+    end
+
+    geometry.footprint_vertices_m = vertices;
+    geometry.wall_ids = wall_ids;
+    room.geometry = geometry;
+    required_surfaces = [wall_ids, {'floor', 'ceiling'}];
+    room = normalize_room_materials(room, required_surfaces, true);
+end
+
+function validate_schema2_pose(position, geometry, field_name, require_vertical_clearance)
+    if ~isnumeric(position) || numel(position) ~= 3 || any(~isfinite(position), 'all')
+        error('%s must contain exactly three finite coordinates.', field_name);
+    end
+    position = double(position(:).');
+    vertices = geometry.footprint_vertices_m;
+    [inside, on_boundary] = inpolygon(position(1), position(3), ...
+        vertices(:, 1), vertices(:, 2));
+    if ~inside || on_boundary || polygon_wall_clearance(position([1 3]), vertices) < 0.5 - 1e-6
+        error('%s must be inside the schema 2.0 footprint with 0.5 m wall clearance.', ...
+            field_name);
+    end
+    if position(2) < 0 || position(2) > geometry.height_m
+        error('%s height must be inside the schema 2.0 room.', field_name);
+    end
+    if require_vertical_clearance && ...
+            (position(2) < 0.5 - 1e-6 || position(2) > geometry.height_m - 0.5 + 1e-6)
+        error('%s height must keep 0.5 m from floor and ceiling.', field_name);
+    end
+end
+
+function clearance = polygon_wall_clearance(point, vertices)
+    clearance = inf;
+    for iVertex = 1:size(vertices, 1)
+        next_index = mod(iVertex, size(vertices, 1)) + 1;
+        start_point = vertices(iVertex, :);
+        segment = vertices(next_index, :) - start_point;
+        segment_length_squared = dot(segment, segment);
+        t = max(0, min(1, dot(point - start_point, segment) / segment_length_squared));
+        projection = start_point + t * segment;
+        clearance = min(clearance, norm(point - projection));
+    end
+end
+
+function room = normalize_room_materials(room, required_surfaces, require_exact)
 
     if ~isfield(room, 'materials') || ~isstruct(room.materials)
         error('room.materials is required for the static flow.');
@@ -333,6 +474,11 @@ function room = normalize_room_config(room)
 
     if ~isfield(room, 'material_files') || ~isstruct(room.material_files)
         error('room.material_files is required for the static flow.');
+    end
+
+    if require_exact
+        validate_exact_surface_fields(room.materials, required_surfaces, 'room.materials');
+        validate_exact_surface_fields(room.material_files, required_surfaces, 'room.material_files');
     end
 
     normalized_materials = struct();
@@ -384,13 +530,78 @@ function room = normalize_room_config(room)
     room.material_files = normalized_material_files;
 end
 
+function wall_ids = normalize_wall_ids(candidate)
+    if isstring(candidate)
+        wall_ids = cellstr(candidate(:).');
+    elseif iscell(candidate)
+        wall_ids = reshape(candidate, 1, []);
+        for iWall = 1:numel(wall_ids)
+            if ~(ischar(wall_ids{iWall}) || (isstring(wall_ids{iWall}) && isscalar(wall_ids{iWall})))
+                error('room.geometry.wall_ids must contain text values.');
+            end
+            wall_ids{iWall} = char(string(wall_ids{iWall}));
+        end
+    else
+        error('room.geometry.wall_ids must be a text array.');
+    end
+end
+
+function validate_exact_surface_fields(candidate, expected, field_name)
+    actual = fieldnames(candidate).';
+    missing = expected(~ismember(expected, actual));
+    unexpected = actual(~ismember(actual, expected));
+    if ~isempty(missing) || ~isempty(unexpected) || numel(actual) ~= numel(expected)
+        error('%s surfaces must match geometry exactly. Missing: %s. Unexpected: %s.', ...
+            field_name, strjoin(missing, ', '), strjoin(unexpected, ', '));
+    end
+end
+
+function area = polygon_signed_area(vertices)
+    next_vertices = circshift(vertices, -1, 1);
+    area = 0.5 * sum(vertices(:, 1) .* next_vertices(:, 2) - ...
+        next_vertices(:, 1) .* vertices(:, 2));
+end
+
+function has_intersection = polygon_has_self_intersection(vertices)
+    n_vertices = size(vertices, 1);
+    has_intersection = false;
+    for iEdge = 1:n_vertices
+        a1 = vertices(iEdge, :);
+        a2 = vertices(mod(iEdge, n_vertices) + 1, :);
+        for jEdge = iEdge + 1:n_vertices
+            if jEdge == iEdge + 1 || (iEdge == 1 && jEdge == n_vertices)
+                continue;
+            end
+            b1 = vertices(jEdge, :);
+            b2 = vertices(mod(jEdge, n_vertices) + 1, :);
+            if segments_intersect_strict(a1, a2, b1, b2)
+                has_intersection = true;
+                return;
+            end
+        end
+    end
+end
+
+function intersects = segments_intersect_strict(a1, a2, b1, b2)
+    o1 = cross_2d(a2 - a1, b1 - a1);
+    o2 = cross_2d(a2 - a1, b2 - a1);
+    o3 = cross_2d(b2 - b1, a1 - b1);
+    o4 = cross_2d(b2 - b1, a2 - b1);
+    intersects = ((o1 > 1e-9 && o2 < -1e-9) || (o1 < -1e-9 && o2 > 1e-9)) && ...
+        ((o3 > 1e-9 && o4 < -1e-9) || (o3 < -1e-9 && o4 > 1e-9));
+end
+
+function value = cross_2d(lhs, rhs)
+    value = lhs(1) * rhs(2) - lhs(2) * rhs(1);
+end
+
 function tf = is_absolute_path(path_value)
     path_value = char(string(path_value));
     tf = ~isempty(regexp(path_value, '^[A-Za-z]:[\\/]', 'once')) || ...
         startsWith(path_value, '\\') || startsWith(path_value, '/');
 end
 
-function surfaces = get_required_room_surfaces()
+function surfaces = get_legacy_room_surfaces()
     surfaces = {'north_wall', 'south_wall', 'east_wall', 'west_wall', 'floor', 'ceiling'};
 end
 

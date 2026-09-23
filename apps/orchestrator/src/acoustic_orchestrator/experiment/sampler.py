@@ -5,14 +5,18 @@ from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
 import wave
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from acoustic_orchestrator.config.models import (
     AppConfig,
     BackgroundNoiseStrategyConfig,
+    LShapeGeometryConfig,
     ReceiverOutputConfig,
+    RoomShapeConfig,
+    ShoeboxGeometryConfig,
     SourceOrientationStrategy,
     SourceTypeConfig,
+    TrapezoidGeometryConfig,
 )
 from acoustic_orchestrator.config.validator import (
     derive_materials_root,
@@ -24,9 +28,21 @@ from acoustic_orchestrator.experiment.room_acoustics import (
     RT30_GUARD_FREQUENCIES_HZ,
     estimate_room_rt30_s,
 )
+from acoustic_orchestrator.experiment.geometry import (
+    ABS_COORD_TOL_M,
+    build_l_shape_footprint,
+    build_shoebox_footprint,
+    build_trapezoid_footprint,
+    canonical_wall_ids,
+    edge_lengths,
+    inward_normals,
+    inset_polygon,
+    point_in_polygon,
+    sample_uniform_point,
+    wall_clearance,
+)
 
 
-SURFACE_ORDER = ("north_wall", "south_wall", "east_wall", "west_wall", "floor", "ceiling")
 SOURCE_WALL_CLEARANCE_M = 0.5
 SOURCE_RECEIVER_CLEARANCE_M = 0.5
 T = TypeVar("T")
@@ -37,85 +53,134 @@ class SceneSamplingSkipped(RuntimeError):
     """Raised when the current scene attempt must be skipped entirely."""
 
 
+class SceneSamplingFailure(SceneSamplingSkipped):
+    def __init__(self, diagnostics: dict) -> None:
+        self.diagnostics = diagnostics
+        super().__init__(
+            "No se pudo generar una escena válida: "
+            f"scene_index={diagnostics['scene_index']}; "
+            f"stage={diagnostics['stage']}; "
+            f"intentos={diagnostics['scene_attempts']}"
+        )
+
+
 @dataclass(frozen=True)
 class PlannedSource:
     source_type: SourceTypeConfig
     is_required: bool
 
 
-def sample_static_scene(config: AppConfig, rng: random.Random, scene_index: int) -> dict:
-    room, reverberation_guard = _sample_room_with_rt30_guard(config, rng, scene_index)
-    receiver = _sample_receiver(config, room, rng)
-    hrtfs = _sample_hrtfs(config, rng)
-
-    sources = None
-    attempts = config.scene_validation.max_sampling_attempts_per_scene
-    for _ in range(attempts):
-        sources = _sample_sources(config, room, receiver, rng, scene_index)
-        if _is_valid_scene(config, room, receiver, sources):
-            break
-    else:
-        raise RuntimeError(f"No se pudo generar una escena válida tras {attempts} intentos para scene_index={scene_index}")
-
-    return {
-        "room": room,
-        "receiver": receiver | {"hrtfs": hrtfs},
-        "sources": sources,
-        "reverberation_guard": reverberation_guard,
-    }
-
-
-def _sample_room_with_rt30_guard(config: AppConfig, rng: random.Random, scene_index: int) -> tuple[dict, dict]:
-    attempts = config.scene_validation.max_sampling_attempts_per_scene
-    max_rt30_s = config.room_sampling.max_rt30_s
+def sample_static_scene(
+    config: AppConfig,
+    rng: random.Random | None,
+    scene_index: int,
+) -> dict:
+    del rng  # Scene sampling is intentionally independent from run order.
+    effective_seed = _derive_stable_seed(
+        config.experiment.random_seed,
+        f"scene:{scene_index}",
+    )
+    scene_rng = random.Random(effective_seed)
+    shape = _sample_room_shape(config, scene_rng)
     best_estimate_s: float | None = None
-    last_estimate_s: float | None = None
-    last_error: str | None = None
+    last_stage = "geometry"
+    last_reason = "sin intentos"
+    last_parameters: dict = {}
 
-    for attempt in range(1, attempts + 1):
-        room = _sample_room(config, rng)
+    for scene_attempt in range(1, config.scene_validation.max_scene_attempts + 1):
+        try:
+            room = _sample_room(config, shape, scene_rng, scene_index)
+            last_parameters = dict(room["geometry"]["generated_from"])
+        except (ValueError, RuntimeError) as exc:
+            last_stage = "geometry"
+            last_reason = str(exc)
+            continue
+
         try:
             estimate = estimate_room_rt30_s(room)
         except ValueError as exc:
-            last_estimate_s = None
-            last_error = str(exc)
+            last_stage = "rt30"
+            last_reason = str(exc)
             continue
 
-        last_error = None
-        last_estimate_s = estimate["estimated_rt30_s"]
-        if best_estimate_s is None or last_estimate_s < best_estimate_s:
-            best_estimate_s = last_estimate_s
-        if last_estimate_s <= max_rt30_s:
-            return room, {
-                "method": "sabine",
-                "estimator_version": "sabine_raven_octaves_v2",
-                "aggregation": "arithmetic_mean",
-                "target_metric": "raven.mean_t30_s",
-                "band_resolution": "octave",
-                "frequency_mapping": "center_frequency",
-                "max_rt30_s": max_rt30_s,
-                "estimated_rt30_s": last_estimate_s,
-                "band_frequencies_hz": list(RT30_GUARD_FREQUENCIES_HZ),
-                "rt30_by_band_s": {
-                    str(frequency): value
-                    for frequency, value in estimate["rt30_by_band_s"].items()
+        estimated_rt30_s = estimate["estimated_rt30_s"]
+        if best_estimate_s is None or estimated_rt30_s < best_estimate_s:
+            best_estimate_s = estimated_rt30_s
+        if estimated_rt30_s > config.room_sampling.max_rt30_s:
+            last_stage = "rt30"
+            last_reason = (
+                f"RT30 estimado {estimated_rt30_s:.6g} excede "
+                f"{config.room_sampling.max_rt30_s:.6g}"
+            )
+            continue
+
+        reverberation_guard = _build_reverberation_guard(
+            config,
+            estimate,
+            scene_attempt,
+        )
+        for receiver_attempt in range(1, config.scene_validation.max_receiver_attempts + 1):
+            receiver = _sample_receiver(config, room, scene_rng)
+            try:
+                sources = _sample_sources(config, room, receiver, scene_rng, scene_index)
+            except SceneSamplingSkipped as exc:
+                last_stage = "fixed_position" if "fixed_position" in str(exc) else "sources"
+                last_reason = str(exc)
+                continue
+            if not _is_valid_scene(config, room, receiver, sources):
+                last_stage = "sources"
+                last_reason = "receptor o fuentes no cumplen las restricciones geométricas"
+                continue
+
+            hrtfs = _sample_hrtfs(config, scene_rng)
+            return {
+                "room": room,
+                "receiver": receiver | {"hrtfs": hrtfs},
+                "sources": sources,
+                "reverberation_guard": reverberation_guard,
+                "sampling": {
+                    "effective_seed": effective_seed,
+                    "scene_attempt": scene_attempt,
+                    "receiver_attempt": receiver_attempt,
+                    "shape_type": shape.type,
                 },
-                "valid_band_count": len(estimate["rt30_by_band_s"]),
-                "sampling_attempts": attempt,
             }
 
-    details = [
-        f"No se pudo muestrear una sala con RT30 estimado <= {max_rt30_s:.6g} s",
-        f"scene_index={scene_index}",
-        f"intentos={attempts}",
-    ]
-    if best_estimate_s is not None:
-        details.append(f"mejor_estimacion_s={best_estimate_s:.6g}")
-    if last_estimate_s is not None:
-        details.append(f"ultima_estimacion_s={last_estimate_s:.6g}")
-    if last_error is not None:
-        details.append(f"ultimo_error={last_error}")
-    raise RuntimeError("; ".join(details))
+        last_stage = "receiver" if last_stage not in {"sources", "fixed_position"} else last_stage
+
+    raise SceneSamplingFailure(
+        {
+            "scene_index": scene_index,
+            "effective_seed": effective_seed,
+            "shape_type": shape.type,
+            "stage": last_stage,
+            "scene_attempts": config.scene_validation.max_scene_attempts,
+            "receiver_attempts_per_scene": config.scene_validation.max_receiver_attempts,
+            "last_parameters": last_parameters,
+            "last_reason": last_reason,
+            "best_estimated_rt30_s": best_estimate_s,
+        }
+    )
+
+
+def _build_reverberation_guard(config: AppConfig, estimate: dict, sampling_attempt: int) -> dict:
+    return {
+        "method": "sabine",
+        "estimator_version": "sabine_polygon_octaves_v3",
+        "aggregation": "arithmetic_mean",
+        "target_metric": "raven.mean_t30_s",
+        "band_resolution": "octave",
+        "frequency_mapping": "center_frequency",
+        "max_rt30_s": config.room_sampling.max_rt30_s,
+        "estimated_rt30_s": estimate["estimated_rt30_s"],
+        "band_frequencies_hz": list(RT30_GUARD_FREQUENCIES_HZ),
+        "rt30_by_band_s": {
+            str(frequency): value
+            for frequency, value in estimate["rt30_by_band_s"].items()
+        },
+        "valid_band_count": len(estimate["rt30_by_band_s"]),
+        "sampling_attempts": sampling_attempt,
+    }
 
 
 def build_background_noise_plan(config: AppConfig, num_scenes: int) -> list[dict]:
@@ -128,7 +193,9 @@ def build_background_noise_plan(config: AppConfig, num_scenes: int) -> list[dict
         return [_disabled_background_noise() for _ in range(num_scenes)]
 
     rng = random.Random(_derive_stable_seed(config.experiment.random_seed, "background_noise"))
-    plans = [{"enabled": True, "layers": []} for _ in range(num_scenes)]
+    plans: list[dict[str, Any]] = [
+        {"enabled": True, "layers": []} for _ in range(num_scenes)
+    ]
 
     if background_noise.allow_multiple_layers:
         for strategy_index, strategy in strategies:
@@ -184,8 +251,10 @@ def _balanced_sequence(items: list[T], count: int, rng: random.Random) -> list[T
 
 def _strategy_variants(strategy: BackgroundNoiseStrategyConfig) -> list[str | Path]:
     if strategy.type == "colored":
-        return list(strategy.colors)
-    return resolve_background_audio_candidates(strategy)
+        variants: list[str | Path] = list(strategy.colors)
+        return variants
+    audio_variants: list[str | Path] = list(resolve_background_audio_candidates(strategy))
+    return audio_variants
 
 
 def _build_background_noise_layer(
@@ -207,21 +276,37 @@ def _build_background_noise_layer(
     return layer
 
 
-def _sample_room(config: AppConfig, rng: random.Random) -> dict:
-    dimensions = {
-        "length": _uniform(rng, config.room_sampling.dimensions_m.length.min, config.room_sampling.dimensions_m.length.max),
-        "width": _uniform(rng, config.room_sampling.dimensions_m.width.min, config.room_sampling.dimensions_m.width.max),
-        "height": _uniform(rng, config.room_sampling.dimensions_m.height.min, config.room_sampling.dimensions_m.height.max),
-    }
+def _sample_room_shape(config: AppConfig, rng: random.Random) -> RoomShapeConfig:
+    threshold = rng.random()
+    cumulative = 0.0
+    for shape in config.room_sampling.geometry.shape_mix:
+        cumulative += shape.probability
+        if threshold <= cumulative:
+            return shape
+    return config.room_sampling.geometry.shape_mix[-1]
 
+
+def _sample_room(
+    config: AppConfig,
+    shape: RoomShapeConfig,
+    rng: random.Random,
+    scene_index: int,
+) -> dict:
+    geometry = _sample_room_geometry(config, shape, rng)
+    # Geometry rejection happens before material draws so rejected parameter
+    # samples consume RNG in one stable, documented order.
+    inset_polygon(
+        [tuple(vertex) for vertex in geometry["footprint_vertices_m"]],
+        SOURCE_WALL_CLEARANCE_M,
+    )
     materials_root = derive_materials_root(config)
     if materials_root is None:
         raise RuntimeError("No se pudo derivar assets/materials para el muestreo de materiales")
 
-    materials = _sample_surface_materials(config, rng)
+    materials = _sample_surface_materials(config, geometry["wall_ids"], rng)
     return {
-        "room_id": f"room_{rng.randint(1, 9999):04d}",
-        "dimensions": dimensions,
+        "room_id": f"room_{scene_index + 1:04d}",
+        "geometry": geometry,
         "materials": materials,
         "material_files": {
             surface_id: {
@@ -233,20 +318,83 @@ def _sample_room(config: AppConfig, rng: random.Random) -> dict:
     }
 
 
-def _sample_surface_materials(config: AppConfig, rng: random.Random) -> dict[str, str]:
-    materials: dict[str, str] = {}
-    semantic_surfaces = config.room_sampling.semantic_surfaces
+def _sample_room_geometry(
+    config: AppConfig,
+    shape: RoomShapeConfig,
+    rng: random.Random,
+) -> dict:
+    height_m = _uniform(
+        rng,
+        config.room_sampling.geometry.height_m.min,
+        config.room_sampling.geometry.height_m.max,
+    )
+    generated_from: dict[str, float | str]
+    if isinstance(shape, ShoeboxGeometryConfig):
+        length_m = _uniform(rng, shape.length_m.min, shape.length_m.max)
+        width_m = _uniform(rng, shape.width_m.min, shape.width_m.max)
+        footprint = build_shoebox_footprint(length_m, width_m)
+        generated_from = {"length_m": length_m, "width_m": width_m}
+    elif isinstance(shape, TrapezoidGeometryConfig):
+        base_a_m = _uniform(rng, shape.base_a_m.min, shape.base_a_m.max)
+        base_b_m = _uniform(rng, shape.base_b_m.min, shape.base_b_m.max)
+        depth_m = _uniform(rng, shape.depth_m.min, shape.depth_m.max)
+        top_offset_m = _uniform(rng, shape.top_offset_m.min, shape.top_offset_m.max)
+        footprint = build_trapezoid_footprint(base_a_m, base_b_m, depth_m, top_offset_m)
+        generated_from = {
+            "base_a_m": base_a_m,
+            "base_b_m": base_b_m,
+            "depth_m": depth_m,
+            "top_offset_m": top_offset_m,
+        }
+    else:
+        assert isinstance(shape, LShapeGeometryConfig)
+        outer_length_m = _uniform(rng, shape.outer_length_m.min, shape.outer_length_m.max)
+        outer_width_m = _uniform(rng, shape.outer_width_m.min, shape.outer_width_m.max)
+        cutout_length_m = _uniform(rng, shape.cutout_length_m.min, shape.cutout_length_m.max)
+        cutout_width_m = _uniform(rng, shape.cutout_width_m.min, shape.cutout_width_m.max)
+        removed_corner = rng.choice(shape.removed_corners)
+        if cutout_length_m >= outer_length_m or cutout_width_m >= outer_width_m:
+            raise ValueError("El recorte L debe ser menor que el rectángulo exterior")
+        if (
+            outer_length_m - cutout_length_m <= SOURCE_WALL_CLEARANCE_M * 2
+            or outer_width_m - cutout_width_m <= SOURCE_WALL_CLEARANCE_M * 2
+        ):
+            raise ValueError("La sala L no deja brazos útiles mayores que 1.0 m")
+        footprint = build_l_shape_footprint(
+            outer_length_m,
+            outer_width_m,
+            cutout_length_m,
+            cutout_width_m,
+            removed_corner,
+        )
+        generated_from = {
+            "outer_length_m": outer_length_m,
+            "outer_width_m": outer_width_m,
+            "cutout_length_m": cutout_length_m,
+            "cutout_width_m": cutout_width_m,
+            "removed_corner": removed_corner,
+        }
 
-    if semantic_surfaces.enable_walls:
-        for surface_id in SURFACE_ORDER[:4]:
-            materials[surface_id] = rng.choice(config.room_sampling.materials.walls)
+    return {
+        "type": shape.type,
+        "height_m": height_m,
+        "footprint_vertices_m": [[x, z] for x, z in footprint],
+        "wall_ids": canonical_wall_ids(footprint),
+        "generated_from": generated_from,
+    }
 
-    if semantic_surfaces.enable_floor:
-        materials["floor"] = rng.choice(config.room_sampling.materials.floor)
 
-    if semantic_surfaces.enable_ceiling:
-        materials["ceiling"] = rng.choice(config.room_sampling.materials.ceiling)
-
+def _sample_surface_materials(
+    config: AppConfig,
+    wall_ids: list[str],
+    rng: random.Random,
+) -> dict[str, str]:
+    materials = {
+        wall_id: rng.choice(config.room_sampling.materials.walls)
+        for wall_id in wall_ids
+    }
+    materials["floor"] = rng.choice(config.room_sampling.materials.floor)
+    materials["ceiling"] = rng.choice(config.room_sampling.materials.ceiling)
     return materials
 
 
@@ -272,16 +420,18 @@ def _select_material_file(materials_root: Path, material_id: str, rng: random.Ra
 
 def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
     margins = config.receiver_sampling.position_strategy.margin_m
-    dimensions = room["dimensions"]
     orientation_strategy = config.receiver_sampling.orientation_strategy
+    footprint = _room_footprint(room)
+    usable_footprint = inset_polygon(footprint, max(margins.x, margins.z))
+    x, z = sample_uniform_point(usable_footprint, rng)
     position = [
-        _uniform(rng, margins.x, dimensions["length"] - margins.x),
+        round(x, 6),
         _uniform(
             rng,
             config.receiver_sampling.position_strategy.fixed_height_m.min,
             config.receiver_sampling.position_strategy.fixed_height_m.max,
         ),
-        _uniform(rng, margins.z, dimensions["width"] - margins.z),
+        round(z, 6),
     ]
 
     yaw = _uniform(
@@ -346,11 +496,11 @@ def _sample_sources(
 
     for planned_source in planned_sources:
         source_type = planned_source.source_type
-        placement: tuple[list[float], str | None] | None
+        placement: tuple[list[float], str | None, tuple[float, float] | None] | None
         if source_type.spatial_policy.type == "fixed_position":
             fixed_index = fixed_indexes.get(source_type.event_type, 0)
             fixed_indexes[source_type.event_type] = fixed_index + 1
-            placement = (fixed_positions[source_type.event_type][fixed_index], None)
+            placement = (fixed_positions[source_type.event_type][fixed_index], None, None)
         else:
             placement = _sample_source_position(config, source_type, room, receiver, rng)
         if placement is None:
@@ -360,8 +510,8 @@ def _sample_sources(
                 )
             continue
 
-        position, wall_name = placement
-        orientation = _sample_source_orientation(config, source_type, rng, wall_name)
+        position, wall_id, wall_normal = placement
+        orientation = _sample_source_orientation(config, source_type, rng, wall_normal)
         audio_path = _draw_audio_path(source_type, audio_pools, rng)
         sources.append(
             {
@@ -372,6 +522,7 @@ def _sample_sources(
                 "orientation_deg": orientation,
                 "gain_db": _uniform(rng, config.source_sampling.gain_db.min, config.source_sampling.gain_db.max),
                 "start_time_s": _sample_start_time_s(config, audio_path, rng),
+                **({"target_wall_id": wall_id} if wall_id is not None else {}),
                 **({"directivity": source_type.directivity} if source_type.directivity is not None else {}),
             }
         )
@@ -482,7 +633,7 @@ def _sample_source_position(
     room: dict,
     receiver: dict,
     rng: random.Random,
-) -> tuple[list[float], str | None] | None:
+) -> tuple[list[float], str | None, tuple[float, float] | None] | None:
     policy_type = source_type.spatial_policy.type
     if policy_type == "fixed_position":
         raise RuntimeError("fixed_position debe asignarse conjuntamente para preservar cobertura y separación")
@@ -490,15 +641,15 @@ def _sample_source_position(
         target = _weighted_choice(source_type.spatial_policy.targets or {}, rng)
         if target == "wall":
             return _sample_wall_position(room, rng)
-        return _sample_random_position(room, rng), None
+        return _sample_random_position(room, rng), None, None
 
     if policy_type == "random_valid_away_from_receiver":
         position = _sample_random_position_away_from_receiver(config, source_type, room, receiver, rng)
         if position is None:
             return None
-        return position, None
+        return position, None, None
 
-    return _sample_random_position(room, rng), None
+    return _sample_random_position(room, rng), None, None
 
 
 def _assign_fixed_positions(
@@ -649,11 +800,10 @@ def _validate_assigned_fixed_position(
     position: list[float],
     scene_index: int,
 ) -> None:
-    dimensions = room["dimensions"]
     invalid_reason: str | None = None
-    if not _inside_room(position, dimensions):
+    if not _inside_room(position, room):
         invalid_reason = "queda fuera de la sala"
-    elif _source_wall_clearance(position, dimensions) < SOURCE_WALL_CLEARANCE_M:
+    elif _source_wall_clearance(position, room) < SOURCE_WALL_CLEARANCE_M - ABS_COORD_TOL_M:
         invalid_reason = f"no respeta {SOURCE_WALL_CLEARANCE_M:g} m de margen a paredes"
     elif _distance(position, receiver["position_m"]) < max(
         config.scene_validation.min_distance_source_to_receiver_m,
@@ -662,7 +812,7 @@ def _validate_assigned_fixed_position(
         invalid_reason = "no respeta la distancia mínima al receptor"
 
     if invalid_reason is not None:
-        raise RuntimeError(
+        raise SceneSamplingSkipped(
             f"{event_type}: el punto fixed_position asignado en scene_index={scene_index} {invalid_reason}: {position}"
         )
 
@@ -683,7 +833,7 @@ def _sample_random_position_away_from_receiver(
         raise RuntimeError("random_valid_away_from_receiver requiere min_radius_from_receiver_m")
 
     receiver_position = receiver["position_m"]
-    for _ in range(config.scene_validation.max_sampling_attempts_per_scene):
+    for _ in range(config.scene_validation.max_receiver_attempts):
         position = _sample_random_position(room, rng)
         if _distance(position, receiver_position) >= radius:
             return position
@@ -695,62 +845,71 @@ def _sample_random_position_away_from_receiver(
 
 
 def _farthest_inset_box_corner(room: dict, receiver_position: list[float]) -> list[float]:
-    dimensions = room["dimensions"]
+    footprint = inset_polygon(_room_footprint(room), SOURCE_WALL_CLEARANCE_M)
+    height_m = _room_height(room)
     candidates = [
         [x, y, z]
-        for x in (SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M)
-        for y in (SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M)
-        for z in (SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M)
+        for x, z in footprint
+        for y in (SOURCE_WALL_CLEARANCE_M, height_m - SOURCE_WALL_CLEARANCE_M)
     ]
     return max(candidates, key=lambda candidate: _distance(candidate, receiver_position))
 
 
 def _sample_random_position(room: dict, rng: random.Random) -> list[float]:
-    dimensions = room["dimensions"]
+    x, z = sample_uniform_point(
+        inset_polygon(_room_footprint(room), SOURCE_WALL_CLEARANCE_M),
+        rng,
+    )
+    height_m = _room_height(room)
     return [
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
+        round(x, 6),
+        _uniform(rng, SOURCE_WALL_CLEARANCE_M, height_m - SOURCE_WALL_CLEARANCE_M),
+        round(z, 6),
     ]
 
 
-def _sample_wall_position(room: dict, rng: random.Random) -> tuple[list[float], str]:
-    dimensions = room["dimensions"]
-    wall = rng.choice(["north_wall", "south_wall", "east_wall", "west_wall"])
-    if wall == "north_wall":
-        return [
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
-            dimensions["width"] - SOURCE_WALL_CLEARANCE_M,
-        ], wall
-    if wall == "south_wall":
-        return [
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["length"] - SOURCE_WALL_CLEARANCE_M),
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
-            SOURCE_WALL_CLEARANCE_M,
-        ], wall
-    if wall == "east_wall":
-        return [
-            dimensions["length"] - SOURCE_WALL_CLEARANCE_M,
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
-            _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
-        ], wall
-    return [
-        SOURCE_WALL_CLEARANCE_M,
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["height"] - SOURCE_WALL_CLEARANCE_M),
-        _uniform(rng, SOURCE_WALL_CLEARANCE_M, dimensions["width"] - SOURCE_WALL_CLEARANCE_M),
-    ], wall
+def _sample_wall_position(
+    room: dict,
+    rng: random.Random,
+) -> tuple[list[float], str, tuple[float, float]] | None:
+    footprint = _room_footprint(room)
+    lengths = edge_lengths(footprint)
+    threshold = rng.random() * sum(lengths)
+    cumulative = 0.0
+    selected_index = len(lengths) - 1
+    for index, length in enumerate(lengths):
+        cumulative += length
+        if threshold <= cumulative:
+            selected_index = index
+            break
+
+    start = footprint[selected_index]
+    end = footprint[(selected_index + 1) % len(footprint)]
+    normal = inward_normals(footprint)[selected_index]
+    interpolation = rng.random()
+    x = start[0] + interpolation * (end[0] - start[0]) + SOURCE_WALL_CLEARANCE_M * normal[0]
+    z = start[1] + interpolation * (end[1] - start[1]) + SOURCE_WALL_CLEARANCE_M * normal[1]
+    position = [
+        round(x, 6),
+        _uniform(rng, SOURCE_WALL_CLEARANCE_M, _room_height(room) - SOURCE_WALL_CLEARANCE_M),
+        round(z, 6),
+    ]
+    if not _inside_room(position, room):
+        return None
+    if _source_wall_clearance(position, room) < SOURCE_WALL_CLEARANCE_M - ABS_COORD_TOL_M:
+        return None
+    return position, room["geometry"]["wall_ids"][selected_index], normal
 
 
 def _sample_source_orientation(
     config: AppConfig,
     source_type: SourceTypeConfig,
     rng: random.Random,
-    wall_name: str | None,
+    wall_normal: tuple[float, float] | None,
 ) -> dict:
     strategy = source_type.orientation_strategy or config.source_sampling.default_orientation_strategy
-    if strategy.type == "facing_surface_normal" and wall_name:
-        return _wall_normal_orientation(wall_name)
+    if strategy.type == "facing_surface_normal" and wall_normal is not None:
+        return _wall_normal_orientation(wall_normal)
 
     return _random_orientation(strategy, rng)
 
@@ -763,26 +922,20 @@ def _random_orientation(strategy: SourceOrientationStrategy, rng: random.Random)
     }
 
 
-def _wall_normal_orientation(wall_name: str) -> dict:
-    yaw_by_wall = {
-        "north_wall": -90.0,
-        "south_wall": 90.0,
-        "east_wall": 180.0,
-        "west_wall": 0.0,
-    }
-    return {"yaw": yaw_by_wall[wall_name], "pitch": 0.0, "roll": 0.0}
+def _wall_normal_orientation(normal: tuple[float, float]) -> dict:
+    yaw = math.degrees(math.atan2(-normal[1], normal[0]))
+    return {"yaw": round(yaw, 6), "pitch": 0.0, "roll": 0.0}
 
 
 def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list[dict]) -> bool:
-    dimensions = room["dimensions"]
     if not sources:
         return False
 
-    if config.scene_validation.require_receiver_inside_room and not _inside_room(receiver["position_m"], dimensions):
+    if config.scene_validation.require_receiver_inside_room and not _inside_room(receiver["position_m"], room):
         return False
 
     if config.scene_validation.require_sources_inside_room:
-        if any(not _inside_room(source["position_m"], dimensions) for source in sources):
+        if any(not _inside_room(source["position_m"], room) for source in sources):
             return False
 
     if any(
@@ -792,7 +945,11 @@ def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list
     ):
         return False
 
-    if any(_source_wall_clearance(source["position_m"], dimensions) < SOURCE_WALL_CLEARANCE_M for source in sources):
+    if any(
+        _source_wall_clearance(source["position_m"], room)
+        < SOURCE_WALL_CLEARANCE_M - ABS_COORD_TOL_M
+        for source in sources
+    ):
         return False
 
     for index, source in enumerate(sources):
@@ -806,11 +963,10 @@ def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list
     return True
 
 
-def _inside_room(position: list[float], dimensions: dict) -> bool:
+def _inside_room(position: list[float], room: dict) -> bool:
     return (
-        0.0 <= position[0] <= dimensions["length"]
-        and 0.0 <= position[1] <= dimensions["height"]
-        and 0.0 <= position[2] <= dimensions["width"]
+        -ABS_COORD_TOL_M <= position[1] <= _room_height(room) + ABS_COORD_TOL_M
+        and point_in_polygon((position[0], position[2]), _room_footprint(room))
     )
 
 
@@ -818,15 +974,21 @@ def _distance(point_a: list[float], point_b: list[float]) -> float:
     return math.sqrt(sum((coord_a - coord_b) ** 2 for coord_a, coord_b in zip(point_a, point_b, strict=True)))
 
 
-def _source_wall_clearance(position: list[float], dimensions: dict) -> float:
+def _source_wall_clearance(position: list[float], room: dict) -> float:
+    height_m = _room_height(room)
     return min(
-        position[0],
-        dimensions["length"] - position[0],
+        wall_clearance((position[0], position[2]), _room_footprint(room)),
         position[1],
-        dimensions["height"] - position[1],
-        position[2],
-        dimensions["width"] - position[2],
+        height_m - position[1],
     )
+
+
+def _room_footprint(room: dict) -> list[tuple[float, float]]:
+    return [tuple(vertex) for vertex in room["geometry"]["footprint_vertices_m"]]
+
+
+def _room_height(room: dict) -> float:
+    return room["geometry"]["height_m"]
 
 
 def _weighted_choice(weights: dict[str, float], rng: random.Random) -> str:
