@@ -17,11 +17,14 @@ function cfg = validate_static_scene_config(cfg)
     else
         cfg.schema_version = char(string(cfg.schema_version));
     end
-    if ~any(strcmp(cfg.schema_version, {'1.0', '2.0'}))
+    if ~any(strcmp(cfg.schema_version, {'1.0', '2.0', '3.0'}))
         error('Unsupported schema_version: %s', cfg.schema_version);
     end
 
     cfg.room = normalize_room_config(cfg.room, cfg.schema_version);
+    if strcmp(cfg.schema_version, '3.0')
+        cfg.reverberation_sampling = normalize_reverberation_sampling(cfg);
+    end
 
     if ~isfield(cfg.receiver, 'position_m') || ~isfield(cfg.receiver, 'orientation_deg')
         error('Static receiver must define position_m and orientation_deg');
@@ -30,7 +33,7 @@ function cfg = validate_static_scene_config(cfg)
     cfg.receiver.position_m = double(cfg.receiver.position_m(:)).';
     cfg.receiver.orientation_deg = normalize_orientation(cfg.receiver.orientation_deg);
     cfg.sources = normalize_static_sources(cfg.sources);
-    if strcmp(cfg.schema_version, '2.0')
+    if any(strcmp(cfg.schema_version, {'2.0', '3.0'}))
         validate_schema2_pose(cfg.receiver.position_m, cfg.room.geometry, ...
             'receiver.position_m', false);
         for iSource = 1:numel(cfg.sources)
@@ -345,6 +348,159 @@ function room = normalize_room_config(room, schema_version)
     end
 
     room = normalize_polygon_room_config(room);
+    if strcmp(schema_version, '3.0')
+        room = normalize_acoustic_surfaces(room);
+    end
+end
+
+function room = normalize_acoustic_surfaces(room)
+    if ~isfield(room, 'acoustic_surfaces') || ~isstruct(room.acoustic_surfaces)
+        error('room.acoustic_surfaces is required for schema 3.0.');
+    end
+    required = [room.geometry.wall_ids, {'floor', 'ceiling'}];
+    validate_exact_surface_fields(room.acoustic_surfaces, required, 'room.acoustic_surfaces');
+    for iSurface = 1:numel(required)
+        surface = required{iSurface};
+        item = room.acoustic_surfaces.(surface);
+        if ~isstruct(item) || ~isscalar(item) || ...
+                ~isfield(item, 'effective_absorption') || ~isfield(item, 'effective_scattering')
+            error('room.acoustic_surfaces.%s must define effective absorption and scattering.', surface);
+        end
+        if ~isfield(item, 'surface_area_m2') || ~is_finite_scalar(item.surface_area_m2) || ...
+                item.surface_area_m2 <= 0
+            error('room.acoustic_surfaces.%s.surface_area_m2 must be finite and positive.', surface);
+        end
+        item.surface_area_m2 = double(item.surface_area_m2);
+        item.effective_absorption = normalize_acoustic_vector(item.effective_absorption, ...
+            sprintf('room.acoustic_surfaces.%s.effective_absorption', surface));
+        item.effective_scattering = normalize_acoustic_vector(item.effective_scattering, ...
+            sprintf('room.acoustic_surfaces.%s.effective_scattering', surface));
+        if ~isfield(item, 'base_material') || ~isfield(item.base_material, 'scattering')
+            error('room.acoustic_surfaces.%s.base_material.scattering is required.', surface);
+        end
+        base_scattering = normalize_acoustic_vector(item.base_material.scattering, ...
+            sprintf('room.acoustic_surfaces.%s.base_material.scattering', surface));
+        if any(item.effective_scattering ~= base_scattering)
+            error('room.acoustic_surfaces.%s must preserve base scattering.', surface);
+        end
+        item.treatment = normalize_surface_treatment(item, surface);
+        room.acoustic_surfaces.(surface) = item;
+    end
+end
+
+function treatment = normalize_surface_treatment(item, surface)
+    if ~isfield(item, 'treatment') || ~isstruct(item.treatment) || ~isscalar(item.treatment)
+        error('room.acoustic_surfaces.%s.treatment is required.', surface);
+    end
+    treatment = item.treatment;
+    required = {'preset_id', 'catalog_version', 'coverage', 'treated_area_m2', 'absorption'};
+    for iField = 1:numel(required)
+        if ~isfield(treatment, required{iField}) || isempty(treatment.(required{iField}))
+            error('room.acoustic_surfaces.%s.treatment.%s is required.', surface, required{iField});
+        end
+    end
+
+    treatment.preset_id = char(string(treatment.preset_id));
+    approved_presets = {'none', 'broadband_light', 'broadband_medium', 'broadband_strong'};
+    if ~any(strcmp(treatment.preset_id, approved_presets))
+        error('room.acoustic_surfaces.%s.treatment.preset_id is unsupported: %s', ...
+            surface, treatment.preset_id);
+    end
+    treatment.catalog_version = normalize_approved_version( ...
+        treatment.catalog_version, 1, ...
+        sprintf('room.acoustic_surfaces.%s.treatment.catalog_version', surface));
+    if ~is_finite_scalar(treatment.coverage) || treatment.coverage < 0 || treatment.coverage > 1
+        error('room.acoustic_surfaces.%s.treatment.coverage must be finite and in [0,1].', surface);
+    end
+    treatment.coverage = double(treatment.coverage);
+    if ~is_finite_scalar(treatment.treated_area_m2) || treatment.treated_area_m2 < 0
+        error('room.acoustic_surfaces.%s.treatment.treated_area_m2 must be finite and nonnegative.', surface);
+    end
+    treatment.treated_area_m2 = double(treatment.treated_area_m2);
+    expected_area = item.surface_area_m2 * treatment.coverage;
+    tolerance = 1e-9 + 1e-12 * abs(expected_area);
+    if abs(treatment.treated_area_m2 - expected_area) > tolerance
+        error('room.acoustic_surfaces.%s.treatment.treated_area_m2 must equal area times coverage.', surface);
+    end
+    treatment.absorption = normalize_acoustic_vector(treatment.absorption, ...
+        sprintf('room.acoustic_surfaces.%s.treatment.absorption', surface));
+
+    if strcmp(surface, 'floor') && ...
+            (~strcmp(treatment.preset_id, 'none') || treatment.coverage ~= 0 || treatment.treated_area_m2 ~= 0)
+        error('room.acoustic_surfaces.floor must not receive virtual treatment.');
+    end
+end
+
+function reverberation = normalize_reverberation_sampling(cfg)
+    if ~isfield(cfg, 'reverberation_sampling') || ...
+            ~isstruct(cfg.reverberation_sampling) || ~isscalar(cfg.reverberation_sampling)
+        error('reverberation_sampling is required for schema 3.0.');
+    end
+    reverberation = cfg.reverberation_sampling;
+    required = {'estimator', 'estimator_version', 'aggregation', 'mean_bands_hz', ...
+        'treatment_catalog_version', 'absorption_mix_model', ...
+        'absorption_mix_model_version', 'proposal_strategy_version'};
+    for iField = 1:numel(required)
+        if ~isfield(reverberation, required{iField}) || isempty(reverberation.(required{iField}))
+            error('reverberation_sampling.%s is required for schema 3.0.', required{iField});
+        end
+    end
+
+    reverberation.estimator = normalize_approved_text( ...
+        reverberation.estimator, 'sabine', 'reverberation_sampling.estimator');
+    reverberation.estimator_version = normalize_approved_text( ...
+        reverberation.estimator_version, 'sabine_polygon_octaves_v4', ...
+        'reverberation_sampling.estimator_version');
+    reverberation.aggregation = normalize_approved_text( ...
+        reverberation.aggregation, 'arithmetic_mean', 'reverberation_sampling.aggregation');
+    if ~isnumeric(reverberation.mean_bands_hz)
+        error('reverberation_sampling.mean_bands_hz must match the schema 3.0 bands.');
+    end
+    reverberation.mean_bands_hz = double(reverberation.mean_bands_hz(:)).';
+    approved_mean_bands = [125 250 500 1000 2000 4000 8000];
+    if ~isequal(reverberation.mean_bands_hz, approved_mean_bands)
+        error('reverberation_sampling.mean_bands_hz must match the schema 3.0 bands.');
+    end
+    reverberation.treatment_catalog_version = normalize_approved_version( ...
+        reverberation.treatment_catalog_version, 1, ...
+        'reverberation_sampling.treatment_catalog_version');
+    reverberation.absorption_mix_model = normalize_approved_text( ...
+        reverberation.absorption_mix_model, 'area_weighted_linear', ...
+        'reverberation_sampling.absorption_mix_model');
+    reverberation.absorption_mix_model_version = normalize_approved_version( ...
+        reverberation.absorption_mix_model_version, 1, ...
+        'reverberation_sampling.absorption_mix_model_version');
+    reverberation.proposal_strategy_version = normalize_approved_version( ...
+        reverberation.proposal_strategy_version, 1, ...
+        'reverberation_sampling.proposal_strategy_version');
+end
+
+function value = normalize_approved_text(value, approved, field_name)
+    value = char(string(value));
+    if ~strcmp(value, approved)
+        error('%s must be %s.', field_name, approved);
+    end
+end
+
+function value = normalize_approved_version(value, approved, field_name)
+    if ~is_finite_scalar(value) || double(value) ~= approved
+        error('%s must be version %d.', field_name, approved);
+    end
+    value = double(value);
+end
+
+function tf = is_finite_scalar(value)
+    tf = isnumeric(value) && isscalar(value) && isfinite(value);
+end
+
+function values = normalize_acoustic_vector(values, field_name)
+    if ~isnumeric(values) || numel(values) ~= 31
+        error('%s must contain exactly 31 numeric values.', field_name);
+    end
+    values = double(values(:)).';
+    if any(~isfinite(values)) || any(values < 0) || any(values > 1)
+        error('%s values must be finite and in [0,1].', field_name);
+    end
 end
 
 function room = normalize_legacy_room_config(room)

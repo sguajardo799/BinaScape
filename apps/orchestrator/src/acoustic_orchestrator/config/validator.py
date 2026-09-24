@@ -18,6 +18,8 @@ from .models import (
     TrapezoidGeometryConfig,
 )
 from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeholders, is_safe_output_subdir
+from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
+from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
 
 
 MIN_SOURCE_WALL_CLEARANCE_M = 0.5
@@ -166,6 +168,37 @@ def _validate_numeric_range(
         errors.append(f"{field_name} debe contener longitudes > 0")
 
 
+def _validate_reverberation(errors: list[str], config: AppConfig) -> None:
+    reverberation = config.room_sampling.reverberation
+    distribution = reverberation.distribution
+    try:
+        build_bins(distribution.range_s.min, distribution.range_s.max, distribution.bin_width_s)
+    except ValueError as exc:
+        errors.append(f"room_sampling.reverberation.distribution: {exc}")
+    tolerance = distribution.quota_tolerance_fraction
+    if not isfinite(tolerance) or not 0 <= tolerance <= 1:
+        errors.append("quota_tolerance_fraction debe ser finita y pertenecer a [0,1]")
+    if reverberation.mean_bands_hz != [125, 250, 500, 1000, 2000, 4000, 8000]:
+        errors.append("mean_bands_hz debe coincidir exactamente con [125, 250, 500, 1000, 2000, 4000, 8000]")
+    treatment = reverberation.treatment
+    if treatment.eligible_surface_types != ["wall", "ceiling"]:
+        errors.append("eligible_surface_types debe ser exactamente [wall, ceiling]")
+    for field_name, coverage in (
+        ("wall_coverage", treatment.wall_coverage),
+        ("ceiling_coverage", treatment.ceiling_coverage),
+    ):
+        if (
+            not isfinite(coverage.min)
+            or not isfinite(coverage.max)
+            or not 0 <= coverage.min <= coverage.max <= 1
+        ):
+            errors.append(f"room_sampling.reverberation.treatment.{field_name} debe cumplir 0 <= min <= max <= 1")
+    try:
+        validate_catalog(treatment.catalog_version)
+    except ValueError as exc:
+        errors.append(f"Catálogo de tratamientos inválido: {exc}")
+
+
 def validate_config(config: AppConfig) -> None:
     errors: list[str] = []
     materials_root: Path | None = None
@@ -193,8 +226,7 @@ def validate_config(config: AppConfig) -> None:
         errors.append("Este MVP requiere receiver_sampling.one_receiver_per_scene=true")
 
     _validate_room_geometry(errors, config)
-    if not isfinite(config.room_sampling.max_rt30_s) or config.room_sampling.max_rt30_s <= 0:
-        errors.append("room_sampling.max_rt30_s debe ser finito y > 0")
+    _validate_reverberation(errors, config)
     _validate_range(errors, "receiver_sampling.position_strategy.fixed_height_m", config.receiver_sampling.position_strategy.fixed_height_m.min, config.receiver_sampling.position_strategy.fixed_height_m.max)
     _validate_range(errors, "source_sampling.timing.start_time_s", config.source_sampling.timing.start_time_s.min, config.source_sampling.timing.start_time_s.max)
     _validate_range(errors, "source_sampling.gain_db", config.source_sampling.gain_db.min, config.source_sampling.gain_db.max)
@@ -419,6 +451,25 @@ def load_material_absorption_coefficients(material_path: Path) -> tuple[float, .
     values_raw = _extract_material_field(content, "absorp")
     if values_raw is None:
         raise ValueError(f"Material invÃ¡lido {material_path}: falta absorp")
+    return tuple(_parse_material_values(values_raw))
+
+
+def load_material_scattering_coefficients(material_path: Path) -> tuple[float, ...]:
+    return _load_material_coefficients(material_path, "scatter")
+
+
+def _load_material_coefficients(material_path: Path, field_name: str) -> tuple[float, ...]:
+    material_path = material_path.resolve()
+    errors = inspect_material_file(material_path)
+    if errors:
+        raise ValueError(f"Material inválido {material_path}: {'; '.join(errors)}")
+    try:
+        content = material_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"No se pudo leer el material {material_path}: {exc}") from exc
+    values_raw = _extract_material_field(content, field_name)
+    if values_raw is None:
+        raise ValueError(f"Material inválido {material_path}: falta {field_name}")
     return tuple(_parse_material_values(values_raw))
 
 

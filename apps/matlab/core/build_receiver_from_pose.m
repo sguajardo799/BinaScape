@@ -9,7 +9,7 @@ function ctx = build_receiver_from_pose(ctx)
     hrtf_path = fullfile(dir(receiver.active_hrtf.hrtf_path).folder, dir(receiver.active_hrtf.hrtf_path).name);
 
     rpf.setReceiverHRTF(string(hrtf_path));
-    if is_schema2(ctx.manifest)
+    if uses_polygon_coordinate_contract(ctx.manifest)
         [position, viewVec, ~] = transform_schema2_pose_to_raven( ...
             receiver.position_m, receiver.orientation_deg);
     else
@@ -22,6 +22,7 @@ function ctx = build_receiver_from_pose(ctx)
 
 end
 
-function tf = is_schema2(manifest)
-    tf = isfield(manifest, 'schema_version') && strcmp(char(string(manifest.schema_version)), '2.0');
+function tf = uses_polygon_coordinate_contract(manifest)
+    tf = isfield(manifest, 'schema_version') && ...
+        any(strcmp(char(string(manifest.schema_version)), {'2.0', '3.0'}));
 end

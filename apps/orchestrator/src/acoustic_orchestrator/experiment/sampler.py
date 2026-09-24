@@ -23,11 +23,25 @@ from acoustic_orchestrator.config.validator import (
     inspect_material_file,
     resolve_background_audio_candidates,
     resolve_material_candidates,
+    load_material_absorption_coefficients,
+    load_material_scattering_coefficients,
 )
 from acoustic_orchestrator.experiment.room_acoustics import (
-    RT30_GUARD_FREQUENCIES_HZ,
+    RT30_GUARD_FREQUENCIES_HZ,  # noqa: F401 - compatibilidad de API para consumidores/tests
+    RT30_MEAN_FREQUENCIES_HZ,
     estimate_room_rt30_s,
 )
+from acoustic_orchestrator.experiment.acoustic_geometry import (
+    build_polygon_acoustic_geometry,
+    get_acoustic_geometry,
+)
+from acoustic_orchestrator.experiment.reverberation_sampling import (
+    PROPOSAL_STRATEGY_VERSION,
+    build_bins,
+    build_global_plan,
+    classify,
+)
+from acoustic_orchestrator.experiment.treatment_catalog import get_preset, mix_absorption, preset_ids
 from acoustic_orchestrator.experiment.geometry import (
     ABS_COORD_TOL_M,
     build_l_shape_footprint,
@@ -74,26 +88,53 @@ def sample_static_scene(
     config: AppConfig,
     rng: random.Random | None,
     scene_index: int,
+    *,
+    start_scene_attempt: int = 1,
+    prior_rejections: dict[str, int] | None = None,
 ) -> dict:
     del rng  # Scene sampling is intentionally independent from run order.
     effective_seed = _derive_stable_seed(
         config.experiment.random_seed,
         f"scene:{scene_index}",
     )
-    scene_rng = random.Random(effective_seed)
-    shape = _sample_room_shape(config, scene_rng)
+    if start_scene_attempt < 1:
+        raise ValueError("start_scene_attempt debe ser mayor o igual que 1")
+    shape_rng = random.Random(_derive_stable_seed(effective_seed, "shape"))
+    shape = _sample_room_shape(config, shape_rng)
+    distribution = config.room_sampling.reverberation.distribution
+    bins = build_bins(distribution.range_s.min, distribution.range_s.max, distribution.bin_width_s)
+    _, target_sequence = build_global_plan(max(config.execution.num_simulations, scene_index + 1), bins, config.experiment.random_seed)
+    target_bin = bins[target_sequence[scene_index]]
     best_estimate_s: float | None = None
     last_stage = "geometry"
     last_reason = "sin intentos"
     last_parameters: dict = {}
+    rejections: dict[str, int] = dict(prior_rejections or {})
+    fallback: dict | None = None
+    fallback_count = 0
 
-    for scene_attempt in range(1, config.scene_validation.max_scene_attempts + 1):
+    for scene_attempt in range(start_scene_attempt, config.scene_validation.max_scene_attempts + 1):
+        # Each complete scene attempt owns an independent deterministic stream.
+        # This lets the render pipeline continue after a late RAVEN rejection
+        # without replaying or changing earlier proposals.
+        scene_rng = random.Random(
+            _derive_stable_seed(effective_seed, f"scene-attempt:{scene_attempt}")
+        )
         try:
             room = _sample_room(config, shape, scene_rng, scene_index)
             last_parameters = dict(room["geometry"]["generated_from"])
         except (ValueError, RuntimeError) as exc:
             last_stage = "geometry"
             last_reason = str(exc)
+            rejections["geometry"] = rejections.get("geometry", 0) + 1
+            continue
+
+        try:
+            _apply_virtual_treatments(config, room, target_bin.index, len(bins), scene_rng)
+        except ValueError as exc:
+            last_stage = "treatment"
+            last_reason = str(exc)
+            rejections["treatment"] = rejections.get("treatment", 0) + 1
             continue
 
         try:
@@ -101,24 +142,18 @@ def sample_static_scene(
         except ValueError as exc:
             last_stage = "rt30"
             last_reason = str(exc)
+            rejections["rt30_invalid"] = rejections.get("rt30_invalid", 0) + 1
             continue
 
         estimated_rt30_s = estimate["estimated_rt30_s"]
         if best_estimate_s is None or estimated_rt30_s < best_estimate_s:
             best_estimate_s = estimated_rt30_s
-        if estimated_rt30_s > config.room_sampling.max_rt30_s:
+        obtained_bin = classify(estimated_rt30_s, bins)
+        if obtained_bin is None:
             last_stage = "rt30"
-            last_reason = (
-                f"RT30 estimado {estimated_rt30_s:.6g} excede "
-                f"{config.room_sampling.max_rt30_s:.6g}"
-            )
+            last_reason = f"RT30 estimado {estimated_rt30_s:.6g} fuera del rango configurado"
+            rejections["rt30_out_of_range"] = rejections.get("rt30_out_of_range", 0) + 1
             continue
-
-        reverberation_guard = _build_reverberation_guard(
-            config,
-            estimate,
-            scene_attempt,
-        )
         for receiver_attempt in range(1, config.scene_validation.max_receiver_attempts + 1):
             receiver = _sample_receiver(config, room, scene_rng)
             try:
@@ -126,18 +161,23 @@ def sample_static_scene(
             except SceneSamplingSkipped as exc:
                 last_stage = "fixed_position" if "fixed_position" in str(exc) else "sources"
                 last_reason = str(exc)
+                rejections[last_stage] = rejections.get(last_stage, 0) + 1
                 continue
             if not _is_valid_scene(config, room, receiver, sources):
                 last_stage = "sources"
                 last_reason = "receptor o fuentes no cumplen las restricciones geométricas"
+                rejections["sources"] = rejections.get("sources", 0) + 1
                 continue
 
             hrtfs = _sample_hrtfs(config, scene_rng)
-            return {
+            candidate = {
                 "room": room,
                 "receiver": receiver | {"hrtfs": hrtfs},
                 "sources": sources,
-                "reverberation_guard": reverberation_guard,
+                "reverberation_sampling": _build_reverberation_sampling(
+                    config, room, estimate, target_bin, obtained_bin, scene_attempt,
+                    obtained_bin.index != target_bin.index, effective_seed, scene_index, rejections,
+                ),
                 "sampling": {
                     "effective_seed": effective_seed,
                     "scene_attempt": scene_attempt,
@@ -145,8 +185,20 @@ def sample_static_scene(
                     "shape_type": shape.type,
                 },
             }
+            if obtained_bin.index == target_bin.index:
+                return candidate
+            rejections["rt30_other_bin"] = rejections.get("rt30_other_bin", 0) + 1
+            fallback_count += 1
+            if scene_rng.randrange(fallback_count) == 0:
+                fallback = candidate
+            break
 
         last_stage = "receiver" if last_stage not in {"sources", "fixed_position"} else last_stage
+
+    if fallback is not None:
+        fallback["reverberation_sampling"]["attempts"] = config.scene_validation.max_scene_attempts
+        fallback["reverberation_sampling"]["rejections_by_reason"] = dict(sorted(rejections.items()))
+        return fallback
 
     raise SceneSamplingFailure(
         {
@@ -155,32 +207,103 @@ def sample_static_scene(
             "shape_type": shape.type,
             "stage": last_stage,
             "scene_attempts": config.scene_validation.max_scene_attempts,
+            "first_scene_attempt": start_scene_attempt,
             "receiver_attempts_per_scene": config.scene_validation.max_receiver_attempts,
             "last_parameters": last_parameters,
             "last_reason": last_reason,
             "best_estimated_rt30_s": best_estimate_s,
+            "requested_bin": target_bin.as_dict(),
+            "rejections_by_reason": dict(sorted(rejections.items())),
         }
     )
 
 
-def _build_reverberation_guard(config: AppConfig, estimate: dict, sampling_attempt: int) -> dict:
+def _build_reverberation_sampling(
+    config: AppConfig, room: dict, estimate: dict, requested_bin, obtained_bin, sampling_attempt: int,
+    fallback_used: bool, effective_seed: int, scene_index: int, rejections: dict[str, int],
+) -> dict:
     return {
-        "method": "sabine",
-        "estimator_version": "sabine_polygon_octaves_v3",
+        "requested_bin": requested_bin.as_dict(),
+        "obtained_bin": obtained_bin.as_dict(),
+        "matched_requested_bin": requested_bin.index == obtained_bin.index,
+        "fallback_used": fallback_used,
+        "attempts": sampling_attempt,
+        "estimator": "sabine",
+        "estimator_version": "sabine_polygon_octaves_v4",
         "aggregation": "arithmetic_mean",
-        "target_metric": "raven.mean_t30_s",
-        "band_resolution": "octave",
-        "frequency_mapping": "center_frequency",
-        "max_rt30_s": config.room_sampling.max_rt30_s,
-        "estimated_rt30_s": estimate["estimated_rt30_s"],
-        "band_frequencies_hz": list(RT30_GUARD_FREQUENCIES_HZ),
+        "mean_bands_hz": list(RT30_MEAN_FREQUENCIES_HZ),
+        "estimated_mean_rt30_s": estimate["estimated_rt30_s"],
         "rt30_by_band_s": {
             str(frequency): value
             for frequency, value in estimate["rt30_by_band_s"].items()
         },
-        "valid_band_count": len(estimate["rt30_by_band_s"]),
-        "sampling_attempts": sampling_attempt,
+        "geometry": _estimate_geometry_metadata(room, estimate),
+        "treatment_catalog_version": config.room_sampling.reverberation.treatment.catalog_version,
+        "absorption_mix_model": "area_weighted_linear",
+        "absorption_mix_model_version": 1,
+        "proposal_strategy_version": PROPOSAL_STRATEGY_VERSION,
+        "effective_seed": effective_seed,
+        "scene_index": scene_index,
+        "rejections_by_reason": dict(sorted(rejections.items())),
     }
+
+
+def _estimate_geometry_metadata(room: dict, estimate: dict) -> dict:
+    acoustic_geometry = get_acoustic_geometry(room)
+    floor_area = estimate.get("floor_area_m2", acoustic_geometry["floor_area_m2"])
+    surface_areas = estimate.get("surface_areas_m2")
+    if surface_areas is None:
+        surface_areas = {
+            surface_id: surface["area_m2"]
+            for surface_id, surface in acoustic_geometry["surfaces"].items()
+        }
+    return {
+        "floor_area_m2": floor_area,
+        "volume_m3": estimate.get("volume_m3", acoustic_geometry["volume_m3"]),
+        "surface_areas_m2": surface_areas,
+    }
+
+
+def _apply_virtual_treatments(config: AppConfig, room: dict, target_index: int, bin_count: int, rng: random.Random) -> None:
+    treatment_config = config.room_sampling.reverberation.treatment
+    acoustic_geometry = get_acoustic_geometry(room)
+    surface_contract = acoustic_geometry["surfaces"]
+    if set(surface_contract) != set(room["material_files"]):
+        raise ValueError("material_files no coincide con acoustic_geometry.surfaces")
+    # Fixed v1 proposal tiers: dry / middle / reverberant. Draws are never
+    # changed in response to an observed RT30 error.
+    dryness = 1.0 - (target_index / max(1, bin_count - 1))
+    ids = preset_ids()
+    acoustic_surfaces = {}
+    for surface_id, material in room["material_files"].items():
+        material_path = Path(material["material_path"])
+        base_absorption = load_material_absorption_coefficients(material_path)
+        base_scattering = load_material_scattering_coefficients(material_path)
+        surface_type = surface_contract[surface_id]["surface_type"]
+        eligible = surface_type in treatment_config.eligible_surface_types
+        preset = None
+        coverage = 0.0
+        if eligible:
+            coverage_range = treatment_config.ceiling_coverage if surface_type == "ceiling" else treatment_config.wall_coverage
+            treat_probability = 0.15 + 0.8 * dryness
+            if not treatment_config.allow_none or rng.random() < treat_probability:
+                weights = ([1, 3, 7] if dryness >= 2 / 3 else [2, 6, 2] if dryness >= 1 / 3 else [7, 2, 1])
+                preset_id = rng.choices(ids, weights=weights, k=1)[0]
+                preset = get_preset(preset_id, treatment_config.catalog_version)
+                raw = rng.random()
+                shaped = raw ** (0.5 if dryness >= 2 / 3 else 1.0 if dryness >= 1 / 3 else 2.0)
+                coverage = coverage_range.min + shaped * (coverage_range.max - coverage_range.min)
+        treatment_absorption = tuple(preset["absorption"]) if preset else base_absorption
+        effective_absorption = mix_absorption(base_absorption, treatment_absorption, coverage)
+        surface_area = float(surface_contract[surface_id]["area_m2"])
+        acoustic_surfaces[surface_id] = {
+            "surface_area_m2": surface_area,
+            "base_material": {"material_id": material["material_id"], "material_path": material_path, "absorption": list(base_absorption), "scattering": list(base_scattering)},
+            "treatment": {"preset_id": preset["preset_id"] if preset else "none", "catalog_version": treatment_config.catalog_version, "coverage": coverage, "treated_area_m2": surface_area * coverage, "absorption": list(treatment_absorption)},
+            "effective_absorption": list(effective_absorption),
+            "effective_scattering": list(base_scattering),
+        }
+    room["acoustic_surfaces"] = acoustic_surfaces
 
 
 def build_background_noise_plan(config: AppConfig, num_scenes: int) -> list[dict]:
@@ -307,6 +430,7 @@ def _sample_room(
     return {
         "room_id": f"room_{scene_index + 1:04d}",
         "geometry": geometry,
+        "acoustic_geometry": build_polygon_acoustic_geometry(geometry),
         "materials": materials,
         "material_files": {
             surface_id: {

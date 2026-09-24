@@ -7,6 +7,7 @@ from acoustic_orchestrator.experiment.room_acoustics import (
     RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ,
     RAVEN_OCTAVE_CENTER_THIRD_INDEXES,
     RT30_GUARD_FREQUENCIES_HZ,
+    RT30_MEAN_FREQUENCIES_HZ,
     SABINE_CONSTANT_M_S,
     estimate_room_rt30_s,
 )
@@ -54,7 +55,8 @@ def test_estimate_room_rt30_uses_all_ten_raven_octave_bands(tmp_path: Path) -> N
         assert math.isclose(estimate["rt30_by_band_s"][frequency], expected_rt30_s)
     assert math.isclose(
         estimate["estimated_rt30_s"],
-        sum(expected_by_band.values()) / len(expected_by_band),
+        sum(expected_by_band[frequency] for frequency in RT30_MEAN_FREQUENCIES_HZ)
+        / len(RT30_MEAN_FREQUENCIES_HZ),
     )
 
 
@@ -131,6 +133,41 @@ def test_estimate_room_rt30_uses_real_l_shape_area_volume_and_edges(tmp_path: Pa
     assert estimate["volume_m3"] == pytest.approx(114.0)
     assert list(estimate["surface_areas_m2"].values()) == pytest.approx(
         [21.0, 12.0, 6.0, 6.0, 15.0, 18.0, 38.0, 38.0]
+    )
+
+
+def test_estimator_accepts_geometry_generator_surface_contract_without_polygon(tmp_path: Path) -> None:
+    material_path = tmp_path / "material.mat"
+    material_path.write_text(_material_file_text([0.5] * 31), encoding="utf-8")
+    surface_areas = {
+        "curved_shell_a": ("wall", 18.0),
+        "curved_shell_b": ("wall", 22.0),
+        "lower_deck": ("floor", 20.0),
+        "upper_deck": ("ceiling", 20.0),
+    }
+    room = {
+        "acoustic_geometry": {
+            "floor_area_m2": 20.0,
+            "volume_m3": 60.0,
+            "surfaces": {
+                surface_id: {"surface_type": surface_type, "area_m2": area_m2}
+                for surface_id, (surface_type, area_m2) in surface_areas.items()
+            },
+        },
+        "material_files": {
+            surface_id: {"material_path": material_path}
+            for surface_id in surface_areas
+        },
+    }
+
+    estimate = estimate_room_rt30_s(room)
+
+    assert estimate["volume_m3"] == 60.0
+    assert estimate["surface_areas_m2"] == {
+        surface_id: area_m2 for surface_id, (_, area_m2) in surface_areas.items()
+    }
+    assert estimate["estimated_rt30_s"] == pytest.approx(
+        SABINE_CONSTANT_M_S * 60.0 / (80.0 * 0.5)
     )
 
 

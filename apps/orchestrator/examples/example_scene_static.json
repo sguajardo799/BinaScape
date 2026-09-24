@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "3.0",
   "scene_type": "static",
   "base_rpf_file": "C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf",
   "project_name": "sim_001",
@@ -8,39 +8,64 @@
 
   "room": {
     "room_id": "room_static_0001",
-    "dimensions_m": [4.2, 3.6, 2.6],
-    "materials": {
-      "north_wall": "bricks",
-      "south_wall": "bricks",
-      "east_wall": "glass",
-      "west_wall": "drywall",
-      "floor": "wood",
-      "ceiling": "plaster"
+    "geometry": {
+      "type": "shoebox",
+      "height_m": 2.6,
+      "footprint_vertices_m": [[0.0, 0.0], [4.2, 0.0], [4.2, 3.6], [0.0, 3.6]],
+      "wall_ids": ["wall_001", "wall_002", "wall_003", "wall_004"],
+      "generated_from": {"length_m": 4.2, "width_m": 3.6}
     },
+    "materials": {"wall_001":"bricks","wall_002":"bricks","wall_003":"glass","wall_004":"drywall","floor":"wood","ceiling":"plaster"},
     "material_files": {
-      "north_wall": {
-        "material_id": "bricks",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/Bricks.mat"
+      "wall_001": {"material_id":"bricks","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/bricks/Bricks.mat"},
+      "wall_002": {"material_id":"bricks","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/bricks/brickwall.mat"},
+      "wall_003": {"material_id":"glass","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/glass/glass.mat"},
+      "wall_004": {"material_id":"drywall","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/drywall/Drywall.mat"},
+      "floor": {"material_id":"wood","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/wood/woodfloor.mat"},
+      "ceiling": {"material_id":"plaster","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/plaster/mat_scene10_plaster.mat"}
+    },
+    "acoustic_surfaces": {
+      "wall_001": {
+        "surface_area_m2": 10.92,
+        "base_material": {"material_id":"bricks","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/bricks/Bricks.mat","absorption":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1],"scattering":[0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]},
+        "treatment": {"preset_id":"broadband_medium","catalog_version":1,"coverage":0.5,"treated_area_m2":5.46,"absorption":[0.18,0.19,0.2,0.215,0.23,0.25,0.27,0.295,0.32,0.35,0.38,0.41,0.44,0.47,0.5,0.53,0.56,0.585,0.61,0.63,0.65,0.665,0.68,0.69,0.7,0.7,0.7,0.7,0.7,0.7,0.7]},
+        "effective_absorption": [0.14,0.145,0.15,0.1575,0.165,0.175,0.185,0.1975,0.21,0.225,0.24,0.255,0.27,0.285,0.3,0.315,0.33,0.3425,0.355,0.365,0.375,0.3825,0.39,0.395,0.4,0.4,0.4,0.4,0.4,0.4,0.4],
+        "effective_scattering": [0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]
       },
-      "south_wall": {
-        "material_id": "bricks",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/bricks/brickwall.mat"
+      "wall_002": {
+        "surface_area_m2": 9.36,
+        "base_material": {"material_id":"bricks","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/bricks/brickwall.mat","absorption":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1],"scattering":[0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]},
+        "treatment": {"preset_id":"none","catalog_version":1,"coverage":0.0,"treated_area_m2":0.0,"absorption":[0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]},
+        "effective_absorption": [0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1],
+        "effective_scattering": [0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]
       },
-      "east_wall": {
-        "material_id": "glass",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/glass/glass.mat"
+      "wall_003": {
+        "surface_area_m2": 10.92,
+        "base_material": {"material_id":"glass","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/glass/glass.mat","absorption":[0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08,0.08],"scattering":[0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04]},
+        "treatment": {"preset_id":"broadband_light","catalog_version":1,"coverage":0.25,"treated_area_m2":2.73,"absorption":[0.08,0.085,0.09,0.095,0.1,0.11,0.12,0.135,0.15,0.165,0.18,0.2,0.22,0.24,0.26,0.28,0.3,0.32,0.34,0.36,0.38,0.395,0.41,0.42,0.43,0.435,0.44,0.44,0.44,0.44,0.44]},
+        "effective_absorption": [0.08,0.08125,0.0825,0.08375,0.085,0.0875,0.09,0.09375,0.0975,0.10125,0.105,0.11,0.115,0.12,0.125,0.13,0.135,0.14,0.145,0.15,0.155,0.15875,0.1625,0.165,0.1675,0.16875,0.17,0.17,0.17,0.17,0.17],
+        "effective_scattering": [0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04,0.04]
       },
-      "west_wall": {
-        "material_id": "drywall",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/drywall/Drywall.mat"
+      "wall_004": {
+        "surface_area_m2": 9.36,
+        "base_material": {"material_id":"drywall","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/drywall/Drywall.mat","absorption":[0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12],"scattering":[0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06]},
+        "treatment": {"preset_id":"none","catalog_version":1,"coverage":0.0,"treated_area_m2":0.0,"absorption":[0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12]},
+        "effective_absorption": [0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12,0.12],
+        "effective_scattering": [0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06,0.06]
       },
       "floor": {
-        "material_id": "wood",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/wood/woodfloor.mat"
+        "surface_area_m2": 15.12,
+        "base_material": {"material_id":"wood","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/wood/woodfloor.mat","absorption":[0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15],"scattering":[0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07]},
+        "treatment": {"preset_id":"none","catalog_version":1,"coverage":0.0,"treated_area_m2":0.0,"absorption":[0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15]},
+        "effective_absorption": [0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15,0.15],
+        "effective_scattering": [0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07,0.07]
       },
       "ceiling": {
-        "material_id": "plaster",
-        "material_path": "D:/Tesis/Binaural-Impared-Hear/assets/materials/plaster/plaster.mat"
+        "surface_area_m2": 15.12,
+        "base_material": {"material_id":"plaster","material_path":"D:/Tesis/Binaural-HearingLoss-Pipeline/assets/materials/plaster/mat_scene10_plaster.mat","absorption":[0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09,0.09],"scattering":[0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]},
+        "treatment": {"preset_id":"broadband_strong","catalog_version":1,"coverage":0.6,"treated_area_m2":9.072,"absorption":[0.32,0.34,0.36,0.385,0.41,0.44,0.47,0.505,0.54,0.575,0.61,0.645,0.68,0.71,0.74,0.765,0.79,0.81,0.83,0.845,0.86,0.87,0.88,0.885,0.89,0.89,0.89,0.89,0.89,0.89,0.89]},
+        "effective_absorption": [0.228,0.24,0.252,0.267,0.282,0.3,0.318,0.339,0.36,0.381,0.402,0.423,0.444,0.462,0.48,0.495,0.51,0.522,0.534,0.543,0.552,0.558,0.564,0.567,0.57,0.57,0.57,0.57,0.57,0.57,0.57],
+        "effective_scattering": [0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05,0.05]
       }
     }
   },
@@ -56,7 +81,7 @@
     "hrtfs": [
       {
         "hrtf_id": "binaural_hrtf",
-        "hrtf_path": "D:/Tesis/Binaural-Impared-Hear/assets/hrtf/id01_HRTF.v17.ir.daff"
+        "hrtf_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/hrtf/id01_HRTF.v17.ir.daff"
       }
     ]
   },
@@ -65,8 +90,8 @@
     {
       "source_id": "src_0001",
       "event_type": "speech",
-      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/speech/speech_001.wav",
-      "directivity_path": "D:/Tesis/Binaural-Impared-Hear/assets/directivity/speech_talker.daff",
+      "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
+      "directivity_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/directivity/Singer_2011_FWE_TLE_norm.daff",
       "position_m": [3.60, 1.10, 1.20],
       "orientation_deg": {
         "yaw": -35.0,
@@ -79,7 +104,7 @@
     {
       "source_id": "src_0002",
       "event_type": "snoring",
-      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/snoring/snoring_001.wav",
+      "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
       "position_m": [0.95, 1.40, 1.05],
       "orientation_deg": {
         "yaw": 145.0,
@@ -92,7 +117,7 @@
     {
       "source_id": "src_0003",
       "event_type": "breathing",
-      "audio_path": "D:/Tesis/Binaural-Impared-Hear/assets/events/breathing/breathing_001.wav",
+      "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
       "position_m": [2.85, 1.00, 1.35],
       "orientation_deg": {
         "yaw": 90.0,
@@ -104,31 +129,52 @@
     }
   ],
 
-  "reverberation_guard": {
-    "method": "sabine",
-    "estimator_version": "sabine_raven_octaves_v2",
+  "reverberation_sampling": {
+    "requested_bin": {"index": 2, "lower_s": 0.3, "upper_s": 0.4},
+    "obtained_bin": {"index": 2, "lower_s": 0.3, "upper_s": 0.4},
+    "matched_requested_bin": true,
+    "fallback_used": false,
+    "attempts": 2,
+    "estimator": "sabine",
+    "estimator_version": "sabine_polygon_octaves_v4",
     "aggregation": "arithmetic_mean",
-    "target_metric": "raven.mean_t30_s",
-    "band_resolution": "octave",
-    "frequency_mapping": "center_frequency",
-    "max_rt30_s": 1.0,
-    "estimated_rt30_s": 0.78,
-    "band_frequencies_hz": [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
+    "mean_bands_hz": [125, 250, 500, 1000, 2000, 4000, 8000],
+    "estimated_mean_rt30_s": 0.3814625648571696,
     "rt30_by_band_s": {
-      "31.5": 1.02,
-      "63": 0.96,
-      "125": 0.90,
-      "250": 0.85,
-      "500": 0.81,
-      "1000": 0.77,
-      "2000": 0.73,
-      "4000": 0.67,
-      "8000": 0.59,
-      "16000": 0.50
+      "31.5": 0.5928278792170351,
+      "63": 0.5395902708509169,
+      "125": 0.4821059847809694,
+      "250": 0.43030357419660126,
+      "500": 0.3900721073845358,
+      "1000": 0.36190325889686736,
+      "2000": 0.34284265675173226,
+      "4000": 0.3328469917077912,
+      "8000": 0.3301633802816902,
+      "16000": 0.3301633802816902
     },
-    "valid_band_count": 10,
-    "sampling_attempts": 2
+    "geometry": {"floor_area_m2":15.12,"volume_m3":39.312,"surface_areas_m2":{"wall_001":10.92,"wall_002":9.36,"wall_003":10.92,"wall_004":9.36,"floor":15.12,"ceiling":15.12}},
+    "treatment_catalog_version": 1,
+    "absorption_mix_model": "area_weighted_linear",
+    "absorption_mix_model_version": 1,
+    "proposal_strategy_version": 1,
+    "effective_seed": 123456789,
+    "scene_index": 0,
+    "rejections_by_reason": {},
+    "raven_t30_rejections": [],
+    "raven_retry_count": 0
   },
+
+  "reverberation_batch": {
+    "range_s": {"min": 0.1, "max": 1.2},
+    "bin_width_s": 0.1,
+    "bin_edges_s": [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2],
+    "requested_realizations": 1,
+    "accepted_realizations": 1,
+    "fallback_count": 0,
+    "failed_count": 0
+  },
+
+  "sampling": {"effective_seed":123456789,"scene_attempt":2,"receiver_attempt":1,"shape_type":"shoebox"},
 
   "background_noise": {
     "enabled": true,
@@ -147,7 +193,7 @@
     "sample_rate_hz": 44100,
     "seed": 42,
     "target_duration_s": 12.5,
-    "output_wav_path": "D:/Tesis/Binaural-Impared-Hear/outputs/artifacts/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
-    "output_metadata_path": "D:/Tesis/Binaural-Impared-Hear/outputs/artifacts/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json"
+    "output_wav_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/outputs/artifacts/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
+    "output_metadata_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/outputs/artifacts/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json"
   }
 }

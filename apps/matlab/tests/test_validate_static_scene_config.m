@@ -146,6 +146,56 @@ function testSchema2RejectsReceiverOrSourceOutsideFootprint(testCase)
     verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
 end
 
+function testNormalizesSchema3AcousticAndReverberationContract(testCase)
+    cfg = make_schema3_cfg();
+
+    normalized = validate_static_scene_config(cfg);
+
+    verifyEqual(testCase, normalized.schema_version, '3.0');
+    verifyEqual(testCase, normalized.reverberation_sampling.estimator_version, ...
+        'sabine_polygon_octaves_v4');
+    verifyEqual(testCase, normalized.reverberation_sampling.mean_bands_hz, ...
+        [125 250 500 1000 2000 4000 8000]);
+    verifyEqual(testCase, ...
+        normalized.room.acoustic_surfaces.wall_001.treatment.catalog_version, 1);
+end
+
+function testSchema3RequiresReverberationSampling(testCase)
+    cfg = make_schema3_cfg();
+    cfg = rmfield(cfg, 'reverberation_sampling');
+
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema3RejectsUnsupportedReverberationContract(testCase)
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.estimator_version = 'sabine_polygon_octaves_v5';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.absorption_mix_model = 'nonlinear';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.proposal_strategy_version = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema3RejectsUnsupportedOrIncompleteSurfaceTreatment(testCase)
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.wall_001.treatment.catalog_version = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.wall_001.treatment = ...
+        rmfield(cfg.room.acoustic_surfaces.wall_001.treatment, 'coverage');
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.floor.treatment.preset_id = 'broadband_light';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
 function testNormalizesOptionalSourceDirectivityPath(testCase)
     cfg = make_base_cfg();
     cfg.sources.directivity_path = "C:/directivity/source-pattern.daff";
@@ -321,6 +371,50 @@ function cfg = make_schema2_cfg()
     room.material_files.ceiling = legacy_room.material_files.ceiling;
     cfg.room = room;
     cfg.sources.position_m = [2.0 1.0 1.5];
+end
+
+function cfg = make_schema3_cfg()
+    cfg = make_schema2_cfg();
+    cfg.schema_version = '3.0';
+    surface_ids = [cfg.room.geometry.wall_ids, {'floor', 'ceiling'}];
+    acoustic_surfaces = struct();
+    for iSurface = 1:numel(surface_ids)
+        surface_id = surface_ids{iSurface};
+        scattering = repmat(0.05, 1, 31);
+        absorption = repmat(0.10, 1, 31);
+        coverage = 0.25;
+        preset_id = 'broadband_light';
+        if strcmp(surface_id, 'floor')
+            coverage = 0.0;
+            preset_id = 'none';
+        end
+        surface_area_m2 = 10.0;
+        acoustic_surfaces.(surface_id) = struct( ...
+            'surface_area_m2', surface_area_m2, ...
+            'base_material', struct( ...
+                'material_id', cfg.room.materials.(surface_id), ...
+                'material_path', cfg.room.material_files.(surface_id).material_path, ...
+                'absorption', absorption, ...
+                'scattering', scattering), ...
+            'treatment', struct( ...
+                'preset_id', preset_id, ...
+                'catalog_version', 1, ...
+                'coverage', coverage, ...
+                'treated_area_m2', surface_area_m2 * coverage, ...
+                'absorption', repmat(0.18, 1, 31)), ...
+            'effective_absorption', repmat(0.12, 1, 31), ...
+            'effective_scattering', scattering);
+    end
+    cfg.room.acoustic_surfaces = acoustic_surfaces;
+    cfg.reverberation_sampling = struct( ...
+        'estimator', 'sabine', ...
+        'estimator_version', 'sabine_polygon_octaves_v4', ...
+        'aggregation', 'arithmetic_mean', ...
+        'mean_bands_hz', [125 250 500 1000 2000 4000 8000], ...
+        'treatment_catalog_version', 1, ...
+        'absorption_mix_model', 'area_weighted_linear', ...
+        'absorption_mix_model_version', 1, ...
+        'proposal_strategy_version', 1);
 end
 
 function room = make_room_cfg(repo_root)

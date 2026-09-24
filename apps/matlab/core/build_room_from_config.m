@@ -1,5 +1,5 @@
 function ctx = build_room_from_config(ctx)
-    if isfield(ctx.manifest, 'schema_version') && strcmp(char(string(ctx.manifest.schema_version)), '2.0')
+    if isfield(ctx.manifest, 'schema_version') && any(strcmp(char(string(ctx.manifest.schema_version)), {'2.0', '3.0'}))
         ctx = build_polygon_room_from_config(ctx);
         return;
     end
@@ -91,7 +91,15 @@ function ctx = build_polygon_room_from_config(ctx)
     for i=1:numel(floor_slots), apply_polygon_material(rpf,room,'floor',floor_slots{i}); end
     for i=1:numel(ceiling_slots), apply_polygon_material(rpf,room,'ceiling',ceiling_slots{i}); end
     logical=[wall_ids,repmat({'floor'},1,numel(floor_slots)),repmat({'ceiling'},1,numel(ceiling_slots))]; applied=repmat(struct('surface','','slot_name','','material_id','','material_path','','absorp',[],'scatter',[]),1,numel(logical));
-    for i=1:numel(logical), ref=room.material_files.(logical{i}); mat=parse_room_material_file(ref.material_path); applied(i)=struct('surface',logical{i},'slot_name',expected{i},'material_id',ref.material_id,'material_path',ref.material_path,'absorp',mat.absorp,'scatter',mat.scatter); end
+    for i=1:numel(logical)
+        ref=room.material_files.(logical{i});
+        if isfield(room,'acoustic_surfaces')
+            acoustic=room.acoustic_surfaces.(logical{i}); absorp=acoustic.effective_absorption; scatter=acoustic.effective_scattering;
+        else
+            mat=parse_room_material_file(ref.material_path); absorp=mat.absorp; scatter=mat.scatter;
+        end
+        applied(i)=struct('surface',logical{i},'slot_name',expected{i},'material_id',ref.material_id,'material_path',ref.material_path,'absorp',absorp,'scatter',scatter);
+    end
     ctx.rpf=rpf; ctx.applied_room_materials=applied;
 end
 
@@ -100,7 +108,12 @@ function names = normalize_polygon_slots(value)
     names=cellfun(@(x)char(string(x)),names,'UniformOutput',false);
 end
 function apply_polygon_material(rpf,room,surface,slot)
-    ref=room.material_files.(surface); mat=parse_room_material_file(ref.material_path); rpf.setMaterial(slot,mat.absorp,mat.scatter);
+    if isfield(room, 'acoustic_surfaces')
+        acoustic=room.acoustic_surfaces.(surface);
+        rpf.setMaterial(slot,acoustic.effective_absorption,acoustic.effective_scattering);
+    else
+        ref=room.material_files.(surface); mat=parse_room_material_file(ref.material_path); rpf.setMaterial(slot,mat.absorp,mat.scatter);
+    end
 end
 
 function indices = orient_face_toward(points, indices, interior)

@@ -72,7 +72,7 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert Path(manifest["sources"][0]["audio_path"]).is_absolute()
     speech_source = next(source for source in manifest["sources"] if source["event_type"] == "speech")
     assert Path(speech_source["directivity_path"]).is_absolute()
-    assert manifest["schema_version"] == "2.0"
+    assert manifest["schema_version"] == "3.0"
     assert "dimensions_m" not in manifest["room"]
     assert list(manifest["room"]["material_files"]) == [
         *manifest["room"]["geometry"]["wall_ids"],
@@ -80,6 +80,31 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
         "ceiling",
     ]
     assert Path(manifest["room"]["material_files"]["wall_001"]["material_path"]).is_absolute()
+    acoustic_surfaces = manifest["room"]["acoustic_surfaces"]
+    assert set(acoustic_surfaces) == set(manifest["room"]["material_files"])
+    assert acoustic_surfaces["floor"]["treatment"]["preset_id"] == "none"
+    assert acoustic_surfaces["floor"]["treatment"]["coverage"] == 0.0
+    for surface_id, surface in acoustic_surfaces.items():
+        treatment = surface["treatment"]
+        assert treatment["treated_area_m2"] == pytest.approx(
+            surface["surface_area_m2"] * treatment["coverage"]
+        )
+        assert len(surface["effective_absorption"]) == 31
+        assert len(surface["effective_scattering"]) == 31
+        assert surface["effective_scattering"] == surface["base_material"]["scattering"]
+        for base, treated, effective in zip(
+            surface["base_material"]["absorption"],
+            treatment["absorption"],
+            surface["effective_absorption"],
+            strict=True,
+        ):
+            assert effective == pytest.approx(
+                (1 - treatment["coverage"]) * base + treatment["coverage"] * treated
+            )
+        if surface_id.startswith("wall_") or surface_id == "ceiling":
+            assert treatment["preset_id"] in {
+                "none", "broadband_light", "broadband_medium", "broadband_strong"
+            }
     assert Path(manifest["render"]["output_wav_path"]).is_absolute()
     assert Path(manifest["render"]["output_metadata_path"]).is_absolute()
     assert Path(manifest["render"]["output_wav_path"]).parts[-2:] == ("binaural_hrtf", "scene_static_0001__binaural_hrtf.wav")
@@ -90,6 +115,25 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert Path(manifest["render"]["output_wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "output_audio", "render")
     assert manifest["room"]["material_files"] == json.loads(second_paths[0].read_text(encoding="utf-8"))["room"]["material_files"]
     assert manifest["background_noise"] == {"enabled": False, "layers": []}
+    realization_sampling = manifest["reverberation_sampling"]
+    assert realization_sampling["estimator_version"] == "sabine_polygon_octaves_v4"
+    assert realization_sampling["proposal_strategy_version"] == 1
+    assert realization_sampling["treatment_catalog_version"] == 1
+    assert realization_sampling["absorption_mix_model_version"] == 1
+
+    batch = manifest["reverberation_batch"]
+    assert batch["requested_realizations"] == 2
+    assert batch["accepted_realizations"] == 2
+    assert batch["matched_requested_bin_count"] + batch["fallback_count"] == 2
+    assert batch["failed_count"] == 0
+    assert sum(item["target_count"] for item in batch["bins"]) == 2
+    assert sum(item["observed_count"] for item in batch["bins"]) == 2
+    assert all(item["absolute_deviation"] == abs(item["observed_count"] - item["target_count"]) for item in batch["bins"])
+    assert isinstance(batch["rejections_by_reason"], dict)
+    assert batch["estimator_version"] == "sabine_polygon_octaves_v4"
+    assert batch["proposal_strategy_version"] == 1
+    assert batch["treatment_catalog_version"] == 1
+    assert batch["absorption_mix_model_version"] == 1
 
 
 def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_path: Path) -> None:
@@ -109,44 +153,35 @@ def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_
     assert sampler._sample_hrtfs(config, random.Random(42))[0]["hrtf_id"] == "binaural_hrtf"
 
 
-def test_rt30_guard_accepts_the_inclusive_limit_and_records_diagnostics(
+def test_rt30_sampling_records_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(workspace, "rt30_boundary", num_simulations=1)
     _make_receiver_orientation_compatible(config_path)
-    config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            "room_sampling:\n",
-            "room_sampling:\n  max_rt30_s: 0.75\n",
-            1,
-        ),
-        encoding="utf-8",
-    )
     monkeypatch.setattr(
         sampler,
         "estimate_room_rt30_s",
         lambda room: {
             "estimated_rt30_s": 0.75,
             "rt30_by_band_s": {frequency: 0.75 for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+            "floor_area_m2": 10.0,
+            "volume_m3": 30.0,
+            "surface_areas_m2": {},
         },
     )
 
     manifest_path = generate_static_manifests(config_path)[0]
-    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_sampling"]
 
-    assert guard["estimated_rt30_s"] == 0.75
-    assert guard["sampling_attempts"] == 1
-    assert guard["method"] == "sabine"
-    assert guard["estimator_version"] == "sabine_polygon_octaves_v3"
+    assert guard["estimated_mean_rt30_s"] == 0.75
+    assert guard["attempts"] >= 1
+    assert guard["estimator"] == "sabine"
+    assert guard["estimator_version"] == "sabine_polygon_octaves_v4"
     assert guard["aggregation"] == "arithmetic_mean"
-    assert guard["target_metric"] == "raven.mean_t30_s"
-    assert guard["band_resolution"] == "octave"
-    assert guard["frequency_mapping"] == "center_frequency"
-    assert guard["max_rt30_s"] == 0.75
-    assert guard["band_frequencies_hz"] == [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-    assert guard["valid_band_count"] == 10
+    assert guard["mean_bands_hz"] == [125, 250, 500, 1000, 2000, 4000, 8000]
+    assert len(guard["rt30_by_band_s"]) == 10
 
 
 def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
@@ -155,9 +190,9 @@ def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
     _make_receiver_orientation_compatible(config_path)
 
     manifest_path = generate_static_manifests(config_path)[0]
-    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_sampling"]
 
-    assert guard["estimated_rt30_s"] <= guard["max_rt30_s"]
+    assert 0.1 <= guard["estimated_mean_rt30_s"] <= 1.2
     assert set(guard["rt30_by_band_s"]) == {
         "31.5",
         "63",
@@ -171,7 +206,6 @@ def test_rt30_guard_estimates_real_sampled_materials(tmp_path: Path) -> None:
         "16000",
     }
     assert all(value > 0 for value in guard["rt30_by_band_s"].values())
-    assert guard["valid_band_count"] == 10
 
 
 def test_rt30_guard_sampling_is_deterministic_for_the_same_seed(tmp_path: Path) -> None:
@@ -194,7 +228,7 @@ def test_rt30_guard_resamples_room_before_accepting_candidate(
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(workspace, "rt30_retry", num_simulations=1)
     _make_receiver_orientation_compatible(config_path)
-    estimates = iter([1.5, 0.9])
+    estimates = iter([1.5, 0.35])
     estimate_calls = 0
     receiver_calls = 0
     original_sample_receiver = sampler._sample_receiver
@@ -218,10 +252,10 @@ def test_rt30_guard_resamples_room_before_accepting_candidate(
     monkeypatch.setattr(sampler, "_sample_receiver", sample_receiver)
 
     manifest_path = generate_static_manifests(config_path)[0]
-    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_guard"]
+    guard = json.loads(manifest_path.read_text(encoding="utf-8"))["reverberation_sampling"]
 
-    assert guard["estimated_rt30_s"] == 0.9
-    assert guard["sampling_attempts"] == 2
+    assert guard["estimated_mean_rt30_s"] == 0.35
+    assert guard["attempts"] == 2
     assert receiver_calls == 1
 
 
@@ -248,7 +282,7 @@ def test_rt30_guard_exhaustion_skips_failed_index_and_keeps_successful_manifest(
     manifest_paths = generate_static_manifests(config_path)
 
     assert [path.name for path in manifest_paths] == ["scene_static_0001.json"]
-    assert estimate_calls == 11
+    assert estimate_calls == 20
 
 
 def test_partial_sampling_persists_diagnostics_and_keeps_original_scene_indices(
@@ -284,7 +318,9 @@ def test_partial_sampling_persists_diagnostics_and_keeps_original_scene_indices(
     failure = json.loads(failure_lines[0])
 
     assert [path.name for path in manifest_paths] == ["scene_static_0001.json", "scene_static_0003.json"]
-    assert summary == {
+    assert {key: summary[key] for key in (
+        "requested_scenes", "generated_scenes", "failed_scenes", "failed_scene_indices", "status", "failures_path"
+    )} == {
         "requested_scenes": 3,
         "generated_scenes": 2,
         "failed_scenes": 1,
@@ -492,6 +528,7 @@ def test_runtime_manifests_preserve_scene_background_noise(tmp_path: Path, monke
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -514,6 +551,7 @@ def test_runtime_manifests_use_unique_stable_raven_project_names(tmp_path: Path,
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -1354,7 +1392,7 @@ def test_schema_2_contract_for_each_geometry(
     manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
     geometry = manifest["room"]["geometry"]
 
-    assert manifest["schema_version"] == "2.0"
+    assert manifest["schema_version"] == "3.0"
     assert "dimensions_m" not in manifest["room"]
     assert geometry["type"] == shape_type
     assert len(geometry["footprint_vertices_m"]) == expected_vertices
@@ -1381,6 +1419,115 @@ def test_scene_rng_depends_only_on_seed_and_scene_index(tmp_path: Path) -> None:
     assert first["sampling"]["effective_seed"] != other_index["sampling"]["effective_seed"]
 
 
+def test_reverberation_sampling_is_invariant_to_worker_count(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path)
+    sequential = _write_config(workspace, "workers_one", num_simulations=2, num_workers=1)
+    parallel = _write_config(workspace, "workers_four", num_simulations=2, num_workers=4)
+
+    sequential_manifests = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in generate_static_manifests(sequential)
+    ]
+    parallel_manifests = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in generate_static_manifests(parallel)
+    ]
+
+    for left, right in zip(sequential_manifests, parallel_manifests, strict=True):
+        assert left["room"] == right["room"]
+        assert left["receiver"] == right["receiver"]
+        assert left["sources"] == right["sources"]
+        assert left["sampling"] == right["sampling"]
+        assert left["reverberation_sampling"] == right["reverberation_sampling"]
+
+
+def test_rt30_fallback_uses_reservoir_sampling_without_nearest_bin_bias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "reservoir_fallback", num_simulations=1))
+    estimates = iter([1.15, 0.45] * 5)
+    room = {
+        "room_id": "room_0001",
+        "geometry": {"type": "custom", "generated_from": {}},
+        "acoustic_geometry": {
+            "floor_area_m2": 10.0,
+            "volume_m3": 30.0,
+            "surfaces": {
+                "wall_custom": {"surface_type": "wall", "area_m2": 12.0},
+                "floor_custom": {"surface_type": "floor", "area_m2": 10.0},
+                "ceiling_custom": {"surface_type": "ceiling", "area_m2": 10.0},
+            },
+        },
+        "material_files": {
+            surface_id: {"material_id": "dummy", "material_path": workspace / "dummy.mat"}
+            for surface_id in ("wall_custom", "floor_custom", "ceiling_custom")
+        },
+    }
+
+    monkeypatch.setattr(sampler, "_sample_room", lambda *args: room.copy())
+    monkeypatch.setattr(sampler, "_apply_virtual_treatments", lambda *args: None)
+
+    def fake_estimate(_room: dict) -> dict:
+        value = next(estimates)
+        return {
+            "estimated_rt30_s": value,
+            "rt30_by_band_s": {frequency: value for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ},
+            "floor_area_m2": 10.0,
+            "volume_m3": 30.0,
+            "surface_areas_m2": {"wall_custom": 12.0, "floor_custom": 10.0, "ceiling_custom": 10.0},
+        }
+
+    monkeypatch.setattr(sampler, "estimate_room_rt30_s", fake_estimate)
+    monkeypatch.setattr(sampler, "_sample_receiver", lambda *args: {"receiver_id": "r", "position_m": [0, 0, 0], "orientation_deg": {"yaw": 0, "pitch": 0, "roll": 0}})
+    monkeypatch.setattr(sampler, "_sample_sources", lambda *args: [])
+    monkeypatch.setattr(sampler, "_is_valid_scene", lambda *args: True)
+    monkeypatch.setattr(sampler, "_sample_hrtfs", lambda *args: [])
+
+    sampled = sampler.sample_static_scene(config, None, 0)
+
+    assert sampled["reverberation_sampling"]["requested_bin"]["index"] == 2
+    assert sampled["reverberation_sampling"]["fallback_used"] is True
+    assert sampled["reverberation_sampling"]["rejections_by_reason"]["rt30_other_bin"] == 10
+    # 0.45 was the nearest observed alternative, but deterministic reservoir
+    # sampling retained 1.15, proving no distance-based selection is applied.
+    assert sampled["reverberation_sampling"]["estimated_mean_rt30_s"] == 1.15
+
+
+def test_virtual_treatment_uses_abstract_surface_type_for_ceiling_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "abstract_ceiling_coverage", num_simulations=1))
+    treatment = config.room_sampling.reverberation.treatment
+    treatment.allow_none = False
+    treatment.wall_coverage.min = treatment.wall_coverage.max = 0.1
+    treatment.ceiling_coverage.min = treatment.ceiling_coverage.max = 0.9
+    room = {
+        "acoustic_geometry": {
+            "floor_area_m2": 10.0,
+            "volume_m3": 30.0,
+            "surfaces": {
+                "side_shell": {"surface_type": "wall", "area_m2": 12.0},
+                "upper_deck": {"surface_type": "ceiling", "area_m2": 10.0},
+            },
+        },
+        "material_files": {
+            surface_id: {"material_id": "dummy", "material_path": workspace / "dummy.mat"}
+            for surface_id in ("side_shell", "upper_deck")
+        },
+    }
+    monkeypatch.setattr(sampler, "load_material_absorption_coefficients", lambda _path: tuple([0.1] * 31))
+    monkeypatch.setattr(sampler, "load_material_scattering_coefficients", lambda _path: tuple([0.2] * 31))
+
+    sampler._apply_virtual_treatments(config, room, target_index=0, bin_count=11, rng=random.Random(7))
+
+    assert room["acoustic_surfaces"]["side_shell"]["treatment"]["coverage"] == 0.1
+    assert room["acoustic_surfaces"]["upper_deck"]["treatment"]["coverage"] == 0.9
+
+
 def test_shape_type_is_fixed_across_rt30_scene_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1400,7 +1547,7 @@ def test_shape_type_is_fixed_across_rt30_scene_retries(
     config = load_config(config_path)
     sampled_types: list[str] = []
     original_sample_room = sampler._sample_room
-    estimates = iter([2.0, 0.5])
+    estimates = iter([2.0, 0.75])
 
     def recording_sample_room(config, shape, rng, scene_index):
         sampled_types.append(shape.type)
@@ -1570,6 +1717,7 @@ def test_render_static_scenes_invokes_matlab_once_per_scene_hrtf(tmp_path: Path,
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -1623,15 +1771,114 @@ def test_render_static_scenes_num_workers_one_uses_sequential_path(tmp_path: Pat
         matlab_calls.append(manifest["receiver"]["hrtfs"][0]["hrtf_id"])
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", fail_if_executor_is_used)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
     _, summary = render_static_scenes(config_path)
 
-    assert matlab_calls == ["binaural_hrtf", "bte_rear_hartf", "bte_front_hartf"]
+    assert matlab_calls == ["binaural_hrtf", "bte_front_hartf", "bte_rear_hartf"]
     assert summary["render_jobs"] == 3
     assert summary["completed_variants"] == 3
+
+
+def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "raven_t30_retry", num_simulations=1, num_workers=1)
+    original_sample = render_pipeline.sample_static_scene
+    sampled_contracts: list[tuple[int, int, int]] = []
+
+    def sample_with_available_retry(config, rng, scene_index, **kwargs):  # type: ignore[no-untyped-def]
+        sampled = original_sample(config, rng, scene_index, **kwargs)
+        if not kwargs:
+            sampled["reverberation_sampling"]["attempts"] = 1
+        metadata = sampled["reverberation_sampling"]
+        sampled_contracts.append(
+            (metadata["scene_index"], metadata["effective_seed"], metadata["requested_bin"]["index"])
+        )
+        return sampled
+
+    render_order: list[str] = []
+
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        hrtf_id = manifest["receiver"]["hrtfs"][0]["hrtf_id"]
+        render_order.append(hrtf_id)
+        render = manifest["render"]
+        Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest, [0.5] * (9 if len(render_order) == 1 else 10))
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_with_available_retry)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", fake_render)
+
+    manifest_paths, summary = render_static_scenes(config_path)
+
+    assert render_order[:2] == ["binaural_hrtf", "binaural_hrtf"]
+    assert render_order[2:] == ["bte_front_hartf", "bte_rear_hartf"]
+    assert summary["render_jobs"] == 4
+    assert len(manifest_paths) == 1
+    assert len(sampled_contracts) == 2
+    assert sampled_contracts[0] == sampled_contracts[1]
+    manifest = json.loads(manifest_paths[0].read_text(encoding="utf-8"))
+    rejection = manifest["reverberation_sampling"]["raven_t30_rejections"][0]
+    assert rejection["reason"] == "raven_t30_band_count"
+    assert rejection["observed_band_count"] == 9
+    assert rejection["expected_band_count"] == 10
+    assert manifest["reverberation_sampling"]["raven_retry_count"] == 1
+    assert manifest["reverberation_sampling"]["attempts"] >= 2
+
+
+def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "raven_t30_exhausted", num_simulations=1, num_workers=1)
+    config = load_config(config_path)
+    original_sample = render_pipeline.sample_static_scene
+
+    def sample_at_budget(config, rng, scene_index, **kwargs):  # type: ignore[no-untyped-def]
+        sampled = original_sample(config, rng, scene_index, **kwargs)
+        sampled["reverberation_sampling"]["attempts"] = config.scene_validation.max_scene_attempts
+        return sampled
+
+    render_order: list[str] = []
+
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        render_order.append(manifest["receiver"]["hrtfs"][0]["hrtf_id"])
+        render = manifest["render"]
+        Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest, [0.5] * 9 + [float("nan")])
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_at_budget)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", fake_render)
+
+    manifest_paths, summary = render_static_scenes(config_path)
+
+    assert manifest_paths == []
+    assert render_order == ["binaural_hrtf"]
+    assert summary["sampling"]["status"] == "failed"
+    assert summary["sampling"]["failed_scene_indices"] == [0]
+    assert summary["sampling"]["reverberation_batch"]["accepted_realizations"] == 0
+    assert summary["sampling"]["reverberation_batch"]["failed_count"] == 1
+    assert summary["planned_variants"] == 0
+    assert summary["failed_variants"] == 3
+    failures = [
+        json.loads(line)
+        for line in Path(summary["sampling"]["failures_path"]).read_text(encoding="utf-8").splitlines()
+    ]
+    assert failures[-1]["stage"] == "raven_t30"
+    invalid_band = failures[-1]["raven_t30_rejections"][0]["invalid_bands"][0]
+    assert invalid_band["frequency_hz"] == 16000
+    assert invalid_band["value"] == "nan"
+    assert config.scene_validation.max_scene_attempts == failures[-1]["scene_attempts"]
 
 
 def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1651,6 +1898,7 @@ def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -1699,6 +1947,7 @@ def test_render_static_scenes_preserves_public_geometry_poses_and_orientations_i
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -1785,6 +2034,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
     Path(resumed_variant["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
     Path(resumed_variant["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
     Path(resumed_variant["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    _write_valid_raven_metadata(first_scene)
 
     matlab_calls: list[str] = []
 
@@ -1801,18 +2051,19 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
             raise RuntimeError("matlab failed hard")
 
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
-    with pytest.raises(RenderStaticRunError, match="matlab failed before wav") as exc_info:
+    with pytest.raises(RenderStaticRunError, match="matlab failed hard") as exc_info:
         render_static_scenes(config_path)
 
     assert resumed_variant["variant_id"] not in matlab_calls
     assert exc_info.value.summary["index_path"].endswith("render_index.jsonl")
-    assert exc_info.value.summary["completed_variants"] == 1
+    assert exc_info.value.summary["completed_variants"] == 2
     assert exc_info.value.summary["partial_variants"] == 1
     assert exc_info.value.summary["failed_variants"] == 0
-    assert exc_info.value.summary["planned_variants"] == 4
+    assert exc_info.value.summary["planned_variants"] == 3
     assert exc_info.value.summary["inconsistent_variants"] == 0
     index_path = layout["render_index_path"]
     records = {
@@ -1822,7 +2073,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
     assert records[resumed_variant["variant_id"]]["status"] == "completed"
     assert records[resumed_variant["variant_id"]]["resumed"] is True
     assert any(record["status"] == "partial" and record["attempted"] for record in records.values())
-    assert sum(record["status"] == "planned" for record in records.values()) == 4
+    assert sum(record["status"] == "planned" for record in records.values()) == 3
 
 
 def test_render_static_scenes_failure_summary_keeps_failed_variants_visible(
@@ -1841,6 +2092,7 @@ def test_render_static_scenes_failure_summary_keeps_failed_variants_visible(
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -1899,6 +2151,7 @@ def test_render_static_scenes_parallel_prepares_before_fanout_and_parent_indexes
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
         worker_completed += 1
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", RecordingThreadPoolExecutor)
@@ -1910,7 +2163,7 @@ def test_render_static_scenes_parallel_prepares_before_fanout_and_parent_indexes
     assert summary["render_jobs"] == 3
     assert summary["completed_variants"] == 3
     assert len(matlab_calls) == 3
-    assert executor_worker_counts == [3]
+    assert executor_worker_counts == [2]
     assert worker_completed == 3
     assert all(not thread_name.startswith("ThreadPoolExecutor") for thread_name in upsert_threads)
 
@@ -1940,6 +2193,7 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
     )
     Path(resumed_variant["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
     Path(resumed_variant["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    _write_valid_raven_metadata(first_scene)
 
     original_executor = render_pipeline.ThreadPoolExecutor
     executor_worker_counts: list[int] = []
@@ -1964,6 +2218,7 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", RecordingThreadPoolExecutor)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
@@ -1972,8 +2227,8 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
 
     assert executor_worker_counts == [2]
     assert submitted_variant_ids == [
-        "scene_static_0001__bte_rear_hartf",
         "scene_static_0001__bte_front_hartf",
+        "scene_static_0001__bte_rear_hartf",
     ]
     assert sorted(matlab_variant_ids) == sorted(submitted_variant_ids)
     assert resumed_variant["variant_id"] not in submitted_variant_ids
@@ -1997,10 +2252,12 @@ def test_render_static_scenes_parallel_indexes_all_submitted_results_before_rais
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         if hrtf_id == "binaural_hrtf":
             Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+            _write_valid_raven_metadata(manifest)
             return
         if hrtf_id == "bte_rear_hartf":
             raise RuntimeError("parallel matlab failed")
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
+        _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
 
@@ -2029,6 +2286,13 @@ def test_render_static_scenes_reports_metadata_inconsistencies(tmp_path: Path, m
                 {
                     "scene_id": "unexpected_scene",
                     "hrtf_id": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
+                    "summary": {
+                        "room": {
+                            "reverberation": {
+                                "t30_s": [0.5] * 10,
+                            }
+                        }
+                    },
                     "render": {
                         "output_wav_path": render["output_wav_path"],
                         "output_metadata_path": render["output_metadata_path"],
@@ -2220,6 +2484,30 @@ class _MaxUniformRng:
         return maximum
 
 
+def _write_valid_raven_metadata(manifest: dict, t30_s: list[float] | None = None) -> None:
+    render = manifest["render"]
+    metadata_path = Path(render["output_metadata_path"])
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "scene_id": manifest["scene_id"],
+                "hrtf_id": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
+                "summary": {
+                    "room": {
+                        "reverberation": {
+                            "t30_s": t30_s if t30_s is not None else [0.5] * 10,
+                        }
+                    }
+                },
+                "output_wav_path": render["output_wav_path"],
+                "output_metadata_path": render["output_metadata_path"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _build_workspace(
     tmp_path: Path,
     *,
@@ -2273,13 +2561,20 @@ def _replace_room_sampling_geometry(
     config_path: Path,
     shape_block: str,
     *,
-    max_rt30_s: float = 10.0,
+    max_rt30_s: float = 1.2,
 ) -> None:
     text = config_path.read_text(encoding="utf-8")
     start = text.index("room_sampling:\n")
     end = text.index("source_sampling:\n")
     replacement = f"""room_sampling:
-  max_rt30_s: {max_rt30_s}
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution: {{type: uniform, scope: global, range_s: {{min: 0.1, max: {max_rt30_s}}}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}}
+    treatment: {{catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {{min: 0.0, max: 1.0}}, ceiling_coverage: {{min: 0.0, max: 1.0}}}}
   geometry:
     height_m: {{min: 2.6, max: 2.6}}
     shape_mix:
@@ -2409,6 +2704,14 @@ receiver_outputs:
 {optional_hartf_outputs.rstrip()}
 
 room_sampling:
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution: {{type: uniform, scope: global, range_s: {{min: 0.1, max: 1.2}}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}}
+    treatment: {{catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {{min: 0.0, max: 1.0}}, ceiling_coverage: {{min: 0.0, max: 1.0}}}}
   dimensions_m:
     length:
       min: 4.0

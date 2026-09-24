@@ -26,7 +26,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
         render["target_duration_s"] = config.source_sampling.timing.total_duration_s
 
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
         "scene_type": config.experiment.scene_type,
         "base_rpf_file": config.raven.base_rpf_file.as_posix(),
         "project_name": config.experiment.experiment_id,
@@ -52,6 +52,16 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
                 }
                 for surface_id, material_file in sampled_scene["room"]["material_files"].items()
             },
+            "acoustic_surfaces": {
+                surface_id: {
+                    **surface,
+                    "base_material": {
+                        **surface["base_material"],
+                        "material_path": _absolute_path(surface["base_material"]["material_path"]),
+                    },
+                }
+                for surface_id, surface in sampled_scene["room"]["acoustic_surfaces"].items()
+            },
         },
         "receiver": {
             "receiver_id": sampled_scene["receiver"]["receiver_id"],
@@ -69,7 +79,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
             _build_source_manifest(source)
             for source in sampled_scene["sources"]
         ],
-        "reverberation_guard": dict(sampled_scene["reverberation_guard"]),
+        "reverberation_sampling": dict(sampled_scene["reverberation_sampling"]),
         "sampling": dict(sampled_scene["sampling"]),
         "background_noise": _build_background_noise_manifest(sampled_scene.get("background_noise")),
         "render": render,

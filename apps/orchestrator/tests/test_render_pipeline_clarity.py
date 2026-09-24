@@ -126,6 +126,7 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
                     "scene_id": manifest["scene_id"],
                     "output_type": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
                     "hrtf_id": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
+                    "summary": {"room": {"reverberation": {"t30_s": [0.5] * 10}}},
                     "render": {
                         "output_wav_path": render["output_wav_path"],
                         "output_metadata_path": render["output_metadata_path"],
@@ -402,6 +403,11 @@ def _write_config(
             "receiver_outputs:\n"
             f"  binaural_hrtf:\n    enabled: true\n    ir_catalog_path: {assets_root.as_posix()}/hrtf\n    file_pattern: '*.daff'\n    output_subdir: binaural_hrtf\n    num_channels: 2\n    required: true\n"
             "room_sampling:\n"
+            "  reverberation:\n"
+            "    metric: estimated_rt30_s\n    estimator: sabine\n    estimator_version: sabine_polygon_octaves_v4\n    aggregation: arithmetic_mean\n"
+            "    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]\n"
+            "    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}\n"
+            "    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}\n"
             "  dimensions_m:\n"
             "    length: {min: 4.0, max: 4.5}\n"
             "    width: {min: 3.0, max: 3.5}\n"
