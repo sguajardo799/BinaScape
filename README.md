@@ -117,15 +117,12 @@ trimming require uncompressed PCM WAV supported by Python `wave`, including
 when offsets are disabled. Invalid or unsupported headers stop manifest
 generation with the source path and decoder cause; they are not silently skipped.
 
-Room sampling also supports `room_sampling.max_rt30_s` (default `1.0` second).
-Before any manifest is written, the orchestrator rejects rooms whose
-arithmetic-mean Sabine estimate over RAVEN's ten octave centers (31.5 Hz through
-16 kHz) exceeds that limit. Each octave uses the corresponding center-frequency
-coefficient from the 31-value material data. Exhausting the configured scene
-sampling attempts aborts the batch; the value is an approximation and does not
-guarantee that RAVEN's rendered T30 will stay below the limit. Until the shared
-RAVEN material-state race is addressed, use `execution.num_workers: 1` for
-RT30-sensitive runs.
+Room sampling requires `room_sampling.reverberation`. It creates equal-width
+RT30 bins, assigns balanced deterministic quotas, and applies versioned virtual
+absorption treatments to walls and ceiling. Classification uses the arithmetic
+mean of the estimated 125 Hz through 8 kHz octave bands while all ten RAVEN
+octave estimates are retained. Quotas are diagnostic: a valid in-range fallback
+may be used after the shared scene-attempt budget is exhausted.
 
 ## Output Flow
 

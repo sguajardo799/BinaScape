@@ -19,12 +19,12 @@ function testStoresRawArrayAndMeanFromRoomT30(testCase)
     verifyEqual(testCase, summary.status, 'estimated');
 end
 
-function testIgnoresInvalidValuesWhenComputingMean(testCase)
+function testMarksUnavailableWhenAnyRequiredBandIsInvalid(testCase)
     summary = build_room_reverberation_summary([0.5 NaN -1.0 Inf 1.0 0.6 0.7 0.8 0.9 1.0]);
 
-    verifyEqual(testCase, summary.mean_t30_s, 0.785714285714286, 'AbsTol', 1e-12);
+    verifyTrue(testCase, isempty(summary.mean_t30_s));
     verifyEqual(testCase, summary.valid_band_count, 7);
-    verifyEqual(testCase, summary.status, 'estimated');
+    verifyEqual(testCase, summary.status, 'unavailable');
 end
 
 function testMarksUnavailableWhenRoomT30IsNotNumeric(testCase)
@@ -37,7 +37,13 @@ function testMarksUnavailableWhenRoomT30IsNotNumeric(testCase)
     verifyEqual(testCase, summary.status, 'unavailable');
 end
 
-function testRejectsUnexpectedRavenT30BandCount(testCase)
-    verifyError(testCase, @() build_room_reverberation_summary([0.5 0.6 0.7]), ...
-        'BinaScape:Matlab:UnexpectedT30BandCount');
+function testMarksUnexpectedRavenT30BandCountUnavailable(testCase)
+    summary = build_room_reverberation_summary([0.5 0.6 0.7]);
+
+    verifyEqual(testCase, summary.t30_s, [0.5 0.6 0.7]);
+    verifyEmpty(testCase, summary.band_frequencies_hz);
+    verifyEqual(testCase, summary.valid_band_count, 3);
+    verifyEmpty(testCase, summary.mean_t30_s);
+    verifyEqual(testCase, summary.status, 'unavailable');
+    verifyNotEmpty(testCase, strfind(summary.notes, 'Cantidad de bandas inesperada: 3 de 10.')); %#ok<STRCL1>
 end

@@ -48,6 +48,20 @@ function testSchema2ReflectsPositionsAndConvertsPublicOrientationForRaven(testCa
     verifyEqual(testCase, ctx.sources.position_m, [1.0 2.0 -3.0]);
 end
 
+function testSchema3ReflectsPositionsAndConvertsPublicOrientationForRaven(testCase)
+    ctx = struct();
+    ctx.manifest = struct( ...
+        'schema_version', '3.0', ...
+        'sources', make_source_cfg('src_schema3', '', [1.0 2.0 3.0], 90.0));
+    ctx.rpf = MockRavenProject();
+
+    ctx = build_sources_from_config(ctx);
+
+    verifyEqual(testCase, ctx.rpf.source_positions, [1.0 2.0 -3.0]);
+    verifyEqual(testCase, ctx.rpf.source_view_vectors, [0.0 0.0 -1.0], 'AbsTol', 1e-12);
+    verifyEqual(testCase, ctx.sources.position_m, [1.0 2.0 -3.0]);
+end
+
 function source = make_source_cfg(source_id, directivity_path, position_m, yaw_deg)
     source = struct( ...
         'source_id', source_id, ...

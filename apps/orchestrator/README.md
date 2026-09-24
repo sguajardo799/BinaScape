@@ -129,25 +129,61 @@ Current material contract in generated manifests:
 - `room.material_files` is added as a surface-to-file map.
 - Each material file path is absolute.
 - Material entries do not emit `surface_id`.
+- Schema 3.0 adds `room.acoustic_surfaces` with base, treatment and authoritative
+  effective absorption/scattering vectors for every surface.
 
-Before sampling receivers or sources, the orchestrator applies a room
-reverberation guard. `room_sampling.max_rt30_s` defaults to `1.0` second and
-must be finite and greater than zero. The guard estimates RT30 with Sabine for
-RAVEN's ten octave center frequencies from 31.5 Hz through 16 kHz. Each octave
-uses the matching center-frequency coefficient from the 31 third-octave values
-in the material file. The room is accepted when the ten-band arithmetic mean is
-less than or equal to the configured limit. A rejected candidate resamples both
-dimensions and materials, up to
-`scene_validation.max_sampling_attempts_per_scene`. Exhausting those attempts
-aborts manifest generation without writing a partial new batch. Accepted
-manifests include an additive top-level `reverberation_guard` diagnostic. This
-is a pre-render approximation aligned with the bands used by RAVEN's reported
-mean, not a guarantee of the T30 result later calculated by RAVEN. Use
-`execution.num_workers: 1` for RT30-sensitive runs until concurrent access to
-the shared RAVEN material slots is isolated.
+The required `room_sampling.reverberation` block defines a global uniform
+distribution over equal-width bins. The sampler preassigns balanced quotas by
+scene index, estimates all ten RAVEN octave bands with Sabine and classifies on
+the seven-band mean from 125 Hz through 8 kHz. Walls and ceiling receive
+independent synthetic treatments. A uniformly retained in-range candidate is
+used as a soft fallback when the requested bin is not reached. Manifests contain
+`reverberation_sampling`; their embedded `reverberation_batch` reports quotas,
+observations, deviations, fallbacks, failures and statistical resolution.
+
+The bin divisibility check uses an absolute tolerance of `1e-9 s` (plus a
+relative tolerance of `1e-12`) on the reconstructed time span. Bins follow
+`[lower, upper)` semantics, except that the last bin includes its upper bound.
+For a single-bin experiment, set its width to the complete range:
+
+```yaml
+room_sampling:
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution:
+      type: uniform
+      scope: global
+      range_s: {min: 0.4, max: 0.6}
+      bin_width_s: 0.2
+      quota_tolerance_fraction: 0.10
+    treatment:
+      catalog_version: 1
+      mix_model: area_weighted_linear
+      mix_model_version: 1
+      eligible_surface_types: [wall, ceiling]
+      max_treatments_per_surface: 1
+      preserve_base_scattering: true
+      allow_none: true
+      wall_coverage: {min: 0.0, max: 1.0}
+      ceiling_coverage: {min: 0.0, max: 1.0}
+```
+
+The v1 synthetic treatment catalog requires 31 finite absorption coefficients
+in `[0, 1]` and limits the absolute step between adjacent frequency bands to
+`0.08`. This is an acoustic-plausibility rule, not a claim of construction or
+commercial-product realism. `quota_tolerance_fraction` is diagnostic: bins
+above it are reported and a successful batch becomes
+`complete_with_deviation`, but the tolerance never changes classification or
+invalidates the batch. Small quotas also report
+`insufficient_statistical_resolution` when their discrete resolution is coarser
+than the requested tolerance.
 
 Coordinate note for RAVEN: public manifests use `[x, y, z]` with the footprint
-in `[x, z]`. For schema 2.0, the MATLAB adapter applies the same explicit
+in `[x, z]`. For schemas 2.0 and 3.0, the MATLAB adapter applies the same explicit
 `[x, y, z] -> [x, y, -z]` reflection to positions and orientation vectors.
 Legacy schema 1.0 keeps its existing shoebox contract.
 

@@ -182,25 +182,24 @@ def test_validate_config_rejects_reversed_random_yaw_pitch_ranges(tmp_path: Path
     assert "receiver_sampling.orientation_strategy.roll_deg.min" in message
 
 
-def test_room_sampling_max_rt30_defaults_to_one_second(tmp_path: Path) -> None:
+def test_room_sampling_reverberation_is_loaded(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     _make_receiver_orientation_compatible(config_path)
     config = load_config(config_path)
 
     validate_config(config)
 
-    assert config.room_sampling.max_rt30_s == 1.0
+    assert config.room_sampling.reverberation.distribution.bin_width_s == 0.1
 
 
-@pytest.mark.parametrize("invalid_limit", [0.0, -1.0, float("nan"), float("inf")])
-def test_validate_config_rejects_invalid_room_sampling_max_rt30(tmp_path: Path, invalid_limit: float) -> None:
+def test_load_config_rejects_legacy_room_sampling_max_rt30(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
-    _make_receiver_orientation_compatible(config_path)
-    config = load_config(config_path)
-    config.room_sampling.max_rt30_s = invalid_limit
+    config_path.write_text(config_path.read_text(encoding="utf-8").replace(
+        "room_sampling:\n", "room_sampling:\n  max_rt30_s: 1.0\n", 1
+    ), encoding="utf-8")
 
-    with pytest.raises(ValueError, match=r"room_sampling\.max_rt30_s debe ser finito y > 0"):
-        validate_config(config)
+    with pytest.raises(ValueError, match=r"room_sampling\.max_rt30_s ya no es válido"):
+        load_config(config_path)
 
 
 def test_validate_config_rejects_enabled_background_noise_without_strategies(tmp_path: Path) -> None:
@@ -656,6 +655,14 @@ def _replace_room_sampling_with_geometry(
     )
     replacement = (
         "room_sampling:\n"
+        "  reverberation:\n"
+        "    metric: estimated_rt30_s\n"
+        "    estimator: sabine\n"
+        "    estimator_version: sabine_polygon_octaves_v4\n"
+        "    aggregation: arithmetic_mean\n"
+        "    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]\n"
+        "    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}\n"
+        "    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}\n"
         "  geometry:\n"
         "    height_m: {min: 2.4, max: 2.8}\n"
         "    shape_mix:\n"
@@ -736,6 +743,14 @@ def _write_config(
             "receiver_outputs:\n"
             f"  binaural_hrtf:\n    enabled: true\n    ir_catalog_path: {assets_root.as_posix()}/hrtf\n    file_pattern: '*.daff'\n    output_subdir: binaural_hrtf\n    num_channels: 2\n    required: true\n"
             "room_sampling:\n"
+            "  reverberation:\n"
+            "    metric: estimated_rt30_s\n"
+            "    estimator: sabine\n"
+            "    estimator_version: sabine_polygon_octaves_v4\n"
+            "    aggregation: arithmetic_mean\n"
+            "    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]\n"
+            "    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}\n"
+            "    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}\n"
             "  dimensions_m:\n"
             "    length: {min: 4.0, max: 4.5}\n"
             "    width: {min: 3.0, max: 3.5}\n"

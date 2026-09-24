@@ -168,8 +168,48 @@ class RoomMaterialsConfig(StrictConfigModel):
     ceiling: list[str]
 
 
+class ReverberationRangeConfig(StrictConfigModel):
+    min: float
+    max: float
+
+
+class ReverberationDistributionConfig(StrictConfigModel):
+    type: Literal["uniform"]
+    scope: Literal["global"]
+    range_s: ReverberationRangeConfig
+    bin_width_s: float
+    quota_tolerance_fraction: float = 0.10
+
+
+class TreatmentCoverageConfig(StrictConfigModel):
+    min: float
+    max: float
+
+
+class ReverberationTreatmentConfig(StrictConfigModel):
+    catalog_version: Literal[1]
+    mix_model: Literal["area_weighted_linear"]
+    mix_model_version: Literal[1]
+    eligible_surface_types: list[Literal["wall", "ceiling"]]
+    max_treatments_per_surface: Literal[1]
+    preserve_base_scattering: Literal[True]
+    allow_none: bool
+    wall_coverage: TreatmentCoverageConfig
+    ceiling_coverage: TreatmentCoverageConfig
+
+
+class ReverberationSamplingConfig(StrictConfigModel):
+    metric: Literal["estimated_rt30_s"]
+    estimator: Literal["sabine"]
+    estimator_version: Literal["sabine_polygon_octaves_v4"]
+    aggregation: Literal["arithmetic_mean"]
+    mean_bands_hz: list[int]
+    distribution: ReverberationDistributionConfig
+    treatment: ReverberationTreatmentConfig
+
+
 class RoomSamplingConfig(StrictConfigModel):
-    max_rt30_s: float = 1.0
+    reverberation: ReverberationSamplingConfig
     geometry: RoomGeometryConfig
     materials: RoomMaterialsConfig
 

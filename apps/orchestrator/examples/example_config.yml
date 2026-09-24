@@ -93,8 +93,14 @@ receiver_outputs:
   #   required: false
 
 room_sampling:
-  # LÃ­mite Sabine estimado antes de generar receptor, fuentes y manifiesto.
-  max_rt30_s: 1.0
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}
+    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}
   dimensions_m:
     length:
       min: 2.0

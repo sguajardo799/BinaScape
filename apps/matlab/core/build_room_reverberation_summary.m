@@ -13,17 +13,17 @@ function reverberation = build_room_reverberation_summary(raw_t30)
     reverberation.mean_t30_s = compute_mean_t30(reverberation.t30_s);
     reverberation.status = 'unavailable';
     reverberation.notes = ['T30 de sala obtenido desde RAVEN tras rpf.run(). ', ...
-        'El promedio se calcula usando únicamente valores finitos mayores a cero.'];
+        'El promedio solo está disponible cuando las diez bandas son finitas y positivas.'];
 
     if ~isempty(reverberation.t30_s)
-        if numel(reverberation.t30_s) ~= numel(raven_octave_frequencies_hz)
-            error('BinaScape:Matlab:UnexpectedT30BandCount', ...
-                'rpf.getT30 devolvió %d valores; se esperaban %d bandas de octava.', ...
-                numel(reverberation.t30_s), numel(raven_octave_frequencies_hz));
-        end
         reverberation.t30_s = reshape(reverberation.t30_s, 1, []);
-        reverberation.band_frequencies_hz = raven_octave_frequencies_hz;
         reverberation.valid_band_count = sum(isfinite(reverberation.t30_s) & (reverberation.t30_s > 0));
+        if numel(reverberation.t30_s) == numel(raven_octave_frequencies_hz)
+            reverberation.band_frequencies_hz = raven_octave_frequencies_hz;
+        else
+            reverberation.notes = sprintf('%s Cantidad de bandas inesperada: %d de %d.', ...
+                reverberation.notes, numel(reverberation.t30_s), numel(raven_octave_frequencies_hz));
+        end
     end
 
     if ~isempty(reverberation.mean_t30_s)
@@ -44,10 +44,8 @@ function mean_t30_s = compute_mean_t30(t30_values)
         return;
     end
 
-    valid_values = t30_values(isfinite(t30_values) & (t30_values > 0));
-    if isempty(valid_values)
+    if numel(t30_values) ~= 10 || any(~isfinite(t30_values)) || any(t30_values <= 0)
         return;
     end
-
-    mean_t30_s = mean(valid_values, 'all');
+    mean_t30_s = mean(t30_values, 'all');
 end

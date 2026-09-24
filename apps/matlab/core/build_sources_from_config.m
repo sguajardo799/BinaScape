@@ -42,7 +42,8 @@ function ctx = build_sources_from_config(ctx)
 
         % Posición
         ori = src_cfg.orientation_deg;
-        if isfield(cfg, 'schema_version') && strcmp(char(string(cfg.schema_version)), '2.0')
+        if isfield(cfg, 'schema_version') && ...
+                any(strcmp(char(string(cfg.schema_version)), {'2.0', '3.0'}))
             [pos, viewVec, upVec] = transform_schema2_pose_to_raven( ...
                 src_cfg.position_m, ori);
         else

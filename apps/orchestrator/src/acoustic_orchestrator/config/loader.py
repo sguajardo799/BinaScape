@@ -109,6 +109,10 @@ def _normalize_legacy_config(raw_config: object) -> None:
 
     room_sampling = raw_config.get("room_sampling")
     if isinstance(room_sampling, dict):
+        if "max_rt30_s" in room_sampling:
+            raise ValueError(
+                "room_sampling.max_rt30_s ya no es válido; configure room_sampling.reverberation"
+            )
         _normalize_legacy_room_sampling(room_sampling)
 
     scene_validation = raw_config.get("scene_validation")

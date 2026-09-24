@@ -2,7 +2,7 @@ import math
 from pathlib import Path
 
 from acoustic_orchestrator.config.validator import load_material_absorption_coefficients
-from acoustic_orchestrator.experiment.geometry import edge_lengths, polygon_area
+from acoustic_orchestrator.experiment.acoustic_geometry import get_acoustic_geometry
 
 
 SABINE_CONSTANT_M_S = 0.161
@@ -53,24 +53,17 @@ RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ = (
 )
 RAVEN_OCTAVE_CENTER_THIRD_INDEXES = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29)
 RT30_GUARD_FREQUENCIES_HZ = RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ
+RT30_MEAN_FREQUENCIES_HZ = (125, 250, 500, 1000, 2000, 4000, 8000)
 
 
 def estimate_room_rt30_s(room: dict) -> dict:
-    geometry = room["geometry"]
-    footprint = [tuple(vertex) for vertex in geometry["footprint_vertices_m"]]
-    height_m = geometry["height_m"]
-    floor_area_m2 = polygon_area(footprint)
-    volume_m3 = floor_area_m2 * height_m
+    acoustic_geometry = get_acoustic_geometry(room)
+    floor_area_m2 = float(acoustic_geometry["floor_area_m2"])
+    volume_m3 = float(acoustic_geometry["volume_m3"])
     surface_areas_m2 = {
-        wall_id: length_m * height_m
-        for wall_id, length_m in zip(
-            geometry["wall_ids"],
-            edge_lengths(footprint),
-            strict=True,
-        )
+        surface_id: float(surface["area_m2"])
+        for surface_id, surface in acoustic_geometry["surfaces"].items()
     }
-    surface_areas_m2["floor"] = floor_area_m2
-    surface_areas_m2["ceiling"] = floor_area_m2
 
     expected_surfaces = set(surface_areas_m2)
     actual_surfaces = set(room["material_files"])
@@ -79,10 +72,21 @@ def estimate_room_rt30_s(room: dict) -> dict:
         extra = sorted(actual_surfaces - expected_surfaces)
         raise ValueError(f"Superficies acústicas inconsistentes; faltantes={missing}; extra={extra}")
 
-    absorption_by_surface = {
-        surface_id: load_material_absorption_coefficients(Path(material["material_path"]))
-        for surface_id, material in room["material_files"].items()
-    }
+    acoustic_surfaces = room.get("acoustic_surfaces")
+    if acoustic_surfaces is None:
+        absorption_by_surface = {
+            surface_id: load_material_absorption_coefficients(Path(material["material_path"]))
+            for surface_id, material in room["material_files"].items()
+        }
+    else:
+        if set(acoustic_surfaces) != expected_surfaces:
+            raise ValueError("acoustic_surfaces no coincide con las superficies geométricas")
+        absorption_by_surface = {
+            surface_id: tuple(surface["effective_absorption"])
+            for surface_id, surface in acoustic_surfaces.items()
+        }
+        if any(len(values) != 31 for values in absorption_by_surface.values()):
+            raise ValueError("Cada absorción efectiva debe contener 31 coeficientes")
     rt30_by_band_s: dict[int | float, float] = {}
     for frequency_hz, band_index in zip(
         RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ,
@@ -107,12 +111,13 @@ def estimate_room_rt30_s(room: dict) -> dict:
     if len(rt30_by_band_s) != len(RAVEN_OCTAVE_CENTER_FREQUENCIES_HZ):
         raise ValueError("La estimación RT30 de Sabine no contiene las 10 bandas de octava RAVEN")
 
-    estimated_rt30_s = sum(rt30_by_band_s.values()) / len(rt30_by_band_s)
+    estimated_rt30_s = sum(rt30_by_band_s[frequency] for frequency in RT30_MEAN_FREQUENCIES_HZ) / len(RT30_MEAN_FREQUENCIES_HZ)
     if not math.isfinite(estimated_rt30_s):
         raise ValueError("La estimaciÃ³n RT30 de Sabine no es finita")
 
     return {
         "estimated_rt30_s": estimated_rt30_s,
+        "estimated_mean_rt30_s": estimated_rt30_s,
         "rt30_by_band_s": rt30_by_band_s,
         "floor_area_m2": floor_area_m2,
         "volume_m3": volume_m3,
