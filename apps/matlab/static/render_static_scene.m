@@ -123,7 +123,7 @@ function [mix, summary] = mix_rendered_sources(ctx, BRIR, fs, room_reverberation
         source_ita = resample_ita_audio_if_needed(source_ita, fs, s);
 
         original_duration_s = double(source_info.TotalSamples) / double(source_info.SampleRate);
-        %% source_ita.timeData = normalize_audio_peak(source_ita.timeData, 0.99);
+        source_ita.timeData = normalize_audio_peak(source_ita.timeData, 0.99);
 
         gain_db = 0.0;
         if isfield(src, 'gain_db') && ~isempty(src.gain_db)
