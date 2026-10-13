@@ -1,5 +1,12 @@
 # Output Analyzer
 
+> Revision scope: this guide describes the implemented analyzer in
+> `update-fix-output-analyzer` at `1a3b1c1`. The requested audit baseline is
+> `develop` at `05f9b27`, whose analyzer does not yet contain the same schema
+> checks, unique populations, per-frequency RT30 analysis or embedded SVG report.
+> See the [documentation audit](../../docs/maintenance/documentation-audit.md)
+> for the revision comparison. These differences do not reopen historical PRDs.
+
 `output-analyzer` generates an auditable metadata-only report for a run directory. It supports **exactly schema 3.0** for scene manifests and render sidecars. Explicit older/future versions are excluded, and missing versions are incidents. Degraded metadata supports its producer schema 1.0. Index rows have no scene schema requirement; their fields follow their own current producers.
 
 ## Usage
@@ -78,3 +85,15 @@ The verbose `render_configuration` block is omitted entirely from HTML presentat
 CLI quality diagnostics summarize categories, affected scenes/pairs and a bounded identity sample. Consult `incidents.jsonl` and `rt30_comparisons.jsonl` for complete causal details; derived exclusions are not independent failures.
 
 Each room card in Positions by geometry includes a frequency table for Sabine RT30 and consolidated RAVEN T30 (seconds). Comparable arithmetic means reuse the same valid selected frequency pairs, with the frequency list and valid/excluded counts. Additional bands remain visible but never enter those means. Missing or conflicted values show unavailable with a reason, preserving the other method. Expand the room RT30 audit details for original values, variant support, spread, causes and provenance. The table moves with its room card using every carousel control.
+
+## Documentation and pipeline context
+
+This is an optional analysis application after artifact generation. It can read
+existing run metadata without invoking the renderer or hearing-loss backend.
+
+- [Documentation index](../../docs/README.md)
+- [Shared artifact contracts](../../docs/architecture/contracts.md)
+- [Development and testing](../../docs/development/testing.md)
+- [Orchestrator](../orchestrator/README.md)
+- [MATLAB renderer](../matlab/README.md)
+- [Clarity backend](../clarity-backend/README.md)

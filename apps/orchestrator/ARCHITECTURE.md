@@ -1,381 +1,79 @@
-# ARCHITECTURE.md
+# Arquitectura del orquestador
 
-## Overview
+El orquestador transforma un espacio de experimentación YAML en escenas estáticas concretas, coordina MATLAB/RAVEN y prepara o ejecuta la degradación opcional con Clarity. El análisis posterior pertenece a `apps/output-analyzer`, que consume metadatos de un run y no es una etapa obligatoria de generación.
 
-This project is a multi-stage dataset generation workspace for acoustic virtual reality and hearing-loss simulation.
+La arquitectura transversal se describe en [visión general](../../docs/architecture/overview.md), [flujo de datos](../../docs/architecture/data-flow.md) y [contratos](../../docs/architecture/contracts.md). La [guía local](README.md) contiene comandos y ejemplos; las guías comunes cubren [instalación](../../docs/development/setup.md) y [pruebas](../../docs/development/testing.md).
 
-The pipeline has three logical stages:
-1. orchestration and scene generation in Python
-2. static/dynamic acoustic rendering in MATLAB/RAVEN
-3. hearing-loss degradation in Python with Clarity
+## Interfaces y límites
 
-The current implementation priority is the **static rendering pipeline**.
+- La CLI `acoustic-orchestrator` expone `generate-manifests`, `render-static` y `clarity-handoff` con `--submit` opcional.
+- El YAML describe el espacio de muestreo. Los modelos Pydantic y el validador semántico determinan la entrada aceptada; los ejemplos ilustran su uso.
+- MATLAB se invoca mediante subprocess y manifiestos JSON; Clarity mediante trabajos JSONL y subprocess. No hay dependencia Python directa del orquestador sobre Clarity ni integración MATLAB Engine.
+- El flujo soportado es estático. Aunque el modelo enumera `dynamic`, la validación lo rechaza y el renderer dinámico MATLAB sigue siendo un placeholder.
+- Python planifica el ruido de fondo; MATLAB sintetiza o carga el ruido y lo mezcla después del render.
 
----
+## Módulos actuales
 
-## Local reference examples
+| Área | Módulo | Responsabilidad |
+|---|---|---|
+| Entrada | `cli.py` | Comandos, resúmenes y códigos de salida |
+| Configuración | `config/models.py` | Modelos que reflejan las secciones YAML |
+| Configuración | `config/loader.py` | Carga YAML, compatibilidad legacy y rutas relativas al archivo de configuración |
+| Configuración | `config/validator.py` | Restricciones semánticas, assets, geometría, políticas y perfiles auditivos |
+| Experimento | `experiment/sampler.py` | Muestreo reproducible de salas, receptores, fuentes y ruido |
+| Experimento | `experiment/geometry.py`, `acoustic_geometry.py` | Geometría poligonal, áreas y restricciones espaciales |
+| Experimento | `experiment/room_acoustics.py` | Coeficientes de materiales y estimación acústica |
+| Experimento | `experiment/reverberation_sampling.py` | Bins, cuotas globales y diagnóstico RT30 |
+| Experimento | `experiment/treatment_catalog.py` | Catálogo sintético de tratamientos v1 |
+| Experimento | `experiment/scene_builder.py` | Construcción del manifiesto estático schema 3.0 |
+| Experimento | `experiment/manifest_writer.py` | Escritura JSON y control de sobrescritura |
+| Desarrollo | `experiment/geometry_visualization.py` | Inspección opcional de huellas; requiere matplotlib y no se importa en producción |
+| Pipeline | `pipeline/render_pipeline.py` | Coordinación, validación T30 RAVEN, reintentos, fan-out e índices |
+| Pipeline | `pipeline/matlab_runner.py` | Runtime por variante e invocación de `apps/matlab/run_raven_static_render.m` |
+| Pipeline | `pipeline/runtime_audio.py` | Preparación y recorte de audio requerido por runtime |
+| Pipeline | `pipeline/output_paths.py` | Layout, nombres y rutas de variantes y trabajos Clarity |
+| Pipeline | `pipeline/output_index.py` | Inspección de artefactos, estados, reanudación e índices JSONL |
+| Pipeline | `pipeline/clarity_handoff.py` | Elegibilidad variante/perfil y trabajos Clarity schema 1.0 |
+| Pipeline | `pipeline/clarity_runner.py` | Invocación del backend hermano `apps/clarity-backend` |
 
-The repository should include a local `examples/` directory so the agent can inspect the expected contracts without leaving the workspace.
+## De configuración a variantes
 
-These files are the primary concrete references:
-- `examples/example_config.yml`
-- `examples/example_scene_static.json`
+`generate-manifests` carga y valida la configuración, muestrea escenas y escribe un JSON de escena por índice aceptado. Las escenas fallidas se registran en `scene_sampling_failures.jsonl`; el resumen distingue lote completo, parcial y fallido. La geometría puede ser shoebox, trapezoidal o en L.
 
-Interpret them as:
-- `example_config.yml`: the current experiment-config contract consumed by the orchestrator
-- `example_scene_static.json`: the current static-scene manifest contract consumed by MATLAB
+`render-static` genera los manifiestos y expande `receiver.hrtfs` en variantes. Cada variante tiene identidad `{scene_id}__{output_type}`, un manifiesto runtime y rutas WAV/JSON resueltas. Varias IR de un mismo tipo reciben identificadores distintos. Las salidas habilitadas incluyen `binaural_hrtf`, `bte_rear_hartf` y `bte_front_hartf`.
 
-The code should stay aligned with these examples unless there is an explicit, deliberate contract change.
-If a contract changes, update the example files too.
+Los manifiestos de escena y runtime conservan posiciones públicas `[x, y, z]`, con `y` vertical y huella `[x, z]`. El runtime sustituye las rutas de salida, el nombre de proyecto, la lista IR por una variante y las rutas de audio preparadas cuando corresponde. **La reflexión Z de schemas 2.0/3.0 ocurre dentro del adaptador MATLAB**, no al serializar el runtime Python. Las posiciones y vectores de fuentes exportados en el resumen de render provienen de ese sistema adaptado RAVEN.
 
----
+El pipeline valida las diez bandas T30 del render canónico antes de completar las variantes restantes. Si el resultado no cumple las condiciones finitas/positivas, reintenta dentro del presupuesto compartido de escena y registra el diagnóstico. La estimación Sabine usada para clasificar bins es una métrica distinta, agregada sobre siete bandas de 125 a 8000 Hz.
 
-## Workspace structure
+## Layout y estado
 
-Current workspace structure:
-
-```text
-workspace/
-├── apps/
-│   ├── orchestrator/
-│   ├── matlab/
-│   └── clarity-processor-py/
-├── configs/
-├── examples/
-├── assets/
-├── data/
-└── logs/
-```
-
-### `apps/orchestrator`
-Main application responsible for:
-- reading experiment config
-- validating config
-- sampling concrete scenes
-- writing MATLAB manifests
-- invoking MATLAB renderer
-- later invoking Clarity jobs
-- tracking pipeline progress
-
-### `apps/matlab`
-MATLAB application responsible for:
-- loading one scene manifest
-- building room / receiver / sources in RAVEN
-- rendering one or more receiver IR outputs
-- exporting WAV(s) and render metadata
-
-### `apps/clarity-processor-py`
-Future Python application responsible for:
-- reading degradation jobs
-- applying hearing-loss processing
-- exporting degraded WAV(s) and metadata
-
----
-
-## Main contracts
-
-### 1. Experiment config
-The orchestrator consumes a YAML config describing:
-- experiment metadata
-- execution settings
-- render settings
-- receiver output settings
-- room sampling space
-- source sampling space
-- optional background-noise planning (`background_noise`)
-- output paths
-- later hearing degradation settings
-
-This config defines the sampling space, not one concrete scene.
-The current expected shape should be inspectable in `examples/example_config.yml`.
-
-### 2. MATLAB scene manifest
-For each sampled scene, the orchestrator writes one concrete manifest JSON for MATLAB.
-That manifest should contain fully instantiated scene data:
-- base RPF file
-- scene type
-- room dimensions/materials
-- receiver pose
-- receiver IR targets
-- concrete source list
-- explicit `background_noise` metadata
-- render options
-- output paths or naming patterns
-
-This manifest is the rendering contract.
-The current expected shape should be inspectable in `examples/example_scene_static.json`.
-Treat `examples/example_config.yml` and `examples/example_scene_static.json` as the only normative example pair for the static pipeline.
-
-Receiver and source positions use canonical `[x, y, z]` coordinates, where `y` is height and `z` is horizontal depth. Runtime manifests consumed by RAVEN serialize those positions as `[x, y, -z]` because RAVEN uses the upper-left corner as origin.
-
-For the current static pipeline, room materials are represented in two parallel manifest fields:
-- `room.materials`: surface-keyed semantic material IDs
-- `room.material_files`: surface-keyed objects with only `material_id` and absolute `material_path`
-
-`room.material_files` is additive beside `room.materials`; entries do not include `surface_id`.
-
-Every static manifest includes `background_noise`. Disabled configs serialize the explicit contract
-`{"enabled": false, "layers": []}`. Enabled configs serialize scene-level layers chosen by the
-orchestrator (`colored` white/pink/brown or concrete `audio_folder` paths), but synthesis and mixing
-remain backend responsibilities outside the orchestrator.
-
-### 3. Render outputs
-MATLAB writes:
-- one or more WAV outputs per scene
-- one render metadata JSON per output variant in the current static pipeline
-
-A single scene may generate multiple acoustic outputs when multiple receiver IR targets are requested.
-The canonical teaching example is still single-output `binaural_hrtf`; multi-output remains a supported runtime capability, not the primary example.
-Example categories:
-- binaural HRTF
-- BTE rear HARTF
-- BTE front HARTF
-
-### 4. Hearing-degradation outputs
-When the optional Clarity stage is enabled, the public degraded-output contract is:
-- root: `{artifact_root}/{run_name}/output_audio/degraded/`
-- nested directories: `{output_type}/{hearing_profile_id}/`
-- degraded WAV filename: exactly `Path(input_wav_path).name`
-- degraded metadata: sidecar in the same directory, named `{Path(input_wav_path).stem}.json`
-
-The orchestrator keeps `clarity_jobs.jsonl` and `clarity_index.jsonl` as the internal handoff/index artifacts, but the backend must treat the explicit expected output paths in each manifest row as authoritative instead of assuming fixed filenames.
-
----
-
-## Orchestrator internal structure
-
-The orchestrator should remain compact.
-Recommended structure:
+El run se ubica bajo `{outputs.artifact_root}/{outputs.run_name}`; si falta `run_name`, se usa el identificador del experimento. `resolve_artifact_layout` define:
 
 ```text
-src/acoustic_orchestrator/
-├── cli.py
-├── config/
-│   ├── models.py
-│   ├── loader.py
-│   └── validator.py
-├── experiment/
-│   ├── sampler.py
-│   ├── scene_builder.py
-│   └── manifest_writer.py
-└── pipeline/
-    ├── render_pipeline.py
-    └── matlab_runner.py
+metadata/manifests/scene/
+metadata/manifests/runtime/render/
+metadata/manifests/runtime/clarity/clarity_jobs.jsonl
+metadata/indexes/render_index.jsonl
+metadata/indexes/scene_sampling_failures.jsonl
+metadata/indexes/clarity_index.jsonl
+output_audio/render/{receiver_output.output_subdir}/
+output_audio/degraded/{output_type}/{hearing_profile_id}/
+cropped_audio/    # solo cuando se prepara audio recortado
 ```
 
-This is enough for the current scope.
-Do not introduce more layers unless there is a concrete need.
+Los nombres WAV y JSON se obtienen de `outputs.naming.wav_pattern` y `metadata_pattern`; solamente `{scene_id}` y `{output_type}` son placeholders admitidos. Las claves antiguas de directorios independientes no son aceptadas por el loader. Los directorios se crean cuando una etapa escribe archivos.
 
----
+Los índices JSONL registran planificación, resultados, validación e intentos de reanudación; la existencia de un WAV aislado no basta para dar una variante por completada. Las opciones `overwrite_existing` y `resume_if_possible` gobiernan estos comportamientos. `execution.num_workers` controla el paralelismo MATLAB; requiere licencias y un entorno local que tolere procesos concurrentes.
 
-## Responsibilities by module
+## Handoff Clarity opcional
 
-### `config/models.py`
-Contains the Pydantic models that map closely to the experiment YAML.
+`hearing_degradation.enabled` habilita la preparación tras render. `runner.auto_submit` controla el envío automático; `clarity-handoff --submit` solicita envío explícito. Sin `--submit`, la CLI de handoff prepara únicamente los trabajos.
 
-Should include the minimum necessary structure for:
-- experiment
-- execution
-- raven
-- render
-- receiver sampling
-- receiver outputs
-- room sampling
-- source sampling
-- scene validation
-- outputs
-- hearing degradation
+El handoff combina variantes elegibles con perfiles del catálogo: exige un render completado y validado, tipo incluido en `input_targets`, WAV y metadatos de entrada presentes. El trabajo incluye identificadores, catálogo, `backend_invocation` y paths de entrada/salida. Los trabajos no elegibles quedan omitidos o bloqueados con su diagnóstico.
 
-Do not split these into many files too early.
-One models file is acceptable at the beginning.
-Match the examples and config vocabulary closely.
+La salida degradada por defecto es `output_audio/degraded/{output_type}/{hearing_profile_id}/`. Conserva el basename del WAV renderizado y escribe un sidecar `{render_wav_stem}.json`. Los campos `expected_output_wav_path` y `expected_output_metadata_path` de cada trabajo son autoritativos para el backend y la reanudación. Un `hearing_degradation.output_dir` explícito puede cambiar la raíz.
 
-### `config/loader.py`
-Responsible for:
-- reading YAML
-- constructing the root config model
-- resolving relative paths
+## Límites del entorno
 
-Should not contain business logic for scene sampling.
-It should load the shape represented in `examples/example_config.yml`.
-
-### `config/validator.py`
-Responsible for semantic checks such as:
-- ranges are valid
-- required outputs are enabled
-- source counts are consistent
-- probability constraints are valid
-- weighted policies sum correctly
-- referenced paths exist when appropriate
-
-### `experiment/sampler.py`
-Responsible for turning sampling-space config into concrete scene parameters.
-Examples:
-- sample room dimensions
-- sample room materials
-- sample receiver pose
-- choose source types and counts
-- place sources according to spatial policy
-
-### `experiment/scene_builder.py`
-Responsible for building the in-memory concrete scene representation used before manifest export.
-Keep this representation close to the MATLAB manifest structure.
-Do not create many parallel scene representations.
-
-### `experiment/manifest_writer.py`
-Responsible for converting one concrete scene into one MATLAB manifest JSON.
-This file writer is an explicit stage in the pipeline.
-It should write the contract represented by `examples/example_scene_static.json`.
-
-### `pipeline/matlab_runner.py`
-Responsible for the current MATLAB-specific execution details.
-
-Today it knows:
-- where the sibling MATLAB app lives
-- the static MATLAB entrypoint
-- how to invoke MATLAB via `subprocess`
-- how to write one runtime manifest per requested receiver IR target
-
-It should not know scene sampling details.
-
-In the current repo layout, that sibling app is `apps/matlab` resolved from `apps/orchestrator` as `../matlab`.
-
-This module is runner-specific, which is acceptable for the current scope.
-If another runner is added later, prefer another explicit runner module with the same kind of narrow responsibility instead of introducing a plugin framework.
-
-### `pipeline/render_pipeline.py`
-Responsible for the happy-path orchestration:
-- load config
-- validate config
-- sample scenes
-- write manifests
-- expand scene manifests into concrete render jobs when needed
-- call the selected runner implementation
-- collect outputs
-
-Keep this flow easy to read.
-
-In the current implementation, `render_pipeline.py` prepares the static scene manifests first and then delegates execution to `matlab_runner.py`.
-For MATLAB, one scene manifest may fan out into multiple runtime manifests, one per requested HRTF/HARTF target.
-That fan-out is part of execution, not a separate framework layer.
-
----
-
-## Scene generation model
-
-The experiment config defines a **sampling space**.
-The orchestrator generates **concrete scenes**.
-
-A concrete static scene should contain:
-- scene identifiers
-- room geometry and materials
-- receiver position/orientation
-- receiver IR targets
-- concrete list of sources with audio paths, positions, gains, offsets
-- render settings
-- output paths or path patterns
-
-This scene is then serialized as the MATLAB manifest.
-Use the example static manifest as the local contract reference.
-
----
-
-## Receiver outputs model
-
-Receiver outputs are modeled as multiple IR targets for the same receiver pose.
-This is important.
-
-Do not model HRTF and HARTF as completely separate pipeline concepts.
-At the orchestrator level they are all receiver IR outputs.
-
-One scene may request outputs such as:
-- `binaural_hrtf`
-- `bte_rear_hartf`
-- `bte_front_hartf`
-
-The MATLAB renderer may implement these as repeated rendering passes with different receiver IR files.
-That internal detail should not leak heavily into the orchestrator.
-
----
-
-## Output model
-
-A single scene may produce:
-- multiple WAV files
-- multiple render metadata JSON files (one per output variant in the current static pipeline)
-
-Therefore the orchestrator must not assume one scene equals one WAV.
-
-`receiver_outputs.*.output_subdir` is the effective per-output subdirectory under both `outputs.rendered_wav_dir`
-and `outputs.render_metadata_dir`.
-
-The public filenames come from `outputs.naming.wav_pattern` and `outputs.naming.metadata_pattern`.
-Only `{scene_id}` and `{output_type}` are supported placeholders.
-
-The internal runtime identity remains stable as `{scene_id}__{output_type}` for:
-- runtime manifest filenames
-- resume checks
-- output indexing
-
-The base static scene manifest exposes resolved render paths for the first enabled output listed in the scene.
-Each runtime manifest rewrites those same fields for its own output variant.
-
----
-
-## Persistence and state
-
-Short term:
-- keep state simple
-- file-based outputs and metadata are acceptable
-- lightweight tracking is enough
-
-Medium term:
-- add SQLite for indexing and resume logic
-
-Do not introduce DB-heavy architecture before the static pipeline works cleanly end-to-end.
-
----
-
-## Extension points that are justified
-
-These are justified future extension points:
-- static vs dynamic rendering
-- multiple receiver output types
-- additional runner modules when there is a concrete second backend
-- optional hearing degradation stage
-- persistent pipeline state
-
-These are **not** currently justified:
-- renderer plugin framework
-- generic sampler framework
-- strategy/factory explosion for every policy
-- many parallel model layers for the same scene data
-
----
-
-## Development order
-
-The intended implementation order is:
-1. stable experiment config parsing and validation
-2. static scene sampling
-3. MATLAB manifest generation
-4. MATLAB render invocation
-5. output collection and metadata indexing
-6. later Clarity integration
-7. later dynamic scenes
-
-Do not reorder this unless there is a strong reason.
-
----
-
-## Architectural constraints
-
-1. Keep the orchestrator simple.
-2. Make data flow explicit.
-3. Keep module count low.
-4. Avoid speculative abstractions.
-5. Prefer direct, testable code.
-6. Scale by adding well-justified modules, not by adding patterns.
-7. Keep the local example files updated when contracts change.
-
-The project should feel like a clear pipeline, not a framework.
+El backend MATLAB requiere 44100 Hz, ITA Toolbox, RAVEN y assets locales. Su preparación de proyecto tiene una ruta Windows fija; una instalación en otro entorno requiere comprobarla. Se aplica semilla MATLAB, pero no se ha comprobado un mecanismo equivalente para todas las operaciones RAVEN. Las pruebas unitarias con mocks no sustituyen una verificación acústica completa.

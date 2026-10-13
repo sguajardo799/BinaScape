@@ -7,6 +7,12 @@ hearing-loss degradation jobs.
 
 The primary supported workflow is root-first execution from the monorepo root.
 
+See the [documentation index](../../docs/README.md), [local architecture](ARCHITECTURE.md),
+[shared contracts](../../docs/architecture/contracts.md), [setup](../../docs/development/setup.md),
+and [testing guide](../../docs/development/testing.md). The sibling
+[output analyzer](../output-analyzer/README.md) can inspect run metadata after
+execution; it is an optional analysis application.
+
 ## Requirements
 
 - Python `>=3.12,<3.13`
@@ -86,9 +92,9 @@ The helper is intentionally not imported by the production pipeline.
 
 Root-level examples:
 
-- `configs/experiments/static_example.yml`: canonical root-first static
+- `configs/experiments/static_example.yml`: root-first static
   pipeline example.
-- `configs/experiments/sim_config.yml`: additional experiment configuration.
+- `configs/experiments/speech_fixed_position_e2e.yml`: fixed-position experiment example.
 - `configs/hearing/hearing_profiles.yaml`: hearing profile catalog for Clarity
   degradation.
 
@@ -122,6 +128,12 @@ Run artifacts are grouped under `metadata/manifests/`, `metadata/indexes/`,
 and `output_audio/`. The optional `cropped_audio/` directory is created only when
 source audio must be trimmed. Output directories are created when a stage writes
 files, so a manifest-only run does not create empty render or Clarity directories.
+
+Generated scene manifests use schema **3.0**. MATLAB accepts schemas 1.0, 2.0,
+and 3.0; the examples illustrate contracts implemented by production validators.
+The loader rejects legacy independent output-root keys and
+`room_sampling.max_rt30_s`; use `outputs.artifact_root`, `outputs.run_name`,
+and `room_sampling.reverberation`.
 
 Current material contract in generated manifests:
 
@@ -185,7 +197,10 @@ than the requested tolerance.
 Coordinate note for RAVEN: public manifests use `[x, y, z]` with the footprint
 in `[x, z]`. For schemas 2.0 and 3.0, the MATLAB adapter applies the same explicit
 `[x, y, z] -> [x, y, -z]` reflection to positions and orientation vectors.
-Legacy schema 1.0 keeps its existing shoebox contract.
+Legacy schema 1.0 keeps its existing shoebox contract. Scene and runtime JSON
+preserve public coordinates: the reflection takes place inside MATLAB. Render
+metadata source positions and orientation vectors therefore use the adapted
+RAVEN coordinates for schemas 2.0/3.0.
 
 ## Background Noise Planning
 
@@ -235,7 +250,11 @@ MATLAB subprocesses after runtime inputs are prepared. Do not configure more
 workers than available MATLAB/RAVEN licenses, and return to `1` if the local
 RAVEN setup shows hidden global state.
 
-The canonical single-output example enables `binaural_hrtf`. The runtime also
+The canonical single-output example enables `binaural_hrtf`. MATLAB requires
+`render.sample_rate_hz: 44100`. Before completing the remaining variants,
+the pipeline checks that the canonical RAVEN T30 has exactly ten finite,
+positive bands and can retry within the scene budget. This measured T30 is
+distinct from the seven-band Sabine estimate used by sampling. The runtime also
 supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
 ## Clarity Handoff
@@ -265,7 +284,7 @@ Expected artifacts:
 
 Current degradation output contract:
 
-- The default root is `{artifact_root}/{run_name}/output_audio/degraded/`.
+- The default root is `{artifact_root}/{run_name}/output_audio/degraded/`; an explicit `hearing_degradation.output_dir` overrides it.
 - Subdirectories are `{output_type}/{hearing_profile_id}/`.
 - `expected_output_wav_path` and `expected_output_metadata_path` in each JSONL
   job are authoritative for the backend.
@@ -345,7 +364,7 @@ Angles follow MATLAB/RAVEN: at receiver yaw/pitch zero, azimuth/elevation zero
 points along `+X`; positive azimuth rotates toward RAVEN `+Z`; positive
 elevation rotates toward `+Y`. Azimuth is added to receiver yaw, elevation is
 added to receiver pitch, and receiver roll is ignored. Python preserves the
-public coordinates in the manifest; the MATLAB schema 2.0 adapter reflects Z
+public coordinates in the manifest; the MATLAB schema 2.0/3.0 adapter reflects Z
 consistently for room geometry, poses, and orientation vectors.
 
 List values must be finite and unique. Azimuth is limited to `[-180, 180]`,
@@ -366,14 +385,14 @@ Monophonic scenes are supported with `source_sampling.min_sources: 1`.
 Run tests:
 
 ```sh
-uv run --project apps/orchestrator pytest
+uv run --project apps/orchestrator pytest apps/orchestrator/tests
 ```
 
 Run static checks when the tools are installed:
 
 ```sh
-uv run --project apps/orchestrator ruff check .
-uv run --project apps/orchestrator mypy src
+uv run --project apps/orchestrator ruff check apps/orchestrator
+uv run --project apps/orchestrator mypy apps/orchestrator/src
 ```
 
 The canonical `configs/experiments/static_example.yml` smoke config uses
@@ -383,6 +402,11 @@ Other examples may choose overwrite behavior independently.
 
 ## Practical Notes
 
+- `generate-manifests` and `render-static` return exit code 2 for partial
+  sampling and 1 for failed sampling; render errors also return 1. Failed scene
+  indices and diagnostics remain in `metadata/indexes/scene_sampling_failures.jsonl`.
+- A Clarity job requires a completed, validated render variant targeted by
+  `input_targets`, with both input WAV and render metadata present.
 - `render-static` assumes the monorepo layout where `apps/orchestrator`,
   `apps/matlab`, and `apps/clarity-backend` are sibling directories.
 - If `apps/matlab` is missing, `render-static` fails before invoking MATLAB.
