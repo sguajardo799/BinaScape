@@ -16,14 +16,31 @@ def sample_run(tmp_path):
     degraded_dir.mkdir(parents=True)
 
     scene = {
+        "schema_version": "3.0",
         "scene_id": "scene_static_0001",
         "job_id": "render_job_static_0001",
         "scene_type": "static",
-        "room": {"dimensions_m": [8.0, 6.0, 3.0]},
+        "room": {
+            "geometry": {
+                "type": "shoebox",
+                "height_m": 3.0,
+                "footprint_vertices_m": [[0, 0], [8, 0], [8, 6], [0, 6]],
+                "wall_ids": ["w1", "w2", "w3", "w4"],
+            }
+        },
+        "reverberation_sampling": {
+            "mean_bands_hz": [125, 250],
+            "rt30_by_band_s": {"125": 0.5, "250": 0.5},
+        },
         "receiver": {
             "position_m": [4.0, 1.5, 3.0],
             "orientation_deg": {"yaw": 30.0, "pitch": 0.0, "roll": 0.0},
-            "hrtfs": [{"hrtf_id": "binaural_hrtf", "hrtf_path": "D:/assets/hrtf/id25_HRTF.v17.ir.daff"}],
+            "hrtfs": [
+                {
+                    "hrtf_id": "binaural_hrtf",
+                    "hrtf_path": "D:/assets/hrtf/id25_HRTF.v17.ir.daff",
+                }
+            ],
         },
         "sources": [
             {
@@ -31,8 +48,8 @@ def sample_run(tmp_path):
                 "event_type": "speech",
                 "audio_path": "D:/assets/events/speech/example.wav",
                 "position_m": [2.0, 1.5, 2.0],
-                "gain_db": -1.0,
-                "start_time_s": 0.1,
+                "gain_db": 0.0,
+                "start_time_s": 0.0,
                 "directivity_path": "D:/assets/directivity/singer.daff",
             },
             {
@@ -46,6 +63,7 @@ def sample_run(tmp_path):
         ],
     }
     render = {
+        "schema_version": "3.0",
         "scene_id": "scene_static_0001",
         "job_id": "render_job_static_0001",
         "scene_type": "static",
@@ -55,12 +73,15 @@ def sample_run(tmp_path):
         "output_wav_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
         "summary": {
             "n_sources": 2,
-            "room": {"reverberation": {"mean_t30_s": 0.42}},
+            "room": {
+                "reverberation": {"band_frequencies_hz": [250, 125], "t30_s": [1, 0.75]}
+            },
             "background_noise": {"applied": True},
             "sources": scene["sources"],
         },
     }
     degraded = {
+        "schema_version": "1.0",
         "scene_id": "scene_static_0001",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss",
@@ -70,14 +91,26 @@ def sample_run(tmp_path):
         "input_render_metadata_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json",
         "input_wav_path": "D:/outputs/sim_test/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
         "output_wav_path": "D:/outputs/sim_test/output_audio/degraded/binaural_hrtf/mild_loss/scene_static_0001__binaural_hrtf.wav",
-        "processor": {"name": "msbg", "package": "pyclarity", "package_version": "0.8.0", "sample_rate_hz": 44100, "channels": 2},
+        "processor": {
+            "name": "msbg",
+            "package": "pyclarity",
+            "package_version": "0.8.0",
+            "sample_rate_hz": 44100,
+            "channels": 2,
+        },
         "degradation_applied": {
             "left": {"loss_db_by_band": {"250": 10.0, "500": 15.0, "1000": 20.0}},
             "right": {"loss_db_by_band": {"250": 15.0, "500": 20.0, "1000": 25.0}},
         },
     }
 
-    (scene_dir / "scene_static_0001.json").write_text(json.dumps(scene), encoding="utf-8")
-    (render_dir / "scene_static_0001__binaural_hrtf__render.json").write_text(json.dumps(render), encoding="utf-8")
-    (degraded_dir / "scene_static_0001__binaural_hrtf.json").write_text(json.dumps(degraded), encoding="utf-8")
+    (scene_dir / "scene_static_0001.json").write_text(
+        json.dumps(scene), encoding="utf-8"
+    )
+    (render_dir / "scene_static_0001__binaural_hrtf__render.json").write_text(
+        json.dumps(render), encoding="utf-8"
+    )
+    (degraded_dir / "scene_static_0001__binaural_hrtf.json").write_text(
+        json.dumps(degraded), encoding="utf-8"
+    )
     return run
