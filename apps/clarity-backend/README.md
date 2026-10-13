@@ -76,7 +76,11 @@ The command:
 5. Processes the WAV with MSBG.
 6. Writes the degraded WAV and metadata sidecar to the expected paths.
 7. Continues after failed jobs.
-8. Exits with code `1` if at least one job failed.
+8. Exits with code `1` if at least one captured processing failure occurred.
+
+Recovery applies to errors caught while processing a structurally complete job.
+Malformed JSONL, missing required fields, output-directory creation errors, or
+metadata-write failures can abort the manifest instead of producing a per-job result.
 
 ## Manifest Contract
 
@@ -109,8 +113,13 @@ by the orchestrator tests, including:
 
 Contract notes:
 
-- Current `schema_version`: `1.0`.
-- `backend_invocation` is preserved as part of the handoff contract.
+- Current producer handoff and backend result metadata use `schema_version: "1.0"`.
+  The backend does not validate the incoming job schema version.
+- `backend_invocation` belongs to the orchestrator handoff contract. The backend
+  does not consume it or copy it into result metadata; `run_id` is also not copied.
+- Relative paths in jobs resolve against the process working directory, not the
+  manifest directory. The render sidecar is checked for existence; its content
+  is not parsed by this backend.
 - `expected_output_wav_path` and `expected_output_metadata_path` are
   authoritative. The backend must not infer fixed output names.
 - The backend assumes the orchestrator already selected valid jobs and explicit
@@ -130,9 +139,19 @@ profiles:
       left:
         loss_db_by_band:
           250: 10
+          500: 12
+          1000: 15
+          2000: 18
+          4000: 21
+          8000: 24
       right:
         loss_db_by_band:
           250: 12
+          500: 14
+          1000: 17
+          2000: 20
+          4000: 23
+          8000: 26
 ```
 
 Validation rules:
@@ -144,8 +163,10 @@ Validation rules:
 - Band names are normalized to strings.
 - Loss values must be finite numbers.
 
-The MSBG adapter maps the profile into left and right audiograms before
-processing.
+The MSBG adapter additionally requires exactly the six bands shown above
+(`250`, `500`, `1000`, `2000`, `4000`, `8000` Hz) in each ear. Missing or extra
+bands fail processing even if the catalog structure is valid. It maps these
+values into left and right audiograms before processing.
 
 ## Outputs
 
@@ -175,14 +196,17 @@ Failed metadata includes:
 Run tests:
 
 ```sh
-uv run --project apps/clarity-backend pytest
+uv run --project apps/orchestrator --extra dev pytest apps/clarity-backend/tests
 ```
+
+Run this command from the repository root; pytest comes from the orchestrator
+development extra in the shared workspace, not a backend-specific extra.
 
 Useful upstream references:
 
-- `apps/orchestrator/README.md`
-- `apps/orchestrator/tests/test_clarity_handoff.py`
-- `apps/orchestrator/tests/test_output_index.py`
+- [Orchestrator guide](../orchestrator/README.md)
+- [Clarity handoff tests](../orchestrator/tests/test_clarity_handoff.py)
+- [Output index tests](../orchestrator/tests/test_output_index.py)
 
 Those files describe how jobs are prepared, how output paths are reserved, and
 which handoff states the orchestrator tracks.
@@ -194,3 +218,11 @@ which handoff states the orchestrator tracks.
   service API.
 - Validation focuses on required paths and hearing profiles.
 - Current MSBG processing is limited to the formats supported by the adapter.
+
+## Documentation
+
+- [Documentation index](../../docs/README.md)
+- [Shared artifact contracts](../../docs/architecture/contracts.md)
+- [Development and testing](../../docs/development/testing.md)
+- [MATLAB renderer](../matlab/README.md)
+- [Optional metadata analysis](../output-analyzer/README.md)

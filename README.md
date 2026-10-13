@@ -1,183 +1,102 @@
-# Binaural Hearing Loss Pipeline
+# BinaScape — Binaural Hearing Loss Pipeline
 
-Monorepo for a static binaural acoustic simulation pipeline. The supported
-root-first workflow is coordinated by `apps/orchestrator`, which generates scene
-manifests, calls the MATLAB/RAVEN renderer, and can prepare or submit hearing
-loss degradation jobs to the sibling Clarity backend.
+Monorepo for static binaural acoustic dataset generation and metadata analysis.
+The orchestrator samples scenes and invokes MATLAB/RAVEN; optional Clarity MSBG
+processing produces hearing-loss variants. Output Analyzer inspects the metadata
+of an existing run independently of generation.
 
-The project is still evolving. The documented supported path is the static
-rendering workflow; dynamic rendering entrypoints exist in the MATLAB app but
-are not implemented as a supported pipeline yet.
+This documentation audits `develop@05f9b27` and the current derived checkout
+`update-fix-output-analyzer@1a3b1c1`. The analyzer has additional capabilities in
+this checkout; see the [revision comparison](docs/maintenance/documentation-audit.md#diferencias-del-analizador-entre-revisiones).
+Static rendering is supported. Dynamic MATLAB entrypoints remain placeholders.
 
-## Repository Layout
+## Applications
 
-```text
-.
-|-- configs/
-|   |-- experiments/          # Root-level experiment YAML examples
-|   `-- hearing/              # Hearing profile catalogs for Clarity jobs
-|-- apps/
-|   |-- orchestrator/         # Python CLI that validates configs and runs the pipeline
-|   |-- matlab/               # MATLAB/RAVEN static rendering backend
-|   `-- clarity-backend/      # Python backend for Clarity/MSBG degradation
-|-- pyproject.toml            # uv workspace declaration
-`-- uv.lock                   # Root workspace lockfile
-```
+| Application | Responsibility | Guide |
+|---|---|---|
+| `apps/orchestrator` | Experiment YAML, scene sampling, manifests, render coordination, optional Clarity handoff | [Orchestrator](apps/orchestrator/README.md) |
+| `apps/matlab` | Static RAVEN/ITA rendering, WAV and render sidecars | [MATLAB](apps/matlab/README.md) |
+| `apps/clarity-backend` | Explicit JSONL jobs, hearing profiles and Clarity/MSBG processing | [Clarity](apps/clarity-backend/README.md) |
+| `apps/output-analyzer` | Optional post-run metadata analysis, HTML/SVG reports and JSON/JSONL/CSV exports | [Output Analyzer](apps/output-analyzer/README.md) |
 
-## What Each App Does
+The root `pyproject.toml` and `uv.lock` declare **three Python workspace members**:
+orchestrator, clarity-backend and output-analyzer. MATLAB is outside the uv
+workspace. All Python projects require Python `>=3.12,<3.13`.
 
-- `apps/orchestrator`: Python CLI package named `acoustic-orchestrator`. It
-  loads experiment YAML, samples static scenes, writes JSON manifests, invokes
-  MATLAB by subprocess, and manages Clarity handoff manifests and indexes.
-- `apps/matlab`: MATLAB backend for static RAVEN rendering. It consumes scene
-  JSON manifests and writes rendered WAV files plus metadata.
-- `apps/clarity-backend`: Python CLI package named `clarity-backend`. It
-  consumes JSONL jobs produced by the orchestrator and applies hearing loss
-  degradation with Clarity MSBG.
+## Start from the repository root
 
-## Requirements
-
-- Python `>=3.12,<3.13`
-- `uv`
-- MATLAB for full rendering
-- ITA Toolbox and RAVEN configured in MATLAB for full rendering
-- `matlab` available on `PATH` when using `render-static`
-- Local audio, HRTF, directivity, material, and RAVEN `.rpf` assets referenced
-  by the selected experiment config
-
-The Python projects are declared as a conservative `uv` workspace:
-
-```text
-apps/orchestrator
-apps/clarity-backend
-```
-
-## Quick Start From The Repository Root
-
-Install Python dependencies for the two Python apps:
+Install the workspace and development tools:
 
 ```sh
-uv sync --project apps/orchestrator --extra dev
-uv sync --project apps/clarity-backend
+uv sync --all-packages --all-extras
 ```
 
-Check that both CLIs resolve:
+Inspect the Python CLIs:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator --help
 uv run --project apps/clarity-backend clarity-backend --help
+uv run --project apps/output-analyzer output-analyzer --help
 ```
 
-Generate static scene manifests without invoking MATLAB:
+Generate scenes without invoking MATLAB (this writes run artifacts):
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml
 ```
 
-Run the full static render when MATLAB, ITA Toolbox, RAVEN, and the referenced
-assets are available:
+Render when MATLAB, ITA Toolbox, RAVEN and all local assets are configured:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
 ```
 
-Prepare Clarity degradation jobs without submitting them:
+Prepare or submit optional hearing-loss jobs:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml
-```
-
-Submit the prepared Clarity handoff to the sibling backend:
-
-```sh
 uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit
 ```
 
-## Main Configuration Files
-
-- `configs/experiments/static_example.yml`: root-first example for the supported
-  static pipeline.
-- `configs/experiments/sim_config.yml`: additional root-level experiment config.
-- `configs/hearing/example_profile.yaml`: symmetric moderate-loss profile used
-  by `static_example.yml`; keep this file with the experiment config.
-- `configs/hearing/hearing_profiles.yaml`: hearing profile catalog used by the
-  Clarity backend when degradation is enabled.
-- `apps/orchestrator/examples/`: app-local configs and scene examples used by
-  the orchestrator tests and developer workflows.
-- `apps/matlab/example/`: MATLAB scene JSON examples for direct backend work.
-
-Experiment configs control scene sampling, receiver outputs, source assets,
-room material choices, background noise planning, output naming, and optional
-hearing degradation.
-
-Source audio pools select `.wav` files (case-insensitive) and ignore sidecars.
-An empty WAV pool aborts sampling with the directory path. When
-`source_sampling.timing.total_duration_s` is set, duration inspection and runtime
-trimming require uncompressed PCM WAV supported by Python `wave`, including
-when offsets are disabled. Invalid or unsupported headers stop manifest
-generation with the source path and decoder cause; they are not silently skipped.
-
-Room sampling requires `room_sampling.reverberation`. It creates equal-width
-RT30 bins, assigns balanced deterministic quotas, and applies versioned virtual
-absorption treatments to walls and ceiling. Classification uses the arithmetic
-mean of the estimated 125 Hz through 8 kHz octave bands while all ten RAVEN
-octave estimates are retained. Quotas are diagnostic: a valid in-range fallback
-may be used after the shared scene-attempt budget is exhausted.
-
-## Output Flow
-
-For the supported static workflow, the pipeline is:
-
-1. The orchestrator reads an experiment YAML file.
-2. It samples static scenes and writes scene manifests under the configured
-   artifact root and run name.
-3. `render-static` prepares MATLAB input manifests and invokes
-   `apps/matlab/run_raven_static_render.m`.
-4. The MATLAB backend renders WAV files and render metadata.
-5. If hearing degradation is enabled, the orchestrator writes
-   `metadata/manifests/runtime/clarity/clarity_jobs.jsonl` and an index file.
-6. When submitted, `apps/clarity-backend` writes degraded WAV files and sidecar
-   metadata to the explicit paths reserved by the orchestrator.
-
-The orchestrator treats generated output paths as part of the contract. The
-Clarity backend consumes explicit paths from the JSONL manifest rather than
-guessing filenames.
-
-## Development
-
-Run orchestrator tests:
+Analyze an existing run, substituting its actual directory:
 
 ```sh
-uv run --project apps/orchestrator pytest
+uv run --project apps/output-analyzer output-analyzer analyze outputs/sim_001
 ```
 
-Run Clarity backend tests:
+The analyzer reads metadata only; it does not open WAV contents or invoke a
+renderer. Its default output directory is `<run-dir>/analysis`.
 
-```sh
-uv run --project apps/clarity-backend pytest
-```
+## Configuration and artifacts
 
-Run MATLAB tests from `apps/matlab` in a MATLAB environment with the required
-toolboxes available:
+[Static example](configs/experiments/static_example.yml) and
+[fixed-position example](configs/experiments/speech_fixed_position_e2e.yml)
+illustrate root-first execution. [Hearing catalogs](configs/hearing/hearing_profiles.yaml)
+and [example profile](configs/hearing/example_profile.yaml) supply hearing-loss
+settings. [Orchestrator examples](apps/orchestrator/examples/) and
+[MATLAB examples](apps/matlab/example/) support local development.
 
-```matlab
-runtests('tests')
-```
+These are examples with environment-dependent asset paths. The implementation
+and validators define accepted behavior. Experiment paths resolve relative to
+the YAML location; inspect the selected example before running it.
 
-Useful developer references:
+The [artifact flow](docs/architecture/data-flow.md) describes scene manifests,
+runtime variants, WAV/sidecars, jobs and optional analysis. The
+[contracts reference](docs/architecture/contracts.md) distinguishes producer and
+consumer versions, coordinates and constraints.
 
-- `apps/orchestrator/README.md`
-- `apps/orchestrator/ARCHITECTURE.md`
-- `apps/matlab/README.md`
-- `apps/clarity-backend/README.md`
+## Development and documentation
 
-## Current Limitations
+Use the [documentation index](docs/README.md),
+[architecture overview](docs/architecture/overview.md),
+[setup guide](docs/development/setup.md) and
+[testing guide](docs/development/testing.md).
+[Historical PRD](docs/PRD/README.md) are CLOSED / IMPLEMENTED by project-owner
+decision; their original before/after narratives are historical context.
+The [audit](docs/maintenance/documentation-audit.md) records evidence, decisions,
+branch differences and verification limits.
 
-- The supported end-to-end path is static rendering. Dynamic rendering is
-  documented as not implemented.
-- Full rendering requires local MATLAB/RAVEN/ITA setup and assets that are not
-  guaranteed to exist on every checkout.
-- The Clarity backend currently exposes a small CLI focused on JSONL manifest
-  execution.
-- Reproducibility depends on the configured seeds and downstream tool behavior;
-  the MATLAB metadata records the effective seed and known limits.
+Full rendering requires a local MATLAB/RAVEN/ITA installation and referenced
+WAV, HRTF/DAFF, directivity, material and RPF assets. MATLAB currently has a local
+Windows project-path assumption. Effective MATLAB seeds do not certify RAVEN
+bitwise determinism. See the application guides for these runtime limits.

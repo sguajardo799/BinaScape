@@ -1,4 +1,6 @@
 # PRD - limpieza y orden de directorios en salida
+
+> Nota editorial (13-10-2026): **CLOSED / IMPLEMENTED** por decision del responsable. Los estados de borrador, Hoy/Despues, criterios futuros y siguientes diffs del texto original son antecedentes historicos, no backlog vigente. Consulte [el indice PRD](README.md) y [la auditoria](../maintenance/documentation-audit.md) para contratos actuales, evidencias y diferencias entre revisiones. El contenido historico se preserva.
 + Estado: Borrador
 + Creado: 22-09-2026
 + Alcance: Limpieza de directorios de salida vacias y reorganización en una carpeta de indexes y manifests

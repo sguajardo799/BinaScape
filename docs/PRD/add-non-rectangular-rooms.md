@@ -1,4 +1,6 @@
 # PRD - soporte de salas trapezoidales y tipo L
+
+> Nota editorial (13-10-2026): **CLOSED / IMPLEMENTED** por decision del responsable. Los estados de borrador, Hoy/Despues, criterios futuros y siguientes diffs del texto original son antecedentes historicos, no backlog vigente. Consulte [el indice PRD](README.md) y [la auditoria](../maintenance/documentation-audit.md) para contratos actuales, evidencias y diferencias entre revisiones. El contenido historico se preserva.
 Estado: borrador
 Creado: 22.09.2026
 Alcance: Incorporar salas estaticas parametrizadas de tipo shoebox, trapezoidal y L en el orquestador y el backend MATLAB/RAVEN. No implementar geometria dinamica ni actualizar el output analyzer en esta feature.

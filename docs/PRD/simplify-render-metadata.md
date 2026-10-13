@@ -1,4 +1,6 @@
 # PRD - simplificacion de metadatos de salida render
+
+> Nota editorial (13-10-2026): **CLOSED / IMPLEMENTED** por decision del responsable. Los estados de borrador, Hoy/Despues, criterios futuros y siguientes diffs del texto original son antecedentes historicos, no backlog vigente. Consulte [el indice PRD](README.md) y [la auditoria](../maintenance/documentation-audit.md) para contratos actuales, evidencias y diferencias entre revisiones. El contenido historico se preserva.
 Estado: borrador
 Creado: 22.09.2026
 Alcance: Simplificar metadatos de salida de RAVEN o similar. No tocar Clarity
