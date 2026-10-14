@@ -1,0 +1,37 @@
+schema: spec-driven
+
+context: |
+  BinaScape is a monorepo for binaural acoustic
+  simulation and hearing-loss processing.
+
+  Components:
+  - apps/orchestrator: experiment configuration,
+    scene sampling and pipeline coordination.
+  - apps/matlab: RAVEN acoustic rendering.
+  - apps/clarity-backend: Clarity MSBG processing.
+  - apps/output-analyzer: metadata analysis
+    and report generation.
+
+  The repository contains an existing,
+  implemented system.
+
+  Existing documentation and closed PRDs
+  provide historical context.
+
+  For existing behavior, implementation and
+  tests are authoritative.
+
+  Specs must distinguish implemented,
+  unsupported and planned capabilities.
+
+rules:
+  specs:
+    - Use SHALL requirements and testable scenarios.
+    - Reference affected components and contracts.
+    - Do not invent behavior absent from the code.
+  design:
+    - Identify cross-component dependencies.
+    - Preserve compatibility unless explicitly changed.
+  tasks:
+    - Group implementation tasks by component.
+    - Include appropriate verification tasks.
