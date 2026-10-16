@@ -256,8 +256,7 @@ hearing_degradation:
   enabled: false
   input_targets:
     - binaural_hrtf
-    # - bte_rear_hartf
-    # - bte_front_hartf
+    # Solo binaural_hrtf: HARTF y circular_array son salidas de render, no de Clarity.
   hearing_profiles_path: ../../../configs/hearing/hearing_profiles.yaml
   # output_dir es opcional. Si se omite, se reserva
   # {artifact_root}/{run_name}/output_audio/degraded para la etapa de degradación.

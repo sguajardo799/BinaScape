@@ -2,6 +2,76 @@ function tests = test_validate_static_scene_config
     tests = functiontests(localfunctions);
 end
 
+function testArrayOnlyAndMixedOutputSelection(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.position_m = [2 1.5 1.5];
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver = rmfield(cfg.receiver, 'hrtf');
+    cfg.receiver.hrtfs = struct([]);
+    normalized = validate_static_scene_config(cfg);
+    verifyEmpty(testCase, normalized.receiver.hrtfs);
+    verifyEqual(testCase, normalized.render.outputs.output_type, 'circular_array');
+    verifyEmpty(testCase, normalized.render.outputs.hrtf_id);
+    cfg.receiver.hrtfs = struct('hrtf_id', 'binaural_hrtf', 'hrtf_path', 'a.daff');
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, {normalized.render.outputs.output_type}, {'binaural_hrtf', 'circular_array'});
+    verifyEqual(testCase, normalized.render.outputs(2).wav_path, 'out__circular_array.wav');
+    cfg.render.active_output_type = 'circular_array';
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, numel(normalized.render.outputs), 1);
+    verifyEqual(testCase, normalized.render.outputs.wav_path, 'out.wav');
+    cfg.render.active_output_type = 'missing';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testArrayMicrophonesRequireContainmentWithoutCenterWallMargin(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.position_m = [2 1.5 0.51];
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, normalized.receiver.circular_array.microphones(4).position_m(3), 0.46, 'AbsTol', 1e-10);
+
+    % The receiver center and sources still require the existing 0.5 m margin.
+    too_close = cfg;
+    too_close.receiver.position_m(3) = 0.49;
+    too_close.receiver.circular_array = make_array(too_close.receiver.position_m);
+    verifyThrowsAny(testCase, @() validate_static_scene_config(too_close));
+    too_close = cfg;
+    too_close.sources.position_m = [2 1 0.49];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(too_close));
+
+    % A valid center must not permit a microphone outside the room.
+    cfg.receiver.circular_array.radius_m = 0.6;
+    for k = 1:4
+        cfg.receiver.circular_array.microphones(k).position_m = cfg.receiver.position_m + ...
+            0.6 * [cosd(90*(k-1)), 0, sind(90*(k-1))];
+    end
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testRejectsInvalidArrayGeometryAndOrder(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.microphones(1).channel_index = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.microphones(1).position_m(2) = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.radius_m = NaN;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function array = make_array(center)
+    microphones = repmat(struct('microphone_index', 0, 'channel_index', 0, 'position_m', []), 1, 4);
+    for k = 1:4
+        microphones(k) = struct('microphone_index', k-1, 'channel_index', k, ...
+            'position_m', center + 0.05 * [cosd(90*(k-1)), 0, sind(90*(k-1))]);
+    end
+    array = struct('output_type', 'circular_array', 'num_microphones', 4, 'radius_m', 0.05, ...
+        'center_m', center, 'yaw_deg', 0, 'microphones', microphones);
+end
+
 function testCanonicalPluralList(testCase)
     cfg = make_base_cfg();
     cfg.receiver = rmfield(cfg.receiver, 'hrtf');

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictConfigModel(BaseModel):
@@ -117,10 +117,29 @@ class ReceiverOutputConfig(StrictConfigModel):
     required: bool = False
 
 
+class CircularArrayOutputConfig(StrictConfigModel):
+    enabled: bool = False
+    num_microphones: Annotated[int, Field(strict=True, ge=2)] | None = None
+    radius_m: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    output_subdir: str = "circular_array"
+    required: bool = False
+
+    @model_validator(mode="after")
+    def require_enabled_geometry(self) -> "CircularArrayOutputConfig":
+        if self.enabled and (self.num_microphones is None or self.radius_m is None):
+            raise ValueError("circular_array enabled=true requiere num_microphones y radius_m")
+        return self
+
+    @property
+    def num_channels(self) -> int | None:
+        return self.num_microphones
+
+
 class ReceiverOutputsConfig(StrictConfigModel):
-    binaural_hrtf: ReceiverOutputConfig
+    binaural_hrtf: ReceiverOutputConfig | None = None
     bte_rear_hartf: ReceiverOutputConfig | None = None
     bte_front_hartf: ReceiverOutputConfig | None = None
+    circular_array: CircularArrayOutputConfig | None = None
 
 
 class ShoeboxGeometryConfig(StrictConfigModel):

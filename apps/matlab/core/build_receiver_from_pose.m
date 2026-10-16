@@ -8,7 +8,14 @@ function ctx = build_receiver_from_pose(ctx)
 
     hrtf_path = fullfile(dir(receiver.active_hrtf.hrtf_path).folder, dir(receiver.active_hrtf.hrtf_path).name);
 
-    rpf.setReceiverHRTF(string(hrtf_path));
+    % IniConfig de ITA serializa char, no MATLAB string; un string deja el
+    % campo vacío y RAVEN sustituye silenciosamente su HRTF predeterminado.
+    rpf.setReceiverHRTF(char(hrtf_path));
+    stored_path = char(rpf.getReceiverHRTF());
+    if ~strcmpi(strrep(stored_path, '\', '/'), strrep(char(hrtf_path), '\', '/'))
+        error('BinaScape:Matlab:ReceiverIRPathNotStored', ...
+            'RAVEN no conservó el archivo IR seleccionado: %s', char(hrtf_path));
+    end
     if uses_polygon_coordinate_contract(ctx.manifest)
         [position, viewVec, ~] = transform_schema2_pose_to_raven( ...
             receiver.position_m, receiver.orientation_deg);

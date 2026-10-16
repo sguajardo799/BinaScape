@@ -7,6 +7,8 @@ from pathlib import Path
 import wave
 from typing import Any, TypeVar
 
+from acoustic_orchestrator.experiment.receiver_geometry import build_circular_array_descriptor
+
 from acoustic_orchestrator.config.models import (
     AppConfig,
     BackgroundNoiseStrategyConfig,
@@ -578,7 +580,7 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
             orientation_strategy.roll_deg.max,
         )
 
-    return {
+    receiver: dict[str, Any] = {
         "receiver_id": "listener_001",
         "position_m": position,
         "orientation_deg": {
@@ -587,6 +589,12 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
             "roll": roll,
         },
     }
+    array_output = config.receiver_outputs.circular_array
+    if array_output is not None and array_output.enabled:
+        receiver["circular_array"] = build_circular_array_descriptor(
+            position, receiver["orientation_deg"], array_output
+        )
+    return receiver
 
 
 def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
@@ -1055,7 +1063,13 @@ def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list
     if not sources:
         return False
 
-    if config.scene_validation.require_receiver_inside_room and not _inside_room(receiver["position_m"], room):
+    receiver_positions = [receiver["position_m"]]
+    if "circular_array" in receiver:
+        receiver_positions.extend(mic["position_m"] for mic in receiver["circular_array"]["microphones"])
+
+    if config.scene_validation.require_receiver_inside_room and any(
+        not _inside_room(position, room) for position in receiver_positions
+    ):
         return False
 
     if config.scene_validation.require_sources_inside_room:
@@ -1063,9 +1077,10 @@ def _is_valid_scene(config: AppConfig, room: dict, receiver: dict, sources: list
             return False
 
     if any(
-        _distance(source["position_m"], receiver["position_m"])
+        _distance(source["position_m"], position)
         < max(config.scene_validation.min_distance_source_to_receiver_m, SOURCE_RECEIVER_CLEARANCE_M)
         for source in sources
+        for position in receiver_positions
     ):
         return False
 

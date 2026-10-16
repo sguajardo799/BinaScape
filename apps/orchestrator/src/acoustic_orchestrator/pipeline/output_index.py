@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import threading
 import time
@@ -8,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 from uuid import uuid4
+import wave
 
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
 
@@ -46,6 +48,8 @@ class MetadataSnapshot(TypedDict, total=False):
     scene_id: str
     output_type: str
     hrtf_id: str
+    circular_array: dict
+    coordinate_frame: str
     rendered_wav_path: str
     render_metadata_path: str
 
@@ -61,7 +65,7 @@ class VariantRecord(TypedDict):
     runtime_manifest_path: str
     rendered_wav_path: str
     render_metadata_path: str | None
-    receiver_ir_path: str
+    receiver_ir_path: str | None
     observed_outputs: ObservedOutputsRecord
     metadata_snapshot: MetadataSnapshot | None
     validation: ValidationRecord
@@ -212,6 +216,8 @@ def inspect_variant(
             metadata_snapshot=metadata_snapshot,
         )
     )
+    if variant_paths["output_type"] == "circular_array" and validation_issues and status == "completed":
+        status = "partial"
 
     return {
         "variant_id": variant_paths["variant_id"],
@@ -457,7 +463,7 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
         "runtime_manifest_path": cast(str, record["runtime_manifest_path"]),
         "rendered_wav_path": cast(str, record["rendered_wav_path"]),
         "render_metadata_path": render_metadata_path,
-        "receiver_ir_path": cast(str, record["receiver_ir_path"]),
+        "receiver_ir_path": cast(str | None, record["receiver_ir_path"]),
         "observed_outputs": observed_outputs,
         "metadata_snapshot": metadata_snapshot,
         "validation": {
@@ -539,10 +545,18 @@ def _read_render_metadata(render_metadata_path: str | None) -> tuple[MetadataSna
     except (OSError, json.JSONDecodeError) as exc:
         return None, [f"render_metadata_parse_error: {exc}"]
 
+    if not isinstance(payload, dict):
+        return None, ["render_metadata_payload_not_object"]
+
     summary = _as_dict(payload.get("summary"))
     render = _as_dict(payload.get("render"))
 
     metadata_snapshot: MetadataSnapshot = {}
+    receiver = _as_dict(payload.get("receiver"))
+    if isinstance(receiver.get("circular_array"), dict):
+        metadata_snapshot["circular_array"] = receiver["circular_array"]
+    if isinstance(receiver.get("coordinate_frame"), str):
+        metadata_snapshot["coordinate_frame"] = receiver["coordinate_frame"]
     scene_id = _pick_string(payload.get("scene_id"), summary.get("scene_id"))
     output_type = _pick_string(payload.get("output_type"), summary.get("output_type"))
     hrtf_id = _pick_string(payload.get("hrtf_id"), summary.get("hrtf_id"))
@@ -595,6 +609,8 @@ def _validate_variant(
     metadata_snapshot: MetadataSnapshot | None,
 ) -> list[str]:
     issues: list[str] = []
+    if variant_paths["output_type"] == "circular_array":
+        issues.extend(_validate_array_outputs(variant_paths, observed_outputs, metadata_snapshot))
     if metadata_required and not observed_outputs["render_metadata"]:
         issues.append("render_metadata_missing")
 
@@ -636,6 +652,60 @@ def _validate_variant(
             f"{_normalize_path(expected_metadata_path)} got {_normalize_path(observed_metadata_path)}"
         )
 
+    return issues
+
+
+def _matches_array_value(expected: Any, observed: Any) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(observed, dict) and all(
+            key in observed and _matches_array_value(value, observed[key]) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(observed, list) and len(expected) == len(observed) and all(
+            _matches_array_value(a, b) for a, b in zip(expected, observed, strict=True)
+        )
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return isinstance(observed, (int, float)) and not isinstance(observed, bool) and (
+            math.isfinite(observed) and math.isclose(expected, observed, rel_tol=1e-9, abs_tol=1e-6)
+        )
+    return expected == observed
+
+
+def _validate_array_outputs(
+    paths: RenderVariantPaths, observed: ObservedOutputsRecord, metadata: MetadataSnapshot | None
+) -> list[str]:
+    issues: list[str] = []
+    expected = paths.get("circular_array")
+    if expected is None:
+        return ["array_planned_geometry_missing"]
+    if observed["rendered_wav"]:
+        try:
+            with wave.open(paths["rendered_wav_path"], "rb") as audio:
+                if audio.getnchannels() != expected["num_microphones"]:
+                    issues.append("array_wav_channel_count_mismatch")
+                if audio.getframerate() != paths.get("sample_rate_hz", 44100):
+                    issues.append("array_wav_sample_rate_mismatch")
+        except (OSError, EOFError, wave.Error) as exc:
+            issues.append(f"array_wav_unreadable: {exc}")
+    if observed["runtime_manifest"]:
+        try:
+            runtime = json.loads(Path(paths["runtime_manifest_path"]).read_text(encoding="utf-8"))
+            receiver = _as_dict(_as_dict(runtime).get("receiver"))
+            if not _matches_array_value(expected, receiver.get("circular_array")):
+                issues.append("array_runtime_geometry_mismatch")
+            if receiver.get("hrtfs") or _as_dict(runtime.get("render")).get("active_output_type") != "circular_array":
+                issues.append("array_runtime_selection_mismatch")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            issues.append(f"array_runtime_unreadable: {exc}")
+    if observed["render_metadata"]:
+        if metadata is None or not _matches_array_value(expected, metadata.get("circular_array")):
+            issues.append("array_metadata_geometry_mismatch")
+        if metadata is None or metadata.get("coordinate_frame") != "public_xyz_y_up":
+            issues.append("array_metadata_coordinate_frame_mismatch")
+        if metadata is None or metadata.get("output_type") != "circular_array":
+            issues.append("array_metadata_output_type_missing")
+    elif not observed["runtime_manifest"]:
+        issues.append("array_provenance_missing")
     return issues
 
 

@@ -2,6 +2,24 @@ function tests = test_build_receiver_from_pose
     tests = functiontests(localfunctions);
 end
 
+function testReceiverIRPathUsesCharAndIsVerified(testCase)
+    path = [tempname, '.daff'];
+    fid = fopen(path, 'w');
+    fclose(fid);
+    cleanup = onCleanup(@() delete(path)); %#ok<NASGU>
+    receiver = struct('position_m', [1 1.5 2], ...
+        'orientation_deg', struct('yaw', 0, 'pitch', 0, 'roll', 0), ...
+        'active_hrtf', struct('hrtf_path', path));
+    ctx = struct('manifest', struct('schema_version', '3.0', 'receiver', receiver), ...
+        'rpf', MockRavenProject());
+    ctx = build_receiver_from_pose(ctx);
+    verifyTrue(testCase, ctx.rpf.receiver_hrtf_argument_is_char);
+    verifyEqual(testCase, ctx.rpf.receiver_hrtf, path);
+    ctx.rpf.receiver_hrtf = '';
+    ctx.rpf.drop_receiver_hrtf = true;
+    verifyError(testCase, @() build_receiver_from_pose(ctx), 'BinaScape:Matlab:ReceiverIRPathNotStored');
+end
+
 function testSchema2ReflectsReceiverPositionAndPublicOrientation(testCase)
     hrtf_path = [tempname, '.daff'];
     fid = fopen(hrtf_path, 'w');

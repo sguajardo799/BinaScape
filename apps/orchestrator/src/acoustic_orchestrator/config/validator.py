@@ -9,6 +9,7 @@ import yaml
 from .models import (
     AppConfig,
     AudioFolderNoiseStrategyConfig,
+    CircularArrayOutputConfig,
     ClarityRunnerConfig,
     LShapeGeometryConfig,
     ReceiverOutputConfig,
@@ -291,6 +292,7 @@ def validate_config(config: AppConfig) -> None:
             "binaural_hrtf": config.receiver_outputs.binaural_hrtf,
             "bte_rear_hartf": config.receiver_outputs.bte_rear_hartf,
             "bte_front_hartf": config.receiver_outputs.bte_front_hartf,
+            "circular_array": config.receiver_outputs.circular_array,
         }.items()
         if output is not None
     }
@@ -307,12 +309,26 @@ def validate_config(config: AppConfig) -> None:
     for output_name, output in defined_outputs.items():
         if output.required and not output.enabled:
             errors.append(f"receiver_outputs.{output_name} no puede ser required=true si enabled=false")
-        _validate_receiver_output(errors, output_name, output)
+        if isinstance(output, CircularArrayOutputConfig):
+            if output.enabled and (output.num_microphones is None or output.radius_m is None):
+                errors.append("receiver_outputs.circular_array requiere num_microphones y radius_m")
+            if output.enabled and not is_safe_output_subdir(output.output_subdir):
+                errors.append(
+                    "receiver_outputs.circular_array.output_subdir debe ser un subdirectorio relativo "
+                    "no vacío y sin segmentos inseguros"
+                )
+        else:
+            _validate_receiver_output(errors, output_name, output)
 
     _validate_output_naming(errors, config, enabled_outputs)
 
     for target_name in config.hearing_degradation.input_targets:
-        if target_name not in defined_outputs:
+        if target_name in {"bte_rear_hartf", "bte_front_hartf", "circular_array"}:
+            errors.append(
+                f"hearing_degradation.input_targets contiene target no elegible: {target_name}. "
+                "Solo binaural_hrtf admite procesamiento Clarity"
+            )
+        elif target_name != "binaural_hrtf" or target_name not in defined_outputs:
             errors.append(f"hearing_degradation.input_targets contiene target desconocido: {target_name}")
 
     if config.hearing_degradation.enabled:
@@ -607,7 +623,7 @@ def _validate_background_noise(errors: list[str], config: AppConfig) -> None:
 def _validate_output_naming(
     errors: list[str],
     config: AppConfig,
-    enabled_outputs: dict[str, ReceiverOutputConfig],
+    enabled_outputs: dict[str, ReceiverOutputConfig | CircularArrayOutputConfig],
 ) -> None:
     for field_name, pattern in {
         "outputs.naming.wav_pattern": config.outputs.naming.wav_pattern,

@@ -257,7 +257,98 @@ positive bands and can retry within the scene budget. This measured T30 is
 distinct from the seven-band Sabine estimate used by sampling. The runtime also
 supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
+## Circular Array Configuration
+
+Configuration loading/validation accepts an optional `receiver_outputs.circular_array`.
+The static pipeline supports array-only and mixed receiver scene generation,
+runtime selection, rendering, indexing, and resume provenance checks.
+
+```yaml
+receiver_outputs:
+  circular_array:
+    enabled: true
+    num_microphones: 8
+    radius_m: 0.05
+    output_subdir: circular_array
+    required: true
+hearing_degradation:
+  enabled: false
+  input_targets: []
+  hearing_profiles_path: path/to/hearing_profiles.yml
+```
+
+This is a section-level excerpt: retain the other required experiment sections.
+Array-only config does not require a `binaural_hrtf` block or receiver IR catalog.
+`num_microphones` is a strict integer >= 2; `radius_m` is a finite positive
+distance in meters. Channels are derived from the microphone count, so do not
+configure `num_channels`, `num_hrtfs`, `file_pattern`, or `ir_catalog_path` for an
+array. The defaults are `enabled: false`, `required: false`, and
+`output_subdir: circular_array`; a disabled array can omit its geometry.
+Output subdirectories must be relative, nonempty, and contain no traversal
+segments or Windows drive/root/UNC prefixes. At least one output must be enabled.
+
+The array geometry is a horizontal ring in the public XZ plane, centered on
+the sampled receiver and rotated by yaw only. HRTF/HARTF outputs remain
+independently configurable alongside the array.
+
+Array WAVs and sidecars use the existing artifact layout:
+
+```text
+{artifact_root}/{run_name}/output_audio/render/{output_subdir}/
+  {scene_id}__circular_array.wav
+  {scene_id}__circular_array__render.json
+```
+
+These filenames follow the default naming templates; custom templates still
+use `{scene_id}` and `{output_type}`. One array has one variant identity
+`{scene_id}__circular_array`, regardless of microphone count. Its index entry
+uses `receiver_ir_path: null`, not a fake HRTF path. Metadata records the
+public center/yaw, radius, ordered microphone positions and WAV channel mapping.
+Microphone 0 corresponds to WAV channel 1; yaw zero starts at +X, with ordering
+toward +Z. Array source WAVs are downmixed by channel mean before normalization
+and gain, while HRTF/HARTF source handling is unchanged.
+
+Resume checks compare planned array geometry with the sidecar/runtime provenance
+and verify actual WAV channel count/sample rate. Wrong radius/yaw/order or channel
+count makes the output invalid for resume. If sidecars are disabled, saved runtime
+geometry is required; newly written manifests must not validate old stale WAVs.
+Canonical receiver rendering still needs a T30 sidecar for room acceptance.
+For rerunning an existing experiment, use `resume_if_possible: true` together
+with `overwrite_existing: true` to allow scene-manifest regeneration: this is
+the pipeline's existing behavior, not permission to blindly reuse audio.
+
+Full experiment examples: `configs/experiments/circular_array_only.yml` and
+`configs/experiments/circular_array_mixed.yml`. Receiver-section examples are
+in `apps/orchestrator/examples/circular_array_scenes.md`.
+
+Opt-in acceptance checks require installed MATLAB/RAVEN, compatible subject-01
+DAFF files in the HRTF/front-HARTF/rear-HARTF catalogs, and the Clarity backend.
+Run from the repository root using a fresh writable artifact directory:
+
+```sh
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_circular_array_e2e.py render --output-root PATH
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_circular_array_e2e.py clarity --output-root PATH
+```
+
+The render phase verifies array-only and four-output mixed runs, actual IR paths
+stored in RAVEN projects, channel/coordinate provenance, T30, and resume. The
+Clarity phase verifies HRTF-only degraded artifacts and rejection of HARTF/array
+targets. Reports are `render_verification.json` and `clarity_verification.json`
+under `PATH`. These real-backend checks are separate from mocked unit tests.
+
 ## Clarity Handoff
+
+Only `binaural_hrtf` is accepted in `hearing_degradation.input_targets`.
+This base target covers numbered sampled HRTFs such as `binaural_hrtf__1`;
+do not list numbered variants in the experiment config.
+HARTF rear/front and `circular_array` targets are rejected explicitly, even
+when degradation is disabled and even for two microphones. To migrate a
+previous HARTF-degradation config, remove HARTF from `input_targets`; keep
+its receiver output enabled to continue rendering it. Array-only or
+HARTF-only runs must disable degradation and use `input_targets: []`.
+Enabled degradation requires an enabled binaural HRTF output and a nonempty
+eligible target list. Handoff creation and submission independently enforce
+the same HRTF-only policy, including stale or externally supplied job records.
 
 Prepare artifacts only:
 

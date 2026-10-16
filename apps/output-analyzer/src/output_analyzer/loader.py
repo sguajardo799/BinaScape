@@ -287,7 +287,12 @@ def _group_documents(paths, reader, kind, schema, keys):
         doc = reader.read(path, schema)
         if doc is None:
             continue
-        identity = [reader.identifier(doc.get(k), str(path), k, path) for k in keys]
+        identity = [
+            reader.identifier(
+                doc.get("output_type", doc.get(k)) if kind == "variant" and k == "hrtf_id" else doc.get(k),
+                str(path), k, path,
+            ) for k in keys
+        ]
         if any(v is None for v in identity):
             continue
         doc["metadata_path"] = str(path)
@@ -686,6 +691,8 @@ def load_run(run_dir: str | Path) -> AnalysisData:
             )
             if hid:
                 expected.add((scene_id, hid))
+        if isinstance(_nested(doc, "receiver", "circular_array"), dict):
+            expected.add((scene_id, "circular_array"))
         reverb = doc.get("reverberation_sampling")
         if not isinstance(reverb, dict):
             reader.issue(
@@ -833,11 +840,12 @@ def load_run(run_dir: str | Path) -> AnalysisData:
             scene,
             scene_id=scene_id,
             variant_id=variant_id,
-            hrtf_id=hid,
+            hrtf_id=None if hid == "circular_array" else hid,
+            output_type=hid,
             hrtf_path=doc.get("hrtf_path"),
             employed_hrtf=Path(str(doc.get("hrtf_path"))).name
             if doc.get("hrtf_path")
-            else hid,
+            else (None if hid == "circular_array" else hid),
             metadata_path=doc["metadata_path"],
             provenance=doc["provenance"],
             sample_rate_hz=reader.value(
@@ -890,7 +898,8 @@ def load_run(run_dir: str | Path) -> AnalysisData:
                 dict(
                     normalized,
                     variant_id=variant_id,
-                    hrtf_id=hid,
+                    hrtf_id=None if hid == "circular_array" else hid,
+                    output_type=hid,
                     render_metadata_path=doc["metadata_path"],
                 )
             )
@@ -1108,7 +1117,7 @@ def _coverage(data, reader, expected, renders):
                 indexed.add((scene, hid))
             snapshot = row.get("metadata_snapshot")
             if isinstance(snapshot, dict) and (
-                snapshot.get("scene_id") != scene or snapshot.get("hrtf_id") != hid
+                snapshot.get("scene_id") != scene or snapshot.get("output_type", snapshot.get("hrtf_id")) != hid
             ):
                 reader.issue(
                     "index_mismatch", f"variant:{variant}", "metadata_snapshot"
@@ -1124,7 +1133,8 @@ def _coverage(data, reader, expected, renders):
         data.coverage.append(
             dict(
                 scene_id=scene,
-                hrtf_id=hid,
+                hrtf_id=None if hid == "circular_array" else hid,
+                output_type=hid,
                 variant_id=f"{scene}__{hid}",
                 present=present,
                 expected=expected_flag,

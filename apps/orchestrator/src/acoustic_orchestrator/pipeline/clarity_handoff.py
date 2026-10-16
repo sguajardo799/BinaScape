@@ -6,6 +6,7 @@ import yaml
 from acoustic_orchestrator.config.validator import load_hearing_profile_catalog
 from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.clarity_runner import submit_clarity_manifest
+from acoustic_orchestrator.pipeline.clarity_eligibility import is_clarity_output_eligible
 from acoustic_orchestrator.pipeline.output_index import (
     ClarityBackendInvocationRecord,
     ClarityJobManifestRecord,
@@ -81,6 +82,8 @@ def prepare_clarity_handoff(
     except ValueError as exc:
         for variant_id in sorted(render_records):
             variant_record = render_records[variant_id]
+            if not is_clarity_output_eligible(variant_record["output_type"]):
+                continue
             for hearing_profile_id in _read_profile_ids_for_blocked_records(config.hearing_degradation.hearing_profiles_path):
                 job = build_clarity_job_record(
                     config=config,
@@ -114,6 +117,8 @@ def prepare_clarity_handoff(
 
     for variant_id in sorted(render_records):
         variant_record = render_records[variant_id]
+        if not is_clarity_output_eligible(variant_record["output_type"]):
+            continue
         manifest_path = layout["clarity_jobs_path"]
         for hearing_profile in hearing_profiles:
             job = build_clarity_job_record(
@@ -128,7 +133,7 @@ def prepare_clarity_handoff(
                 job=job,
             )
 
-            if resume_enabled and should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
+            if not eligibility_issues and resume_enabled and should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
                 upsert_clarity_record(
                     layout["clarity_index_path"],
                     clarity_records,
@@ -293,6 +298,8 @@ def get_clarity_job_issues(
     issues: list[str] = []
 
     output_type = variant_record["output_type"]
+    if not is_clarity_output_eligible(output_type) or not is_clarity_output_eligible(job["output_type"]):
+        issues.append(f"output_type_ineligible:{output_type}")
     if "__" in output_type:
         base_type, suffix = output_type.rsplit("__", 1)
         if suffix.isdecimal():

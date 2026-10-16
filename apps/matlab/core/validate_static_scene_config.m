@@ -69,8 +69,44 @@ function cfg = validate_static_scene_config(cfg)
         cfg.render.seed = effective_seed;
     end
 
-    cfg.receiver.hrtfs = normalize_receiver_hrtfs(cfg.receiver);
-    cfg.render.outputs = derive_render_outputs(cfg.render, cfg.project_name, cfg.scene_id, cfg.receiver.hrtfs);
+    has_array = isfield(cfg.receiver, 'circular_array') && ~isempty(cfg.receiver.circular_array);
+    if has_array
+        cfg.receiver.circular_array = validate_circular_array_descriptor( ...
+            cfg.receiver.circular_array, cfg.receiver.position_m, cfg.receiver.orientation_deg.yaw);
+        if any(strcmp(cfg.schema_version, {'2.0', '3.0'}))
+            for k = 1:numel(cfg.receiver.circular_array.microphones)
+                validate_schema2_pose(cfg.receiver.circular_array.microphones(k).position_m, ...
+                    cfg.room.geometry, 'receiver.circular_array.microphones.position_m', false, 0);
+            end
+        end
+    end
+    if has_array && isempty(getfield_if_present(cfg.receiver, 'hrtfs')) && ...
+            isempty(getfield_if_present(cfg.receiver, 'hrtf'))
+        cfg.receiver.hrtfs = struct([]);
+    else
+        cfg.receiver.hrtfs = normalize_receiver_hrtfs(cfg.receiver);
+    end
+    variants = repmat(struct('output_type', '', 'receiver_kind', '', 'hrtf_index', 0), ...
+        1, numel(cfg.receiver.hrtfs) + double(has_array));
+    for i = 1:numel(cfg.receiver.hrtfs)
+        variants(i) = struct('output_type', cfg.receiver.hrtfs(i).hrtf_id, ...
+            'receiver_kind', 'catalog', 'hrtf_index', i);
+    end
+    if has_array
+        if any(strcmp({variants.output_type}, 'circular_array'))
+            error('circular_array output identity cannot also name an HRTF.');
+        end
+        variants(end) = struct('output_type', 'circular_array', 'receiver_kind', 'circular_array', 'hrtf_index', 0);
+    end
+    if isfield(cfg.render, 'active_output_type') && ~isempty(cfg.render.active_output_type)
+        selected = strcmp({variants.output_type}, char(string(cfg.render.active_output_type)));
+        if sum(selected) ~= 1
+            error('render.active_output_type must select exactly one declared receiver output.');
+        end
+        variants = variants(selected);
+    end
+    cfg.render.receiver_variants = variants;
+    cfg.render.outputs = derive_render_outputs(cfg.render, cfg.project_name, cfg.scene_id, variants);
 end
 
 function background_noise = normalize_background_noise_config(background_noise)
@@ -588,7 +624,10 @@ function room = normalize_polygon_room_config(room)
     room = normalize_room_materials(room, required_surfaces, true);
 end
 
-function validate_schema2_pose(position, geometry, field_name, require_vertical_clearance)
+function validate_schema2_pose(position, geometry, field_name, require_vertical_clearance, wall_clearance_m)
+    if nargin < 5
+        wall_clearance_m = 0.5;
+    end
     if ~isnumeric(position) || numel(position) ~= 3 || any(~isfinite(position), 'all')
         error('%s must contain exactly three finite coordinates.', field_name);
     end
@@ -596,9 +635,10 @@ function validate_schema2_pose(position, geometry, field_name, require_vertical_
     vertices = geometry.footprint_vertices_m;
     [inside, on_boundary] = inpolygon(position(1), position(3), ...
         vertices(:, 1), vertices(:, 2));
-    if ~inside || on_boundary || polygon_wall_clearance(position([1 3]), vertices) < 0.5 - 1e-6
-        error('%s must be inside the schema 2.0 footprint with 0.5 m wall clearance.', ...
-            field_name);
+    if ~inside || (wall_clearance_m > 0 && (on_boundary || ...
+            polygon_wall_clearance(position([1 3]), vertices) < wall_clearance_m - 1e-6))
+        error('%s must be inside the schema 2.0 footprint with %g m wall clearance.', ...
+            field_name, wall_clearance_m);
     end
     if position(2) < 0 || position(2) > geometry.height_m
         error('%s height must be inside the schema 2.0 room.', field_name);
@@ -900,18 +940,21 @@ function unique_id = uniquify_hrtf_id(base_id, used_ids)
     unique_id = sprintf('%s-%d', base_id, next_index);
 end
 
-function outputs = derive_render_outputs(render_cfg, project_name, scene_id, hrtfs)
-    n_hrtfs = numel(hrtfs);
-    outputs = repmat(struct('hrtf_id', '', 'wav_path', '', 'metadata_path', '', ...
+function outputs = derive_render_outputs(render_cfg, project_name, scene_id, variants)
+    n_hrtfs = numel(variants);
+    outputs = repmat(struct('hrtf_id', '', 'output_type', '', 'wav_path', '', 'metadata_path', '', ...
         'project_name', ''), 1, n_hrtfs);
 
     base_wav_path = resolve_output_target(render_cfg.output_wav_path, scene_id, '.wav');
     base_metadata_path = resolve_output_target(render_cfg.output_metadata_path, scene_id, '.json');
 
     for i = 1:n_hrtfs
-        hrtf_id = hrtfs(i).hrtf_id;
+        hrtf_id = variants(i).output_type;
 
-        outputs(i).hrtf_id = hrtf_id;
+        outputs(i).output_type = hrtf_id;
+        if strcmp(variants(i).receiver_kind, 'catalog')
+            outputs(i).hrtf_id = hrtf_id;
+        end
         if n_hrtfs == 1
             outputs(i).wav_path = base_wav_path;
             outputs(i).metadata_path = base_metadata_path;

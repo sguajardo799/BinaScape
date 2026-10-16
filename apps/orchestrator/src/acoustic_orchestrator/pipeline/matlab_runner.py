@@ -3,9 +3,9 @@ import re
 import subprocess
 from copy import deepcopy
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
-from acoustic_orchestrator.config.models import OutputsConfig, ReceiverOutputConfig
+from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
 
 
@@ -22,7 +22,9 @@ class RenderVariantPaths(TypedDict):
     runtime_manifest_path: str
     rendered_wav_path: str
     render_metadata_path: str
-    receiver_ir_path: str
+    receiver_ir_path: str | None
+    circular_array: NotRequired[dict]
+    sample_rate_hz: NotRequired[int]
 
 
 def render_manifest_with_matlab(manifest_path: Path, matlab_executable: str = "matlab") -> None:
@@ -37,12 +39,12 @@ def render_manifest_with_matlab(manifest_path: Path, matlab_executable: str = "m
     subprocess.run([matlab_executable, "-batch", batch_command], check=True)
 
 
-def write_single_hrtf_render_manifest(
+def write_single_receiver_render_manifest(
     scene_manifest: dict,
     hrtf: dict,
     output_dir: Path,
     outputs: OutputsConfig,
-    receiver_output: ReceiverOutputConfig,
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
     source_path_rewrites: dict[str, str] | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +60,16 @@ def write_single_hrtf_render_manifest(
         scene_manifest["project_name"],
         variant_paths["variant_id"],
     )
-    variant_manifest["receiver"]["hrtfs"] = [deepcopy(hrtf)]
+    receiver = variant_manifest["receiver"]
+    receiver.pop("hrtf", None)
+    receiver.pop("active_hrtf", None)
+    if variant_paths["output_type"] == "circular_array":
+        receiver["hrtfs"] = []
+        receiver["circular_array"] = deepcopy(hrtf)
+    else:
+        receiver["hrtfs"] = [deepcopy(hrtf)]
+        receiver.pop("circular_array", None)
+    variant_manifest["render"]["active_output_type"] = variant_paths["output_type"]
     variant_manifest["render"]["output_wav_path"] = variant_paths["rendered_wav_path"]
     variant_manifest["render"]["output_metadata_path"] = variant_paths["render_metadata_path"]
 
@@ -70,6 +81,10 @@ def write_single_hrtf_render_manifest(
     manifest_path = Path(variant_paths["runtime_manifest_path"])
     manifest_path.write_text(json.dumps(variant_manifest, indent=2), encoding="utf-8")
     return manifest_path
+
+
+# Compatibilidad para consumidores del helper anterior, sin cambiar el contrato.
+write_single_hrtf_render_manifest = write_single_receiver_render_manifest
 
 
 def build_raven_project_name(project_name: str, variant_id: str) -> str:
@@ -90,10 +105,11 @@ def build_render_variant_paths(
     hrtf: dict,
     runtime_manifest_dir: Path,
     outputs: OutputsConfig,
-    receiver_output: ReceiverOutputConfig,
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
 ) -> RenderVariantPaths:
     scene_id = scene_manifest["scene_id"]
-    output_type = hrtf["hrtf_id"]
+    is_array = hrtf.get("output_type") == "circular_array"
+    output_type = "circular_array" if is_array else hrtf["hrtf_id"]
     resolved_paths = resolve_output_paths(
         scene_id,
         output_type,
@@ -101,7 +117,7 @@ def build_render_variant_paths(
         receiver_output,
         scene_manifest["project_name"],
     )
-    return {
+    paths: RenderVariantPaths = {
         "variant_id": resolved_paths["variant_id"],
         "scene_id": scene_id,
         "output_type": output_type,
@@ -109,8 +125,20 @@ def build_render_variant_paths(
         "runtime_manifest_path": (runtime_manifest_dir / f"{resolved_paths['variant_id']}.json").resolve().as_posix(),
         "rendered_wav_path": resolved_paths["wav_path"],
         "render_metadata_path": resolved_paths["metadata_path"],
-        "receiver_ir_path": Path(hrtf["hrtf_path"]).resolve().as_posix(),
+        "receiver_ir_path": None if is_array else Path(hrtf["hrtf_path"]).resolve().as_posix(),
     }
+    if is_array:
+        paths["circular_array"] = deepcopy(hrtf)
+        paths["sample_rate_hz"] = scene_manifest["render"]["sample_rate_hz"]
+    return paths
+
+
+def receiver_variants(scene_manifest: dict) -> list[dict]:
+    variants = sorted(scene_manifest["receiver"].get("hrtfs", []), key=lambda item: item["hrtf_id"])
+    array = scene_manifest["receiver"].get("circular_array")
+    if array is not None:
+        variants.append(array)
+    return variants
 
 
 def _escape_matlab_path(path: Path) -> str:
