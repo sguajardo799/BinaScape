@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import random
 import wave
+import yaml
 
 import pytest
 from typer.testing import CliRunner
@@ -12,7 +13,9 @@ import acoustic_orchestrator.pipeline.render_pipeline as render_pipeline
 import acoustic_orchestrator.experiment.sampler as sampler
 from acoustic_orchestrator.cli import app
 from acoustic_orchestrator.config.loader import load_config
+from acoustic_orchestrator.config.models import CircularArrayOutputConfig
 from acoustic_orchestrator.config.validator import validate_config
+from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.experiment.sampler import (
     SceneSamplingFailure,
     _sample_random_position,
@@ -134,6 +137,178 @@ def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     assert batch["proposal_strategy_version"] == 1
     assert batch["treatment_catalog_version"] == 1
     assert batch["absorption_mix_model_version"] == 1
+
+
+@pytest.mark.parametrize("array_only", [True, False])
+def test_array_scene_manifest_has_explicit_geometry_without_fake_ir(tmp_path: Path, array_only: bool) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "array_manifest")
+    _make_receiver_orientation_compatible(config_path)
+    config = load_config(config_path)
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=8, radius_m=0.05
+    )
+    if array_only:
+        config.receiver_outputs.binaural_hrtf = None
+        config.receiver_outputs.bte_rear_hartf = None
+        config.receiver_outputs.bte_front_hartf = None
+        config.hearing_degradation.enabled = False
+        config.hearing_degradation.input_targets = []
+    validate_config(config)
+    scene = sampler.sample_static_scene(config, None, scene_index=0)
+    manifest = build_static_manifest(config, scene, 0, workspace / "manifest.json")
+    assert [hrtf["hrtf_id"] for hrtf in manifest["receiver"]["hrtfs"]] == (
+        [] if array_only else ["binaural_hrtf", "bte_rear_hartf", "bte_front_hartf"]
+    )
+    array = manifest["receiver"]["circular_array"]
+    assert array["num_microphones"] == 8
+    assert array["center_m"] == manifest["receiver"]["position_m"]
+    assert array["yaw_deg"] == manifest["receiver"]["orientation_deg"]["yaw"]
+    assert [mic["channel_index"] for mic in array["microphones"]] == list(range(1, 9))
+    assert "hrtf_path" not in array
+    assert "ir_catalog_path" not in array
+    primary = "circular_array" if array_only else "binaural_hrtf"
+    assert primary in Path(manifest["render"]["output_wav_path"]).name
+    assert json.loads(json.dumps(manifest))["receiver"]["circular_array"] == array
+    planned = render_pipeline._build_planned_variants_from_manifest(config, manifest, workspace / "runtime")
+    types = [variant["variant_paths"]["output_type"] for variant in planned]
+    assert types == (["circular_array"] if array_only else [
+        "binaural_hrtf", "bte_front_hartf", "bte_rear_hartf", "circular_array"
+    ])
+    paths = planned[-1]["variant_paths"]
+    assert paths["receiver_ir_path"] is None
+    assert paths["circular_array"] == array
+    assert len({variant["variant_paths"]["rendered_wav_path"] for variant in planned}) == len(planned)
+    original_receiver = json.loads(json.dumps(manifest["receiver"]))
+    rewrites = {manifest["sources"][0]["source_id"]: (workspace / "prepared.wav").as_posix()}
+    for variant in planned:
+        task = render_pipeline._prepare_render_task(config, variant, workspace / "runtime", rewrites)
+        runtime = json.loads(task["runtime_manifest_path"].read_text(encoding="utf-8"))
+        selected = variant["variant_paths"]["output_type"]
+        assert runtime["render"]["active_output_type"] == selected
+        assert runtime["sources"][0]["audio_path"] == rewrites[manifest["sources"][0]["source_id"]]
+        if selected == "circular_array":
+            assert runtime["receiver"]["hrtfs"] == []
+            assert runtime["receiver"]["circular_array"] == array
+        else:
+            assert "circular_array" not in runtime["receiver"]
+            assert [hrtf["hrtf_id"] for hrtf in runtime["receiver"]["hrtfs"]] == [selected]
+    assert manifest["receiver"] == original_receiver
+
+
+@pytest.mark.parametrize("result_mode", ["completed", "partial", "failed", "invalid_t30"])
+def test_array_only_pipeline_status_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_mode: str) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "array_pipeline")
+    _make_receiver_orientation_compatible(config_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw["receiver_outputs"] = {"circular_array": {
+        "enabled": True, "num_microphones": 8, "radius_m": 0.05,
+    }}
+    raw["hearing_degradation"]["enabled"] = False
+    raw["hearing_degradation"]["input_targets"] = []
+    raw["execution"]["resume_if_possible"] = True
+    raw["execution"]["overwrite_existing"] = True
+    raw["execution"]["num_simulations"] = 1
+    raw["execution"]["save_render_metadata"] = True
+    raw["render"]["sample_rate_hz"] = 44100
+    distribution = raw["room_sampling"]["reverberation"]["distribution"]
+    distribution["bin_width_s"] = distribution["range_s"]["max"] - distribution["range_s"]["min"]
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    calls = []
+
+    def render_array(path: Path, **kwargs) -> None:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        calls.append(manifest)
+        assert manifest["receiver"]["hrtfs"] == []
+        assert manifest["render"]["active_output_type"] == "circular_array"
+        if result_mode == "failed":
+            raise RuntimeError("array backend failed")
+        wav_path = Path(manifest["render"]["output_wav_path"])
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(2 if result_mode == "partial" else 8)
+            audio.setsampwidth(2)
+            audio.setframerate(44100)
+            audio.writeframes(bytes(32*audio.getnchannels()*2))
+        metadata = {
+            "scene_id": manifest["scene_id"], "output_type": "circular_array",
+            "receiver": {"coordinate_frame": "public_xyz_y_up", "circular_array": manifest["receiver"]["circular_array"]},
+            "summary": {"room": {"reverberation": {"t30_s": [0 if result_mode == "invalid_t30" else 0.4]*10}}},
+        }
+        Path(manifest["render"]["output_metadata_path"]).write_text(json.dumps(metadata), encoding="utf-8")
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render_array)
+    if result_mode == "failed":
+        with pytest.raises(RenderStaticRunError):
+            render_static_scenes(config_path)
+        assert len(calls) == 1
+        return
+    manifests, summary = render_static_scenes(config_path)
+    config = load_config(config_path)
+    index_path = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)["render_index_path"]
+    records = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(records) == 1
+    index = records[0]
+    if result_mode == "invalid_t30":
+        assert not manifests
+        assert len(calls) > 1
+        assert index["status"] != "completed"
+    elif result_mode == "partial":
+        assert index["status"] == "partial"
+        assert "array_wav_channel_count_mismatch" in index["validation"]["issues"]
+    else:
+        assert index["status"] == "completed"
+        assert len(calls) == 1
+        render_static_scenes(config_path)
+        assert len(calls) == 1
+
+
+def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = _build_workspace(tmp_path)
+    (workspace / "assets/hrtf/subject02.daff").write_text("dummy", encoding="utf-8")
+    (workspace / "hearing_profiles.yaml").write_text(
+        "profiles:\n  - hearing_profile_id: mild\n    ears:\n      left:\n        loss_db_by_band: {250: 10}\n      right:\n        loss_db_by_band: {250: 10}\n", encoding="utf-8"
+    )
+    path = _write_config(workspace, "array_mixed_handoff")
+    _make_receiver_orientation_compatible(path)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw["receiver_outputs"]["binaural_hrtf"]["num_hrtfs"] = 2
+    raw["receiver_outputs"]["circular_array"] = {"enabled": True, "num_microphones": 8, "radius_m": 0.05}
+    raw["execution"].update(num_simulations=1, save_render_metadata=True)
+    raw["render"]["sample_rate_hz"] = 44100
+    raw["hearing_degradation"].update(enabled=True, input_targets=["binaural_hrtf"])
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    rendered = []
+
+    def render_mixed(manifest_path: Path, **kwargs) -> None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        output_type = manifest["render"]["active_output_type"]
+        rendered.append(output_type)
+        wav_path = Path(manifest["render"]["output_wav_path"])
+        wav_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(wav_path), "wb") as audio:
+            audio.setnchannels(8 if output_type == "circular_array" else 2)
+            audio.setsampwidth(2)
+            audio.setframerate(44100)
+            audio.writeframes(bytes(64*audio.getnchannels()))
+        payload = {"scene_id": manifest["scene_id"], "output_type": output_type,
+                   "summary": {"room": {"reverberation": {"t30_s": [0.4]*10}}}}
+        if output_type == "circular_array":
+            payload["receiver"] = {"coordinate_frame": "public_xyz_y_up", "circular_array": manifest["receiver"]["circular_array"]}
+        Path(manifest["render"]["output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render_mixed)
+    render_static_scenes(path)
+    config = load_config(path)
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    jobs = [json.loads(line) for line in layout["clarity_jobs_path"].read_text(encoding="utf-8").splitlines()]
+    assert set(rendered) == {"binaural_hrtf__1", "binaural_hrtf__2", "bte_rear_hartf", "bte_front_hartf", "circular_array"}
+    assert len(jobs) == 2
+    assert {job["output_type"] for job in jobs} == {"binaural_hrtf__1", "binaural_hrtf__2"}
+    for job in jobs:
+        assert Path(job["expected_output_wav_path"]).name == Path(job["input_wav_path"]).name
+        assert Path(job["output_dir"]).parts[-2:] == (job["output_type"], "mild")
 
 
 def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_path: Path) -> None:

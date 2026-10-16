@@ -29,7 +29,7 @@ def load_config(config_path: str | Path) -> AppConfig:
 def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
     config.raven.base_rpf_file = _resolve(config.raven.base_rpf_file, base_dir)
 
-    for output in _receiver_outputs(config):
+    for output in _catalog_receiver_outputs(config):
         output.ir_catalog_path = _resolve(output.ir_catalog_path, base_dir)
 
     for source_type in config.source_sampling.source_types:
@@ -70,7 +70,7 @@ def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
     return config
 
 
-def _receiver_outputs(config: AppConfig):
+def _catalog_receiver_outputs(config: AppConfig):
     return [
         output
         for output in [

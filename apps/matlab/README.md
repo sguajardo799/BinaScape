@@ -66,6 +66,13 @@ run_raven_static_render('example/scene_static_0001.json')
 Before running directly, review the scene manifest paths for source WAV files,
 HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 
+Los catálogos DAFF deben usar una versión compatible con el RAVEN instalado;
+el nombre/extensión por sí solo no garantiza compatibilidad. El adaptador pasa
+las rutas IR como `char` y comprueba que el RPF conserva el archivo seleccionado,
+evitando una sustitución silenciosa por el HRTF predeterminado al serializar.
+Los archivos v1.7 rechazados por el backend deben reemplazarse o convertirse
+fuera de esta ruta; no se convierten automáticamente ni se omiten errores.
+
 ## Important Files
 
 - `run_raven_static_render.m`: entrypoint for supported static rendering.
@@ -86,8 +93,8 @@ HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 
 The current static manifest contract includes these fields and behaviors:
 
-- `receiver.hrtfs` is the canonical receiver format. It is a non-empty list of
-  HRTF variants with `hrtf_id` and `hrtf_path`.
+- `receiver.hrtfs` describes catalog-backed variants with `hrtf_id` and
+  `hrtf_path`. It may be empty when `receiver.circular_array` is present.
 - The legacy singular `receiver.hrtf` field is accepted and normalized as a
   one-variant batch.
 - `render.seed` is the preferred seed location. A legacy top-level `seed` is
@@ -122,6 +129,78 @@ The current static manifest contract includes these fields and behaviors:
   bands are finite and positive; otherwise it is empty and status is
   `unavailable`. This ten-band measured mean differs from the seven-band
   Sabine sampling estimate over 125–8000 Hz.
+
+## Render de arrays circulares estáticos
+
+El entrypoint MATLAB soporta `receiver.circular_array` además de HRTF/HARTF.
+El orquestador genera variantes de array y comprueba su indexación/procedencia.
+El descriptor contiene `output_type: circular_array`, `num_microphones` entero
+>=2, `radius_m` finito positivo, `center_m`, `yaw_deg` y `microphones` ordenados.
+Cada micrófono lleva `microphone_index` (desde cero), `channel_index` (desde uno)
+y `position_m`. El centro/yaw debe coincidir con la pose del receptor.
+
+La geometría permanece horizontal en XZ (Y vertical), sin cabeza ni carcasa.
+Con yaw cero, el canal 1 está en +X; los siguientes avanzan hacia +Z. Pitch/roll
+no inclinan el array. Las posiciones públicas se reflejan una vez en Z al
+construir los receptores RAVEN. El runtime puede seleccionar exclusivamente
+un descriptor mediante `render.active_output_type`; sin selección se procesan
+todas las variantes declaradas. Un array no requiere `active_hrtf` ni un
+catálogo IR propio.
+
+El WAV contiene N canales sincronizados a 44100 Hz. Cada fuente multicanal se
+reduce a mono por media aritmética antes de normalización/gain; HRTF/HARTF
+conserva su tratamiento anterior. No se alinean inicios ni se normalizan
+canales de micrófonos individualmente. El sidecar identifica `output_type`,
+incluye geometría/canales en `receiver.circular_array`, marca coordenadas como
+`public_xyz_y_up` y conserva T30 y política de downmix en los resúmenes.
+
+El ruido posterior a la mezcla admite capas mono replicadas o exactamente
+N canales. Un WAV de ruido estéreo no se convierte automáticamente a ocho
+canales: se rechaza. La replicación mono es ruido correlacionado, no un campo
+difuso espacial. El array nunca es entrada Clarity, incluso con N=2.
+El render dinámico sigue sin soporte.
+
+Tras generar un manifiesto completo de array con rutas válidas, se usa el
+mismo entrypoint estático:
+
+```matlab
+run_raven_static_render('ruta/al/scene_array.json');
+```
+
+Los ejemplos de configuración están en
+`configs/experiments/circular_array_only.yml` y `circular_array_mixed.yml`;
+los extractos de receptor y el orden de canales se documentan en
+`apps/orchestrator/examples/circular_array_scenes.md`.
+
+## Verificación del contrato RIR para arrays
+
+La verificación del contrato RIR se mantiene separada de los tests de
+orquestación/indexación y requiere un backend real.
+La adaptación seleccionada usa receptores en lote y
+`rpf.getImpulseResponseItaAudio()`: devuelve una matriz `itaAudio`
+`[n_fuentes, n_micrófonos]`, con una respuesta mono a 44100 Hz por par.
+El orden de columnas corresponde al orden de `setReceiverPositions` y
+`setReceiverNames`. No se deben alinear ni normalizar los canales por separado.
+
+La verificación real con dos fuentes asimétricas y cuatro micrófonos comprueba
+orden, tiempo absoluto de llegada y diferencias de nivel del sonido directo:
+
+```matlab
+addpath('tests');
+verify_raven_array_response_contract( ...
+    'C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf', ...
+    fullfile(tempdir, 'binascape_array_contract'));
+```
+
+El fixture copia el RPF base, conserva resultados y escribe
+`array_contract_report.json` en el directorio indicado; no modifica el RPF base.
+Requiere un modelo shoebox de 4.2 x 3.6 x 2.8 m con materiales y el backend
+RAVEN/ITA instalado, no solamente mocks. No es un test unitario automático.
+En esta versión, `getT30()` devuelve una celda por receptor;
+`getT30(true, false)` devuelve el promedio entre receptores en diez bandas,
+sin promediar frecuencias. El RPF base puede cargar su HRIR heredado incluso
+con BRIR desactivado; las respuestas recuperadas por este fixture son RIR mono,
+no BRIR ni canales filtrados por cabeza.
 
 ## Outputs Per HRTF
 

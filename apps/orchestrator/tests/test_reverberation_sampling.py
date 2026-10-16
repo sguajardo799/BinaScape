@@ -82,7 +82,9 @@ def test_batch_summary_status(observed: list[int], failed_count: int, expected_s
 
 def test_catalog_v1_is_valid_smooth_and_snapshot_stable() -> None:
     validate_catalog(1)
-    assert hashlib.sha256(CATALOG_PATH.read_bytes()).hexdigest() == (
+    # Git may check out CRLF on Windows; preserve the snapshot's LF byte format.
+    snapshot_bytes = CATALOG_PATH.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(snapshot_bytes).hexdigest() == (
         "193de39944beee77b33b4735bcd475c145b3835d8988c6bc1cd43cf782be3120"
     )
     assert preset_ids() == ("broadband_light", "broadband_medium", "broadband_strong")

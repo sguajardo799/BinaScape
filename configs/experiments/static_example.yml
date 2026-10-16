@@ -3,7 +3,7 @@ experiment:
   description: >
     Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
     dos HRTF binaurales por escena, dos fuentes y perfil symmetric_moderate_loss.
-    HARTF queda pendiente porque sus catalogos locales estan vacios.
+    HARTF queda deshabilitado por defecto en este ejemplo.
   scene_type: static
   random_seed: 42
 
@@ -60,14 +60,14 @@ receiver_outputs:
     enabled: true
     ir_catalog_path: ../../assets/hrtf/
     file_pattern: "*.daff"
-    num_hrtfs: 2
+    num_hrtfs: 1
     output_subdir: binaural_hrtf
     num_channels: 2
     required: true
 
-  # HARTF no habilitado: assets/hartf/rear y assets/hartf/front estan vacios.
+  # HARTF deshabilitado por defecto: requiere DAFF compatibles en assets/hartf/.
   # Para cubrir tres salidas, aportar DAFF HARTF reales, configurar ambas
-  # salidas con esos catalogos y agregarlas a hearing_degradation.input_targets.
+  # salidas con esos catalogos. Clarity solo admite binaural_hrtf como target.
 
 room_sampling:
   reverberation: &uniform_rt30

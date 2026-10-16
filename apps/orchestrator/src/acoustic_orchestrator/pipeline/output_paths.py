@@ -1,8 +1,8 @@
-from pathlib import Path, PurePath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from string import Formatter
 from typing import TypedDict
 
-from acoustic_orchestrator.config.models import AppConfig, OutputsConfig, ReceiverOutputConfig
+from acoustic_orchestrator.config.models import AppConfig, CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 
 
 SUPPORTED_NAMING_FIELDS = {"scene_id", "output_type"}
@@ -58,7 +58,7 @@ def resolve_output_paths(
     scene_id: str,
     output_type: str,
     outputs: OutputsConfig,
-    receiver_output: ReceiverOutputConfig,
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
     experiment_id: str,
 ) -> ResolvedOutputPaths:
     variant_id = f"{scene_id}__{output_type}"
@@ -78,7 +78,7 @@ def resolve_output_paths(
     }
 
 
-def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverOutputConfig:
+def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverOutputConfig | CircularArrayOutputConfig:
     if "__" in output_type:
         base_type, suffix = output_type.rsplit("__", 1)
         if suffix.isdecimal():
@@ -87,6 +87,7 @@ def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverO
         "binaural_hrtf": config.receiver_outputs.binaural_hrtf,
         "bte_rear_hartf": config.receiver_outputs.bte_rear_hartf,
         "bte_front_hartf": config.receiver_outputs.bte_front_hartf,
+        "circular_array": config.receiver_outputs.circular_array,
     }.get(output_type)
     if receiver_output is None:
         raise KeyError(f"receiver_output desconocido: {output_type}")
@@ -129,8 +130,7 @@ def is_safe_output_subdir(output_subdir: str) -> bool:
     if output_subdir.strip() == "":
         return False
 
-    path = PurePath(output_subdir)
-    if path.is_absolute():
-        return False
-
-    return all(part not in {"", ".", ".."} for part in path.parts)
+    for path in (PureWindowsPath(output_subdir), PurePosixPath(output_subdir)):
+        if path.anchor or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            return False
+    return True

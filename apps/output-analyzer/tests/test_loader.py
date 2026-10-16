@@ -20,6 +20,34 @@ def mutate(path, update):
     path.write_text(json.dumps(data))
 
 
+def test_array_sidecar_and_index_without_fake_hrtf(sample_run):
+    scene, render = documents(sample_run)
+    descriptor = {"output_type": "circular_array", "num_microphones": 8, "radius_m": 0.05,
+                  "center_m": [4,1.5,3], "yaw_deg": 30, "microphones": []}
+    mutate(scene, lambda doc: doc["receiver"].update(circular_array=descriptor))
+    array_dir = sample_run / "output_audio/render/circular_array"
+    array_dir.mkdir()
+    doc = json.loads(render.read_text())
+    doc.pop("hrtf_id")
+    doc.pop("hrtf_path")
+    doc["output_type"] = "circular_array"
+    doc["receiver"] = {"coordinate_frame": "public_xyz_y_up", "circular_array": descriptor}
+    (array_dir / "scene_static_0001__circular_array__render.json").write_text(json.dumps(doc))
+    index_dir = sample_run / "metadata/indexes"
+    index_dir.mkdir()
+    records = [{"scene_id": "scene_static_0001", "variant_id": f"scene_static_0001__{kind}",
+                "output_type": kind, "receiver_ir_path": None if kind == "circular_array" else "a.daff",
+                "metadata_snapshot": {"scene_id": "scene_static_0001", "output_type": kind}}
+               for kind in ["binaural_hrtf", "circular_array"]]
+    (index_dir / "render_index.jsonl").write_text("\n".join(json.dumps(row) for row in records))
+    data = load_run(sample_run)
+    assert len(data.render_scenes) == 2
+    array = next(row for row in data.render_scenes if row["output_type"] == "circular_array")
+    assert array["hrtf_id"] is None
+    assert array["employed_hrtf"] is None
+    assert not any(issue["category"] in {"missing_render", "index_mismatch"} for issue in data.incidents)
+
+
 def test_current_contract_and_zero_values(sample_run):
     data = load_run(sample_run)
     assert len(data.scenes) == 1

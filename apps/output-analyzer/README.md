@@ -29,6 +29,11 @@ The default destination is `<run-dir>/analysis`. The root must be accessible and
 
 Only metadata files are opened. WAV contents and referenced audio, material and HRTF assets are never opened. A metadata-only copy of a run is sufficient. Missing optional indexes do not imply zero failures or complete coverage. Expected totals are available only when supplied by authoritative configuration/indexes.
 
+Render identity accepts `output_type` with legacy `hrtf_id` fallback. Circular-array
+sidecars and nullable receiver IR index paths are supported without inventing an
+HRTF identity: array rows use `output_type: circular_array`, with HRTF fields empty.
+This is metadata compatibility, not microphone-level analysis or beamforming.
+
 ## Report and geometry
 
 `report.html` is self-contained: all charts are inline SVG and no network or sibling images are required. Separate SVG files remain available under `images/`.

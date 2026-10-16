@@ -91,6 +91,40 @@ function testBatchOnlyListsOtherVariants(testCase)
     verifyFalse(testCase, isfield(meta.batch, 'effective_seed'));
 end
 
+function testArrayExportHasPublicProvenanceWithoutFakeHRTF(testCase)
+    cfg = struct('schema_version', '3.0', 'scene_id', 'scene', 'job_id', 'job', 'scene_type', 'static');
+    microphones = repmat(struct('microphone_index', 0, 'channel_index', 0, 'position_m', []), 1, 8);
+    for k = 1:8
+        microphones(k) = struct('microphone_index', k-1, 'channel_index', k, ...
+            'position_m', [2+0.05*cosd(45*(k-1)),1.5,2+0.05*sind(45*(k-1))]);
+    end
+    array = struct('num_microphones', 8, 'radius_m', 0.05, 'center_m', [2 1.5 2], ...
+        'yaw_deg', 0, 'microphones', microphones);
+    wav_path = [tempname '.wav'];
+    metadata_path = [tempname '.json'];
+    testCase.addTeardown(@() delete_if_exists(wav_path));
+    testCase.addTeardown(@() delete_if_exists(metadata_path));
+    result = struct('fs', 44100, 'audio', 0.1*ones(32,8), 'hrtf_id', '', 'hrtf_path', '', ...
+        'output', struct('output_type', 'circular_array', 'wav_path', wav_path, ...
+            'metadata_path', metadata_path, 'project_name', 'array_project'), ...
+        'summary', struct('output_num_channels', 8, 'receiver', struct('circular_array', array), ...
+            'sources', struct('original_num_channels', 2, 'downmix_policy', 'arithmetic_mean'), ...
+            'room', struct('reverberation', struct('t30_s', ones(1,10)))));
+    write_output_wav(result.audio, result.fs, wav_path);
+    export_render_metadata(cfg, result, metadata_path);
+    meta = jsondecode(fileread(metadata_path));
+    info = audioinfo(wav_path);
+    verifyEqual(testCase, info.NumChannels, 8);
+    verifyEqual(testCase, info.SampleRate, 44100);
+    verifyEqual(testCase, meta.output_type, 'circular_array');
+    verifyFalse(testCase, isfield(meta, 'hrtf_id'));
+    verifyFalse(testCase, isfield(meta, 'hrtf_path'));
+    verifyEqual(testCase, meta.receiver.coordinate_frame, 'public_xyz_y_up');
+    verifyEqual(testCase, [meta.receiver.circular_array.microphones.channel_index], 1:8);
+    verifyEqual(testCase, meta.summary.sources.downmix_policy, 'arithmetic_mean');
+    verifyEqual(testCase, numel(meta.summary.room.reverberation.t30_s), 10);
+end
+
 function delete_if_exists(path_value)
     if isfile(path_value)
         delete(path_value);

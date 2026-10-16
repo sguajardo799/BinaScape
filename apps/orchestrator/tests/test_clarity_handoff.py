@@ -1,10 +1,24 @@
 import json
 from pathlib import Path
+import pytest
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.clarity_handoff import build_clarity_job_record, get_clarity_job_issues, prepare_clarity_handoff
 from acoustic_orchestrator.pipeline.output_index import load_clarity_index
 from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
+
+
+@pytest.mark.parametrize("output_type", ["circular_array", "bte_rear_hartf", "bte_front_hartf", "binaural_hrtf__1"])
+def test_runtime_eligibility_independent_of_config_targets(tmp_path: Path, output_type: str) -> None:
+    config = load_config(_write_config(tmp_path))
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    variant = _completed_variant_record(layout)
+    variant["output_type"] = output_type
+    variant["variant_id"] = f"{variant['scene_id']}__{output_type}"
+    config.hearing_degradation.input_targets = [output_type, "binaural_hrtf"]
+    job = build_clarity_job_record(config=config, layout=layout, variant_record=variant, hearing_profile_id="mild_loss")
+    issues = get_clarity_job_issues(config=config, variant_record=variant, job=job)
+    assert any(issue.startswith("output_type_ineligible") for issue in issues) == (output_type != "binaural_hrtf__1")
 
 
 def test_build_clarity_job_record_uses_default_reserved_output_layout(tmp_path: Path) -> None:

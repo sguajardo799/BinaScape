@@ -1,14 +1,141 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.models import (
+    CircularArrayOutputConfig,
     ReceiverRandomYawOrientationStrategy,
     ReceiverRandomYawPitchOrientationStrategy,
 )
 from acoustic_orchestrator.config.validator import load_hearing_profile_catalog, validate_config
+
+
+def test_validate_config_accepts_array_only_without_catalog(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.binaural_hrtf = None
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=8, radius_m=0.05
+    )
+    config.hearing_degradation.enabled = False
+    config.hearing_degradation.input_targets = []
+    validate_config(config)
+
+
+def test_validate_config_accepts_mixed_receiver_outputs(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=8, radius_m=0.05
+    )
+    config.receiver_outputs.bte_rear_hartf = config.receiver_outputs.binaural_hrtf.model_copy(
+        update={"output_subdir": "bte_rear_hartf"}
+    )
+    validate_config(config)
+
+
+@pytest.mark.parametrize("subdir", ["", "../escape", "/absolute", "C:/absolute"])
+def test_validate_config_rejects_unsafe_array_subdir(tmp_path: Path, subdir: str) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=8, radius_m=0.05, output_subdir=subdir
+    )
+    with pytest.raises(ValueError, match=r"circular_array\.output_subdir"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_required_disabled_array(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(required=True)
+    with pytest.raises(ValueError, match="circular_array no puede ser required=true si enabled=false"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_all_receiver_outputs_disabled(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.binaural_hrtf = None
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig()
+    config.hearing_degradation.enabled = False
+    config.hearing_degradation.input_targets = []
+    with pytest.raises(ValueError, match="al menos un receiver_output habilitado"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("target", ["bte_rear_hartf", "bte_front_hartf", "circular_array"])
+def test_validate_config_rejects_ineligible_clarity_targets(tmp_path: Path, target: str, enabled: bool) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=2, radius_m=0.05
+    )
+    config.hearing_degradation.enabled = enabled
+    config.hearing_degradation.input_targets = [target]
+    with pytest.raises(ValueError, match=f"target no elegible: {target}"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("target", ["unknown", "binaural_hrtf__1"])
+def test_validate_config_rejects_unknown_or_variant_clarity_target(tmp_path: Path, target: str) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.hearing_degradation.input_targets = [target]
+    with pytest.raises(ValueError, match=f"target desconocido: {target}"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("absent", [True, False])
+def test_enabled_clarity_requires_available_hrtf(tmp_path: Path, absent: bool) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.receiver_outputs.circular_array = CircularArrayOutputConfig(
+        enabled=True, num_microphones=8, radius_m=0.05
+    )
+    if absent:
+        config.receiver_outputs.binaural_hrtf = None
+    else:
+        config.receiver_outputs.binaural_hrtf.enabled = False
+        config.receiver_outputs.binaural_hrtf.required = False
+    with pytest.raises(ValueError, match="binaural_hrtf"):
+        validate_config(config)
+
+
+def test_enabled_clarity_rejects_empty_targets(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    config.hearing_degradation.input_targets = []
+    with pytest.raises(ValueError, match="input_targets debe incluir al menos un target"):
+        validate_config(config)
+
+
+def test_documented_array_config_validates_with_fixture_paths(tmp_path: Path) -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Circular Array Configuration", 1)[1]
+    excerpt = yaml.safe_load(section.split("```yaml\n", 1)[1].split("```", 1)[0])
+    config_path = _write_config(tmp_path)
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    excerpt["hearing_degradation"]["hearing_profiles_path"] = raw_config["hearing_degradation"]["hearing_profiles_path"]
+    raw_config.update(excerpt)
+    config_path.write_text(yaml.safe_dump(raw_config), encoding="utf-8")
+    config = load_config(config_path)
+    validate_config(config)
+    assert config.receiver_outputs.binaural_hrtf is None
+    assert config.receiver_outputs.circular_array.num_channels == 8
+
+
+@pytest.mark.parametrize("name", ["circular_array_only", "circular_array_mixed"])
+def test_array_experiment_examples_validate_with_fixture_assets(tmp_path: Path, name: str) -> None:
+    fixture_config = load_config(_write_config(tmp_path))
+    repository = Path(__file__).resolve().parents[3]
+    config = load_config(repository / "configs" / "experiments" / f"{name}.yml")
+    config.raven = fixture_config.raven
+    config.room_sampling.materials = fixture_config.room_sampling.materials
+    config.hearing_degradation.hearing_profiles_path = fixture_config.hearing_degradation.hearing_profiles_path
+    config.hearing_degradation.runner.backend_project_path = None
+    for source in config.source_sampling.source_types:
+        source.audio_dir = fixture_config.source_sampling.source_types[0].audio_dir
+    if config.receiver_outputs.binaural_hrtf is not None:
+        config.receiver_outputs.binaural_hrtf.ir_catalog_path = fixture_config.receiver_outputs.binaural_hrtf.ir_catalog_path
+    validate_config(config)
+    assert config.receiver_outputs.circular_array.num_channels == 8
+    assert (config.receiver_outputs.binaural_hrtf is None) == (name == "circular_array_only")
 
 
 def test_load_hearing_profile_catalog_accepts_multiple_valid_profiles(tmp_path: Path) -> None:

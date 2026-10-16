@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 
 from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_output_paths
@@ -7,7 +8,8 @@ from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_conf
 def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: int, manifest_path: Path) -> dict:
     sequence = scene_index + 1
     scene_id = f"{config.outputs.naming.scene_id_prefix}_{sequence:04d}"
-    primary_hrtf_id = sampled_scene["receiver"]["hrtfs"][0]["hrtf_id"]
+    receiver_hrtfs = sampled_scene["receiver"]["hrtfs"]
+    primary_hrtf_id = receiver_hrtfs[0]["hrtf_id"] if receiver_hrtfs else "circular_array"
     primary_output = get_receiver_output_config(config, primary_hrtf_id)
     resolved_paths = resolve_output_paths(
         scene_id,
@@ -67,6 +69,10 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
             "receiver_id": sampled_scene["receiver"]["receiver_id"],
             "position_m": sampled_scene["receiver"]["position_m"],
             "orientation_deg": sampled_scene["receiver"]["orientation_deg"],
+            **(
+                {"circular_array": deepcopy(sampled_scene["receiver"]["circular_array"])}
+                if "circular_array" in sampled_scene["receiver"] else {}
+            ),
             "hrtfs": [
                 {
                     "hrtf_id": hrtf["hrtf_id"],

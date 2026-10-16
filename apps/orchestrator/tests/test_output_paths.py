@@ -1,12 +1,29 @@
 from pathlib import Path
 
+import pytest
+
 from acoustic_orchestrator.config.models import NamingConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import (
     build_clarity_job_id,
+    is_safe_output_subdir,
     resolve_artifact_layout,
     resolve_clarity_job_paths,
     resolve_output_paths,
 )
+
+
+@pytest.mark.parametrize(
+    "subdir", ["", ".", "..", "../escape", "nested/../escape", r"nested\..\escape",
+               "/absolute", r"\absolute", "C:/absolute", r"C:\absolute", "C:relative",
+               r"\\server\share\output"]
+)
+def test_output_subdir_rejects_rooted_or_unsafe_paths(subdir: str) -> None:
+    assert not is_safe_output_subdir(subdir)
+
+
+@pytest.mark.parametrize("subdir", ["circular_array", "receivers/array", r"receivers\array"])
+def test_output_subdir_accepts_relative_paths(subdir: str) -> None:
+    assert is_safe_output_subdir(subdir)
 
 
 def test_resolve_output_paths_applies_templates_and_subdirectories(tmp_path: Path) -> None:

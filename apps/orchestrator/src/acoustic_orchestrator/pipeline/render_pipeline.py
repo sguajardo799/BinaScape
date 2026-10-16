@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from acoustic_orchestrator.config.models import AppConfig, ReceiverOutputConfig
+from acoustic_orchestrator.config.models import AppConfig, CircularArrayOutputConfig, ReceiverOutputConfig
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.validator import validate_config
 from acoustic_orchestrator.experiment.manifest_writer import write_manifest
@@ -20,7 +20,8 @@ from acoustic_orchestrator.pipeline.matlab_runner import (
     RenderVariantPaths,
     build_render_variant_paths,
     render_manifest_with_matlab,
-    write_single_hrtf_render_manifest,
+    write_single_receiver_render_manifest,
+    receiver_variants,
 )
 from acoustic_orchestrator.pipeline.output_index import (
     build_planned_variant_record,
@@ -128,6 +129,15 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
                 )
                 prepared_source_paths_by_scene[scene_manifest["scene_id"]] = prepared_source_paths
 
+            # Check array provenance before overwriting runtime manifests:
+            # a stale WAV must not inherit the newly planned geometry.
+            array_resume_allowed = {
+                variant["variant_paths"]["variant_id"]: should_resume_variant(
+                    existing_records, variant["variant_paths"], metadata_required=metadata_required
+                )
+                for variant in planned_variants
+                if variant["variant_paths"]["output_type"] == "circular_array"
+            }
             prepared_tasks = [
                 _prepare_render_task(
                     config,
@@ -139,7 +149,9 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
             ]
             canonical_task = prepared_tasks[0]
             canonical_paths = canonical_task["variant_paths"]
-            resumed = config.execution.resume_if_possible and should_resume_variant(
+            resumed = config.execution.resume_if_possible and array_resume_allowed.get(
+                canonical_paths["variant_id"], True
+            ) and should_resume_variant(
                 existing_records,
                 canonical_paths,
                 metadata_required=True,
@@ -178,7 +190,9 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
                 accepted_manifest_paths.append(manifest_path)
                 for task in prepared_tasks[1:]:
                     variant_paths = task["variant_paths"]
-                    if config.execution.resume_if_possible and should_resume_variant(
+                    if config.execution.resume_if_possible and array_resume_allowed.get(
+                        variant_paths["variant_id"], True
+                    ) and should_resume_variant(
                         existing_records,
                         variant_paths,
                         metadata_required=metadata_required,
@@ -201,7 +215,7 @@ def render_static_scenes(config_path: str | Path, matlab_executable: str = "matl
                 {
                     "scene_index": scene_index,
                     "scene_id": scene_manifest["scene_id"],
-                    "hrtf_id": planned_variants[0]["hrtf"]["hrtf_id"],
+                    "output_type": planned_variants[0]["variant_paths"]["output_type"],
                     "render_status": canonical_record["status"],
                     "sampling_attempt": scene_manifest["reverberation_sampling"]["attempts"],
                 }
@@ -312,8 +326,8 @@ def run_clarity_handoff(config_path: str | Path, *, submit: bool | None = None) 
 
 class PlannedVariant(TypedDict):
     scene_manifest: dict
-    hrtf: dict
-    receiver_output: ReceiverOutputConfig
+    receiver_variant: dict
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig
     variant_paths: RenderVariantPaths
 
 
@@ -336,12 +350,13 @@ def _build_planned_variants_from_manifest(
     runtime_manifest_dir: Path,
 ) -> list[PlannedVariant]:
     planned_variants: list[PlannedVariant] = []
-    for hrtf in sorted(scene_manifest["receiver"]["hrtfs"], key=lambda item: item["hrtf_id"]):
-        receiver_output = get_receiver_output_config(config, hrtf["hrtf_id"])
+    for hrtf in receiver_variants(scene_manifest):
+        output_type = "circular_array" if hrtf.get("output_type") == "circular_array" else hrtf["hrtf_id"]
+        receiver_output = get_receiver_output_config(config, output_type)
         planned_variants.append(
             {
                 "scene_manifest": scene_manifest,
-                "hrtf": hrtf,
+                "receiver_variant": hrtf,
                 "receiver_output": receiver_output,
                 "variant_paths": build_render_variant_paths(
                     scene_manifest=scene_manifest,
@@ -361,9 +376,9 @@ def _prepare_render_task(
     runtime_manifest_dir: Path,
     prepared_source_paths: dict[str, str],
 ) -> RenderTask:
-    runtime_manifest_path = write_single_hrtf_render_manifest(
+    runtime_manifest_path = write_single_receiver_render_manifest(
         planned_variant["scene_manifest"],
-        planned_variant["hrtf"],
+        planned_variant["receiver_variant"],
         runtime_manifest_dir,
         config.outputs,
         planned_variant["receiver_output"],
@@ -671,22 +686,7 @@ def _build_planned_variants(config: AppConfig, manifest_paths: list[Path], runti
 
     for manifest_path in manifest_paths:
         scene_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for hrtf in sorted(scene_manifest["receiver"]["hrtfs"], key=lambda item: item["hrtf_id"]):
-            receiver_output = get_receiver_output_config(config, hrtf["hrtf_id"])
-            planned_variants.append(
-                {
-                    "scene_manifest": scene_manifest,
-                    "hrtf": hrtf,
-                    "receiver_output": receiver_output,
-                    "variant_paths": build_render_variant_paths(
-                        scene_manifest=scene_manifest,
-                        hrtf=hrtf,
-                        runtime_manifest_dir=runtime_manifest_dir,
-                        outputs=config.outputs,
-                        receiver_output=receiver_output,
-                    ),
-                }
-            )
+        planned_variants.extend(_build_planned_variants_from_manifest(config, scene_manifest, runtime_manifest_dir))
 
     return planned_variants
 

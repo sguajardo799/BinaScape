@@ -1,9 +1,20 @@
 from pathlib import Path
+import json
 
 import pytest
 
 from acoustic_orchestrator.config.models import ClarityRunnerConfig
 from acoustic_orchestrator.pipeline.clarity_runner import build_clarity_command, submit_clarity_manifest
+
+
+@pytest.mark.parametrize("output_type", ["circular_array", "bte_rear_hartf", "bte_front_hartf", "bte_rear_hartf__1"])
+def test_submission_blocks_ineligible_stale_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_type: str) -> None:
+    manifest = tmp_path / "jobs.jsonl"
+    manifest.write_text(json.dumps({"output_type": output_type}), encoding="utf-8")
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_runner.subprocess.run", lambda *a, **k: pytest.fail("must not submit"))
+    result = submit_clarity_manifest(ClarityRunnerConfig(use_uv=False), manifest)
+    assert result["status"] == "blocked"
+    assert "no elegible" in result["message"]
 
 
 def test_build_clarity_command_prefers_uv_project_execution(tmp_path: Path) -> None:

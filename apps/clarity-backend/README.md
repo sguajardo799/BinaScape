@@ -19,6 +19,12 @@ it through files and subprocesses instead of importing backend internals.
 Current integration note: the MSBG path used here expects stereo WAV input at
 44.1 kHz.
 
+The orchestrator permits only binaural HRTF outputs as Clarity targets.
+HARTF and circular-array recordings are render-only, including arrays with two
+microphones. That eligibility policy is enforced upstream during configuration,
+handoff, and submission; it does not change the standalone stereo MSBG algorithm
+or convert microphone-array channels into ears.
+
 ## Install
 
 From this directory:

@@ -1,9 +1,11 @@
 import shutil
+import json
 import subprocess
 from pathlib import Path
 from typing import Literal, TypedDict
 
 from acoustic_orchestrator.config.models import ClarityRunnerConfig
+from acoustic_orchestrator.pipeline.clarity_eligibility import is_clarity_output_eligible
 
 
 SubmissionStatus = Literal["submitted", "blocked"]
@@ -35,6 +37,18 @@ def build_clarity_command(runner: ClarityRunnerConfig, manifest_path: Path) -> l
 
 def submit_clarity_manifest(runner: ClarityRunnerConfig, manifest_path: Path) -> ClaritySubmissionResult:
     blocked_message = _validate_submission_environment(runner)
+    if blocked_message is None:
+        try:
+            for line in manifest_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                job = json.loads(line)
+                output_type = job.get("output_type") if isinstance(job, dict) else None
+                if not isinstance(output_type, str) or not is_clarity_output_eligible(output_type):
+                    blocked_message = f"Clarity rechaza output_type no elegible: {output_type}"
+                    break
+        except (OSError, ValueError) as exc:
+            blocked_message = f"No se pudo validar el manifiesto Clarity: {exc}"
     if blocked_message is not None:
         return {
             "status": "blocked",

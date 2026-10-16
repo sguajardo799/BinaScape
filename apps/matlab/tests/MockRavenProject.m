@@ -13,9 +13,17 @@ classdef MockRavenProject < handle
         source_up_vectors
         directivity_calls
         receiver_hrtf
+        receiver_hrtf_argument_is_char
+        drop_receiver_hrtf = false
         receiver_positions
         receiver_view_vectors
         room_material_names_override
+        receiver_names
+        receiver_up_vectors
+        receiver_states
+        generate_rir
+        generate_brir
+        impulse_responses
     end
 
     methods
@@ -94,7 +102,14 @@ classdef MockRavenProject < handle
         end
 
         function setReceiverHRTF(obj, hrtf_path)
-            obj.receiver_hrtf = char(string(hrtf_path));
+            obj.receiver_hrtf_argument_is_char = ischar(hrtf_path);
+            if ~obj.drop_receiver_hrtf
+                obj.receiver_hrtf = char(string(hrtf_path));
+            end
+        end
+
+        function path = getReceiverHRTF(obj)
+            path = obj.receiver_hrtf;
         end
 
         function setReceiverPositions(obj, receiver_positions)
@@ -103,6 +118,30 @@ classdef MockRavenProject < handle
 
         function setReceiverViewVectors(obj, receiver_view_vectors)
             obj.receiver_view_vectors = receiver_view_vectors;
+        end
+
+        function setReceiverNames(obj, names)
+            obj.receiver_names = names;
+        end
+
+        function setReceiverUpVectors(obj, vectors)
+            obj.receiver_up_vectors = vectors;
+        end
+
+        function setReceiverStates(obj, states)
+            obj.receiver_states = states;
+        end
+
+        function setGenerateRIR(obj, value)
+            obj.generate_rir = value;
+        end
+
+        function setGenerateBRIR(obj, value)
+            obj.generate_brir = value;
+        end
+
+        function responses = getImpulseResponseItaAudio(obj)
+            responses = obj.impulse_responses;
         end
     end
 end
