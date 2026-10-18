@@ -125,6 +125,48 @@ function testArrayExportHasPublicProvenanceWithoutFakeHRTF(testCase)
     verifyEqual(testCase, numel(meta.summary.room.reverberation.t30_s), 10);
 end
 
+function testSourceProvenanceSurvivesContextSummaryAndJsonForAllOutputs(testCase)
+    cfg = struct('schema_version', '3.0', 'scene_id', 'scene', ...
+        'job_id', 'job', 'scene_type', 'static');
+    base = struct('source_id', 'src_grouped', 'audio_path', 'C:/prepared/src__trim_1.wav', ...
+        'event_type', 'speech', 'position_m', [1 2 3], ...
+        'orientation_deg', struct('yaw', 0, 'pitch', 0, 'roll', 0), ...
+        'identity_id', 'ID02', 'audio_relpath', 'ID02/long.wav');
+    flat = base;
+    flat.source_id = 'src_flat';
+    flat.identity_id = '';
+    flat.audio_relpath = 'clip_ID13.wav';
+    legacy = base;
+    legacy.source_id = 'src_legacy';
+    legacy.identity_id = [];
+    legacy.audio_relpath = [];
+    cfg.sources = [base flat legacy];
+    ctx = build_sources_from_config(struct('manifest', cfg, 'rpf', MockRavenProject()));
+    summaries = preallocate_static_source_summaries(3);
+    for i = 1:3
+        summaries(i) = build_static_source_summary(ctx.sources(i), ctx.sourceNames{i}, ...
+            ctx.sourcePositions(i,:), ctx.sourceViewVectors(i,:), ctx.sourceUpVectors(i,:), 0, 1);
+    end
+    outputs = {'binaural_hrtf', 'bte_rear_hartf', 'bte_front_hartf', 'circular_array'};
+    for i = 1:numel(outputs)
+        output_path = [tempname '.json'];
+        testCase.addTeardown(@() delete_if_exists(output_path));
+        result = struct('fs', 44100, 'summary', struct('sources', summaries), ...
+            'output', struct('output_type', outputs{i}, 'wav_path', 'render.wav', ...
+                'metadata_path', output_path, 'project_name', 'project'));
+        export_render_metadata(cfg, result, output_path);
+        meta = jsondecode(fileread(output_path));
+        verifyEqual(testCase, meta.output_type, outputs{i});
+        verifyEqual(testCase, meta.output_wav_path, 'render.wav');
+        verifyEqual(testCase, meta.project_name, 'project');
+        verifyEqual(testCase, meta.output_metadata_path, output_path);
+        verifyEqual(testCase, {meta.summary.sources.source_id}, {'src_grouped', 'src_flat', 'src_legacy'});
+        verifyEqual(testCase, {meta.summary.sources.identity_id}, {'ID02', '', ''});
+        verifyEqual(testCase, {meta.summary.sources.audio_relpath}, {'ID02/long.wav', 'clip_ID13.wav', ''});
+        verifyEqual(testCase, {meta.summary.sources.audio_path}, repmat({base.audio_path}, 1, 3));
+    end
+end
+
 function delete_if_exists(path_value)
     if isfile(path_value)
         delete(path_value);

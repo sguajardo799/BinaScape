@@ -1,0 +1,46 @@
+# Tasks
+
+## 1. Orchestrator: source discovery and directory validation
+
+- [x] 1.1 Add a small shared source-WAV discovery helper and use it from the sampler and config validator; verify root WAVs and immediate ID-folder WAVs are discovered in deterministic native relative-path order, including uppercase extensions, while sidecars and deeper WAVs are ignored.
+- [x] 1.2 Extend `apps/orchestrator/tests/test_validator.py` and `test_sampler_audio.py` for a root with twenty ID folders, mixed flat/grouped inputs, empty folders, sidecar-only roots, missing/not-directory paths, and too-deep-only WAVs; verify validation and pool membership agree and errors identify the configured directory.
+- [x] 1.3 Document the bounded layout and unchanged `audio_dir` syntax in `apps/orchestrator/README.md` and comments in `examples/example_config.yml`; verify examples retain valid existing YAML keys and state that every immediate child folder is treated as an opaque ID, without moving existing assets.
+
+## 2. Orchestrator: provenance and manifest preservation
+
+- [x] 2.1 Derive `identity_id` and forward-slash `audio_relpath` when sampling each original recording, and pass both strings through `experiment/scene_builder.py`; verify manifest-generation tests cover distinct IDs with identical basenames, exact folder names, flat filenames containing IDs, and separate scene-local `source_id` values.
+- [x] 2.2 Add sampling regressions proving same-identity recordings remain eligible together and file reuse occurs only after pool exhaustion; verify unchanged flat-input selections and sampled properties against a pre-change seeded baseline, not only new-run repeatability.
+- [x] 2.3 Extend runtime-audio and receiver-manifest coverage in `test_runtime_audio.py` and `test_generate_manifests.py` for trimmed grouped recordings; verify all enabled receiver variants preserve both provenance fields while only `audio_path` changes and the saved scene manifest remains unmodified.
+- [x] 2.4 Update `examples/example_scene_static.json` and the orchestrator README's source contract with flat and grouped provenance examples, empty-identity semantics, and the `summary.sources` destination; verify the JSON remains valid and examples match generated field names without pointing the main example at nonexistent grouped assets.
+
+## 3. MATLAB: source context and exported metadata
+
+- [x] 3.1 Carry optional provenance strings through `core/build_sources_from_config.m`, defaulting missing fields to empty strings; extend `test_build_sources_from_config.m` and normalization coverage in `test_validate_static_scene_config.m`, and verify grouped, flat, mixed, and legacy records remain accepted without changing schema versions or RAVEN source names.
+- [x] 3.2 Extend `core/build_static_source_summary.m` and `core/preallocate_static_source_summaries.m` together; extend `test_build_static_source_summary.m` to verify exact provenance values, missing-field defaults, one-field-missing cases, and assignment into preallocated arrays without field mismatch.
+- [x] 3.3 Extend `test_export_render_metadata.m` to verify JSON round-trips preserve provenance under `summary.sources` for grouped/flat mixtures and legacy defaults across supported static output types; verify existing `source_id`, runtime `audio_path`, and naming fields remain unchanged.
+- [x] 3.4 Document the additive source fields and original-versus-runtime path distinction in the relevant metadata section of `apps/matlab/README.md`, in Spanish; verify the examples match exported JSON and do not claim dynamic rendering support or identity-based acoustic behavior.
+
+## 4. Cross-component verification
+
+- [x] 4.1 Run the full orchestrator pytest suite from `apps/orchestrator` using its configured development environment; verify source changes introduce no regressions in background-noise discovery, output indexing, receiver variants, or Clarity handoff, and record results.
+- [x] 4.2 Run the affected MATLAB source-construction, validation, summary, and metadata-export test suites using the existing test harness; verify they cover manifest-to-context-to-export propagation and record results or explicit environment blockers.
+- [x] 4.3 Perform a grouped-database static-render smoke test in the configured MATLAB/ITA/RAVEN environment when available; inspect a trimmed source's scene manifest, runtime receiver manifests, and rendered sidecars for matching identity and relative path, and record any unavailable live-render verification as a limitation rather than claiming success.
+- [x] 4.4 Run `openspec validate add-source-identity-traceability --strict` and review implementation against every scenario in `specs/source-identity-traceability/spec.md`; verify identity remains traceability-only and all unverified scenarios are explicitly reported before completion.
+
+## Verification notes
+
+- Task 4.4: strict validation and the scenario review below passed. Task 4.3's live-render verification subsequently passed as documented below; no requested scenario remains unverified. Live HARTF rendering was not repeated (its shared context-to-JSON path is covered by MATLAB tests).
+- Task 4.3: real MATLAB/ITA/RAVEN render succeeded for binaural HRTF and a three-channel circular array. Generated one scene from a temporary `speech/ID02/long.wav` sine recording (0.5 s), prepared a 0.25 s trimmed copy, wrote runtime receiver manifests, invoked the real MATLAB entrypoint, and inspected both sidecars. All stages preserve `identity_id=ID02`, `audio_relpath=ID02/long.wav`, and scene-local `source_id`; only runtime `audio_path` changes. Saved scene JSON remained unchanged. Both WAVs contain nonzero PCM16 audio at 44100 Hz with 11025 frames and the expected 2/3 channels. Evidence retained at `C:/Users/sguaj/AppData/Local/Temp/opencode/source-identity-smoke-718zefvl/`. RAVEN emitted `Resulting filter is not causal` diagnostics for the array but exited successfully and produced the verified outputs; acoustic-quality evaluation is not established by this traceability smoke test.
+
+- Scenario review: twenty-ID discovery is covered by `test_source_pool_accepts_twenty_identity_folders`; bounded mixed discovery and deterministic ordering by `test_source_discovery_is_bounded_and_sorted`; directory-only roots and rejection cases by the seven `test_source_audio_layout_validation_matches_candidates` cases. Identical basenames, exact IDs, flat ID-looking filenames, and scene-local IDs are covered by `test_generated_sources_preserve_identity_and_relative_recording`. Repeated identity, pool exhaustion, and old-seed compatibility are covered by the two sampling regressions in `test_sampler_audio.py`. Trimming and all receiver runtime variants are covered in `test_runtime_audio.py` and the extended render-pipeline test. MATLAB tests cover grouped/flat/legacy records, independent missing-field defaults, preallocated-array assignment, and context-to-JSON export for every static output type. Existing YAML requires no new keys; example source-sampling parsing was verified.
+- Static checks: Ruff passed for every changed Python module/test, and `openspec validate add-source-identity-traceability --strict` passed. Review confirms provenance derivation performs no random draws, file-pool selection is unchanged, and identities do not affect acoustics or output naming.
+
+- Task 4.2: MATLAB R2025b `runtests` for `test_build_sources_from_config`, `test_validate_static_scene_config`, `test_build_static_source_summary`, and `test_export_render_metadata`, with `assertSuccess`: 46 passed. JSON export tests exercise source context -> preallocated summaries -> sidecars for all four supported static output types.
+
+- Task 4.1: full orchestrator suite, `uv run --extra dev pytest -q`: 347 passed (67.79 s), including background noise, output indexing, all receiver variants, and Clarity handoff. `git diff --check` reported no whitespace errors.
+
+- Task 1.3: parsed example YAML equals the committed version (comments only), and its source-sampling section validates against `SourceSamplingConfig`. The complete legacy example has pre-existing obsolete room/scene-validation fields; no unrelated schema migration was performed.
+
+- Tasks 1.1-1.2: `uv run --extra dev pytest tests/test_sampler_audio.py tests/test_validator.py::test_source_audio_layout_validation_matches_candidates -q` from `apps/orchestrator`: 20 passed.
+- Initial broader run: 95 passed, 1 failed because the mixed-array example test expected 8 channels while the committed configuration specifies 3 microphones. The user authorized fixing this mismatch; parameterized the expected count per example, preserving both configurations. Rerun of `test_sampler_audio.py` and `test_validator.py`: 96 passed.
+- Pre-change baseline captured for task 2.2: build the existing test workspace with speech files `['z.wav', 'A.WAV', 'clip_ID13.wav']`, use `_write_config(workspace, 'identity_baseline')` defaults, generate manifests, serialize the loaded manifest list with `json.dumps(payloads, sort_keys=True)`, replace `workspace.as_posix()` with `<workspace>`, and SHA-256 the UTF-8 bytes. Baseline hash: `cd375b2ee710049b4df505af115d2af8d8ed9bb7563454aca8d3f569641880f3`. After implementation, remove only the additive source provenance fields before comparing.

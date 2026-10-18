@@ -290,6 +290,39 @@ channel adaptation, and clipping-guard information.
   seed mechanism for complete BRIR reproducibility. Metadata documents that
   limitation explicitly.
 
+## Trazabilidad de las fuentes en el metadata
+
+El render estático conserva dos campos de texto del manifiesto en cada entrada
+de `summary.sources` del JSON exportado:
+
+- `identity_id`: nombre exacto de la carpeta ID inmediata bajo `audio_dir`.
+  Es una identidad opaca de esa base de datos, no el identificador de instancia
+  `source_id` ni necesariamente una persona.
+- `audio_relpath`: ruta de la grabación original relativa a `audio_dir`, con `/`.
+
+Ejemplo parcial de una entrada después de recortar el audio de entrada:
+
+```json
+{
+  "source_id": "src_0001",
+  "identity_id": "ID02",
+  "audio_relpath": "ID02/long.wav",
+  "audio_path": "C:/run/cropped_audio/scene_static_0001/src_0001__trim_1.wav"
+}
+```
+
+El orquestador deriva la identidad antes del recorte. MATLAB no la reconstruye
+a partir de la ruta temporal. Para un WAV directamente en `audio_dir`, la
+identidad es `""` y la ruta relativa es su nombre de archivo; no se extraen IDs
+del nombre. Los manifiestos anteriores que omiten uno o ambos campos siguen
+aceptándose: cada valor ausente se exporta como `""`.
+
+La extensión es aditiva para las salidas estáticas HRTF, HARTF y array circular
+cuando se guarda metadata. No cambia versiones de esquema, nombres de salida,
+procesamiento acústico ni selección de fuentes. Varias fuentes pueden compartir
+identidad; no hay balanceo ni restricciones de unicidad por ID. Los sidecars de
+Clarity mantienen su enlace al metadata de render, sin duplicar estos campos.
+
 ## Tests
 
 Run MATLAB tests from this directory in an environment with the required

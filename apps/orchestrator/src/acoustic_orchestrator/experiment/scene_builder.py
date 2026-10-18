@@ -97,6 +97,8 @@ def _build_source_manifest(source: dict) -> dict:
         "source_id": source["source_id"],
         "event_type": source["event_type"],
         "audio_path": _absolute_path(source["audio_path"]),
+        "identity_id": source.get("identity_id", ""),
+        "audio_relpath": source.get("audio_relpath", ""),
         "position_m": source["position_m"],
         "orientation_deg": source["orientation_deg"],
         "gain_db": source["gain_db"],

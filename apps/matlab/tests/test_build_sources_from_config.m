@@ -32,6 +32,24 @@ function testKeepsExistingManifestsWithoutDirectivity(testCase)
     verifyEqual(testCase, ctx.sourceDirectivityPaths, {''});
     verifyEmpty(testCase, ctx.rpf.directivity_calls);
     verifyEqual(testCase, ctx.sources.directivity_path, '');
+    verifyEqual(testCase, ctx.sources.identity_id, '');
+    verifyEqual(testCase, ctx.sources.audio_relpath, '');
+end
+
+function testPreservesIdentityForGroupedAndFlatSources(testCase)
+    grouped = make_source_cfg('src_01', '', [1 2 3], 0);
+    grouped.identity_id = "Subject Two";
+    grouped.audio_relpath = "Subject Two/clip.wav";
+    flat = make_source_cfg('src_02', '', [2 2 3], 0);
+    flat.identity_id = '';
+    flat.audio_relpath = 'clip_ID13.wav';
+    ctx = struct('manifest', struct('sources', [grouped flat]), 'rpf', MockRavenProject());
+    ctx = build_sources_from_config(ctx);
+    verifyEqual(testCase, ctx.sources(1).identity_id, 'Subject Two');
+    verifyEqual(testCase, ctx.sources(1).audio_relpath, 'Subject Two/clip.wav');
+    verifyEqual(testCase, ctx.sources(2).identity_id, '');
+    verifyEqual(testCase, ctx.sources(2).audio_relpath, 'clip_ID13.wav');
+    verifyEqual(testCase, ctx.sourceNames, {'src_01', 'src_02'});
 end
 
 function testSchema2ReflectsPositionsAndConvertsPublicOrientationForRaven(testCase)

@@ -13,6 +13,50 @@ from acoustic_orchestrator.config.models import (
 from acoustic_orchestrator.config.validator import load_hearing_profile_catalog, validate_config
 
 
+@pytest.mark.parametrize("layout", ["twenty_ids", "mixed", "empty", "sidecars", "deep", "missing", "file"])
+def test_source_audio_layout_validation_matches_candidates(tmp_path: Path, layout: str) -> None:
+    from acoustic_orchestrator.experiment.sampler import _build_audio_pools
+    from acoustic_orchestrator.source_audio import list_source_wavs
+
+    config = load_config(_write_config(tmp_path))
+    source = config.source_sampling.source_types[0]
+    root = tmp_path / "source_database"
+    source.audio_dir = root
+    if layout == "file":
+        root.write_text("not a directory", encoding="utf-8")
+    elif layout != "missing":
+        root.mkdir()
+        (root / "empty_id").mkdir()
+    if layout == "twenty_ids":
+        for index in range(20):
+            folder = root / f"ID{index:02d}"
+            folder.mkdir()
+            (folder / "clip.WAV").write_bytes(b"")
+    elif layout == "mixed":
+        (root / "flat.wav").write_bytes(b"")
+        (root / "ID01").mkdir()
+        (root / "ID01/clip.wav").write_bytes(b"")
+        (root / "labels.json").write_text("{}", encoding="utf-8")
+    elif layout == "sidecars":
+        (root / "labels.json").write_text("{}", encoding="utf-8")
+    elif layout == "deep":
+        (root / "ID01/session").mkdir(parents=True)
+        (root / "ID01/session/clip.wav").write_bytes(b"")
+
+    if layout in {"twenty_ids", "mixed"}:
+        validate_config(config)
+        candidates = list_source_wavs(root)
+        assert len(candidates) == (20 if layout == "twenty_ids" else 2)
+        assert _build_audio_pools([source])[source.event_type]["all_files"] == candidates
+    else:
+        with pytest.raises(ValueError) as error:
+            validate_config(config)
+        assert str(root) in str(error.value)
+        if root.is_dir():
+            assert "WAV" in str(error.value)
+            assert list_source_wavs(root) == []
+
+
 def test_validate_config_accepts_array_only_without_catalog(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path))
     config.receiver_outputs.binaural_hrtf = None
@@ -120,8 +164,10 @@ def test_documented_array_config_validates_with_fixture_paths(tmp_path: Path) ->
     assert config.receiver_outputs.circular_array.num_channels == 8
 
 
-@pytest.mark.parametrize("name", ["circular_array_only", "circular_array_mixed"])
-def test_array_experiment_examples_validate_with_fixture_assets(tmp_path: Path, name: str) -> None:
+@pytest.mark.parametrize("name, expected_channels", [("circular_array_only", 8), ("circular_array_mixed", 3)])
+def test_array_experiment_examples_validate_with_fixture_assets(
+    tmp_path: Path, name: str, expected_channels: int
+) -> None:
     fixture_config = load_config(_write_config(tmp_path))
     repository = Path(__file__).resolve().parents[3]
     config = load_config(repository / "configs" / "experiments" / f"{name}.yml")
@@ -134,7 +180,7 @@ def test_array_experiment_examples_validate_with_fixture_assets(tmp_path: Path, 
     if config.receiver_outputs.binaural_hrtf is not None:
         config.receiver_outputs.binaural_hrtf.ir_catalog_path = fixture_config.receiver_outputs.binaural_hrtf.ir_catalog_path
     validate_config(config)
-    assert config.receiver_outputs.circular_array.num_channels == 8
+    assert config.receiver_outputs.circular_array.num_channels == expected_channels
     assert (config.receiver_outputs.binaural_hrtf is None) == (name == "circular_array_only")
 
 

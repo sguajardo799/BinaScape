@@ -306,6 +306,15 @@ function sources = normalize_static_sources(sources)
             sources(i).audio_path = char(string(sources(i).audio_path));
         end
 
+        for field = {'identity_id', 'audio_relpath'}
+            field_name = field{1};
+            if isfield(sources(i), field_name) && ~isempty(sources(i).(field_name))
+                sources(i).(field_name) = char(string(sources(i).(field_name)));
+            else
+                sources(i).(field_name) = '';
+            end
+        end
+
         if isfield(sources(i), 'directivity_path') && ~isempty(sources(i).directivity_path)
             sources(i).directivity_path = char(string(sources(i).directivity_path));
         end
