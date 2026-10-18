@@ -419,6 +419,49 @@ Key modules:
 - `pipeline/output_paths.py`: output path reservation.
 - `pipeline/runtime_audio.py`: runtime audio preparation.
 
+## Source audio directories
+
+`source_sampling.source_types[].audio_dir` accepts WAVs directly in the configured
+directory and directly in its immediate child folders. Each child folder name is
+treated as an opaque database identity, not necessarily a speaker:
+
+```text
+speech/                  <-- audio_dir
++-- flat.wav
++-- ID01/
+|   +-- recording.wav
++-- ID02/
+    +-- recording.wav
+```
+
+Both layouts can coexist; no new YAML keys are needed. Extensions are
+case-insensitive (`.wav`, `.WAV`). Sidecars, empty folders, and deeper recordings
+such as `ID01/session/clip.wav` are ignored. At least one eligible WAV is required.
+Point `audio_dir` at the parent of the ID folders, not an individual ID folder.
+Selection remains file-based: IDs do not impose uniqueness or balancing, and two
+recordings of the same identity can occur in one scene.
+
+New scene manifests include two provenance strings per source:
+
+| Original recording relative to `audio_dir` | `identity_id` | `audio_relpath` |
+| --- | --- | --- |
+| `ID02/recording.wav` | `"ID02"` | `"ID02/recording.wav"` |
+| `clip_ID13.wav` | `""` | `"clip_ID13.wav"` |
+
+The scene-local `source_id` (for example `src_0001`) identifies an instance, not
+the database identity. Flat recordings have an empty identity; IDs are not parsed
+from filenames or the configured root's own name. IDs are scoped to that source
+database, not globally unique person identifiers. `audio_relpath` uses forward
+slashes and always describes the original recording. Runtime trimming can change
+`audio_path` but leaves both provenance strings unchanged.
+
+When render metadata is enabled, inspect `summary.sources` in each rendered JSON
+sidecar for these fields. Existing MATLAB manifests missing either field remain
+accepted and export an empty string for the missing value. Provenance is not
+duplicated into the compact output-index snapshot or Clarity degraded sidecars;
+the latter retain their link to the input render metadata. Existing schema
+versions, output names, and acoustic processing are unchanged.
+
 ## Fixed source positions
 
 `fixed_position` places a required source type at receiver-relative points

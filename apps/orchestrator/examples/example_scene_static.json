@@ -90,6 +90,8 @@
     {
       "source_id": "src_0001",
       "event_type": "speech",
+      "identity_id": "",
+      "audio_relpath": "Audio_section_5_29_ID13.wav",
       "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
       "directivity_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/directivity/Singer_2011_FWE_TLE_norm.daff",
       "position_m": [3.60, 1.10, 1.20],
@@ -104,6 +106,8 @@
     {
       "source_id": "src_0002",
       "event_type": "snoring",
+      "identity_id": "",
+      "audio_relpath": "Audio_section_5_29_ID13.wav",
       "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
       "position_m": [0.95, 1.40, 1.05],
       "orientation_deg": {
@@ -117,6 +121,8 @@
     {
       "source_id": "src_0003",
       "event_type": "breathing",
+      "identity_id": "",
+      "audio_relpath": "Audio_section_5_29_ID13.wav",
       "audio_path": "D:/Tesis/Binaural-HearingLoss-Pipeline/assets/events/train/speech/Audio_section_5_29_ID13.wav",
       "position_m": [2.85, 1.00, 1.35],
       "orientation_deg": {

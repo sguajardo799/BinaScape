@@ -165,6 +165,8 @@ source_sampling:
       min_count: 1   # Obligatorio por escena: el sampler siempre materializa este mínimo.
       max_count: 2   # Capacidad total del tipo dentro de la escena.
       probability: 1.0  # Solo gobierna extras opcionales por encima de min_count; no fuerza siempre max_count.
+      # WAVs en la raíz o en carpetas ID inmediatas (speech/ID01/clip.wav).
+      # Cada subcarpeta inmediata es un ID opaco; no se buscan niveles más profundos.
       audio_dir: ../../../assets/events/speech/
       directivity: ../../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
       spatial_policy:

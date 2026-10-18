@@ -21,6 +21,7 @@ from .models import (
 from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeholders, is_safe_output_subdir
 from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
 from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
+from acoustic_orchestrator.source_audio import list_source_wavs
 
 
 MIN_SOURCE_WALL_CLEARANCE_M = 0.5
@@ -679,8 +680,11 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
         errors.append(f"{source_type.event_type}: min_count debe ser >= 0")
 
     _validate_existing_directory(errors, f"source_types.{source_type.event_type}.audio_dir", source_type.audio_dir)
-    if source_type.audio_dir.exists() and not any(path.is_file() for path in source_type.audio_dir.iterdir()):
-        errors.append(f"{source_type.event_type}: audio_dir no contiene archivos de audio")
+    if source_type.audio_dir.is_dir() and not list_source_wavs(source_type.audio_dir):
+        errors.append(
+            f"{source_type.event_type}: audio_dir no contiene archivos de audio WAV "
+            f"en la raíz ni en carpetas ID inmediatas: {source_type.audio_dir}"
+        )
 
     if source_type.directivity is not None:
         directivity_field = f"source_types.{source_type.event_type}.directivity"

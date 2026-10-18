@@ -26,6 +26,8 @@ function ctx = build_sources_from_config(ctx)
         'source_id', '', ...
         'event_type', '', ...
         'audio_path', '', ...
+        'identity_id', '', ...
+        'audio_relpath', '', ...
         'directivity_path', '', ...
         'position_m', [], ...
         'orientation_deg', struct('yaw', 0, 'pitch', 0, 'roll', 0), ...
@@ -84,6 +86,8 @@ function ctx = build_sources_from_config(ctx)
         sources(i).source_id = char(string(src_cfg.source_id));
         sources(i).event_type = char(event_type);
         sources(i).audio_path = char(audio_path);
+        sources(i).identity_id = optional_source_string(src_cfg, 'identity_id');
+        sources(i).audio_relpath = optional_source_string(src_cfg, 'audio_relpath');
         sources(i).directivity_path = char(directivity_path);
         sources(i).position_m = pos;
         sources(i).orientation_deg = ori;
@@ -121,4 +125,11 @@ function ctx = build_sources_from_config(ctx)
     ctx.sourceUpVectors = sourceUpVectors;
     ctx.sourceDirectivityPaths = sourceDirectivityPaths;
     ctx.n_sources = n_sources;
+end
+
+function value = optional_source_string(source, field_name)
+    value = '';
+    if isfield(source, field_name) && ~isempty(source.(field_name))
+        value = char(string(source.(field_name)));
+    end
 end

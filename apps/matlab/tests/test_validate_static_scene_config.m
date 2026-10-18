@@ -302,6 +302,28 @@ function testNormalizesTargetDuration(testCase)
     verifyEqual(testCase, normalized.render.target_duration_s, 10);
 end
 
+function testNormalizesMixedSourceProvenanceAndLegacyDefaults(testCase)
+    cfg = make_base_cfg();
+    grouped = cfg.sources;
+    grouped.identity_id = "ID02";
+    grouped.audio_relpath = "ID02/long.wav";
+    flat = cfg.sources;
+    flat.source_id = 'src_flat';
+    flat.identity_id = '';
+    flat.audio_relpath = "clip_ID13.wav";
+    legacy = cfg.sources;
+    legacy.source_id = 'src_legacy';
+    cfg.sources = {grouped, flat, legacy};
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, normalized.sources(1).identity_id, 'ID02');
+    verifyEqual(testCase, normalized.sources(1).audio_relpath, 'ID02/long.wav');
+    verifyEqual(testCase, normalized.sources(2).identity_id, '');
+    verifyEqual(testCase, normalized.sources(2).audio_relpath, 'clip_ID13.wav');
+    verifyEqual(testCase, normalized.sources(3).identity_id, '');
+    verifyEqual(testCase, normalized.sources(3).audio_relpath, '');
+    verifyEqual(testCase, normalized.schema_version, cfg.schema_version);
+end
+
 function testDefaultsTrimReverbTailToFalse(testCase)
     cfg = make_base_cfg();
 

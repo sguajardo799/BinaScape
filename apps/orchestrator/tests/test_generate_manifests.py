@@ -2058,7 +2058,10 @@ def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
 
 def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = _build_workspace(tmp_path)
-    _write_test_wav(workspace / "assets" / "events" / "speech" / "speech_01.wav", duration_s=2.0)
+    speech_root = workspace / "assets/events/speech"
+    (speech_root / "speech_01.wav").unlink()
+    (speech_root / "ID02").mkdir()
+    _write_test_wav(speech_root / "ID02/long.wav", duration_s=2.0)
     _write_test_wav(workspace / "assets" / "events" / "clapping" / "clap_01.wav", duration_s=0.5)
     config_path = _write_config(
         workspace,
@@ -2094,6 +2097,14 @@ def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_
         assert len(runtime_audio_paths) == 1
 
         runtime_source = runtime_sources_by_manifest[0][source_id]
+        for sources in runtime_sources_by_manifest:
+            assert {key: value for key, value in sources[source_id].items() if key != "audio_path"} == {
+                key: value for key, value in original_source.items() if key != "audio_path"
+            }
+        if original_source["event_type"] == "speech":
+            assert original_source["identity_id"] == "ID02"
+            assert original_source["audio_relpath"] == "ID02/long.wav"
+            assert Path(original_source["audio_path"]) == speech_root / "ID02/long.wav"
 
         original_duration = _wav_duration_s(Path(original_source["audio_path"]))
         runtime_audio_path = Path(runtime_source["audio_path"])
@@ -2681,6 +2692,26 @@ def _write_valid_raven_metadata(manifest: dict, t30_s: list[float] | None = None
         ),
         encoding="utf-8",
     )
+
+
+def test_generated_sources_preserve_identity_and_relative_recording(tmp_path: Path) -> None:
+    workspace = _build_workspace(tmp_path, speech_wav_names=["clip_ID13.wav"])
+    root = workspace / "assets/events/speech"
+    for identity in ["ID01", "Subject Two"]:
+        (root / identity).mkdir()
+        _write_test_wav(root / identity / "clip.wav", duration_s=1.0)
+    config_path = _write_config(
+        workspace, "identity_sources", num_simulations=1, min_sources=3, max_sources=3,
+        speech_min_count=3, speech_max_count=3, clapping_max_count=0,
+    )
+    manifest = json.loads(generate_static_manifests(config_path)[0].read_text(encoding="utf-8"))
+    sources = manifest["sources"]
+    assert {source["source_id"] for source in sources} == {"src_0001", "src_0002", "src_0003"}
+    assert {(source["identity_id"], source["audio_relpath"]) for source in sources} == {
+        ("", "clip_ID13.wav"), ("ID01", "ID01/clip.wav"), ("Subject Two", "Subject Two/clip.wav"),
+    }
+    for source in sources:
+        assert Path(source["audio_path"]) == root / source["audio_relpath"]
 
 
 def _build_workspace(

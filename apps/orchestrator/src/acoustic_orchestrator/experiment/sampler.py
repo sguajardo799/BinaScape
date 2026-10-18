@@ -8,6 +8,7 @@ import wave
 from typing import Any, TypeVar
 
 from acoustic_orchestrator.experiment.receiver_geometry import build_circular_array_descriptor
+from acoustic_orchestrator.source_audio import list_source_wavs
 
 from acoustic_orchestrator.config.models import (
     AppConfig,
@@ -645,11 +646,14 @@ def _sample_sources(
         position, wall_id, wall_normal = placement
         orientation = _sample_source_orientation(config, source_type, rng, wall_normal)
         audio_path = _draw_audio_path(source_type, audio_pools, rng)
+        audio_relative = audio_path.relative_to(source_type.audio_dir)
         sources.append(
             {
                 "source_id": f"src_{len(sources) + 1:04d}",
                 "event_type": source_type.event_type,
                 "audio_path": audio_path,
+                "identity_id": audio_relative.parts[0] if len(audio_relative.parts) == 2 else "",
+                "audio_relpath": audio_relative.as_posix(),
                 "position_m": position,
                 "orientation_deg": orientation,
                 "gain_db": _uniform(rng, config.source_sampling.gain_db.min, config.source_sampling.gain_db.max),
@@ -1154,7 +1158,7 @@ def _enabled_outputs(config: AppConfig) -> dict[str, ReceiverOutputConfig]:
 
 
 def _list_files(directory: Path) -> list[Path]:
-    return sorted(path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".wav")
+    return list_source_wavs(directory)
 
 
 def _sample_start_time_s(config: AppConfig, audio_path: Path, rng: random.Random) -> float:
