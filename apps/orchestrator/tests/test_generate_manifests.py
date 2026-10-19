@@ -699,7 +699,7 @@ def test_runtime_manifests_preserve_scene_background_noise(tmp_path: Path, monke
     config_path = _write_config(workspace, "runtime_noise", background_noise_block=_background_noise_block())
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
@@ -722,7 +722,7 @@ def test_runtime_manifests_use_unique_stable_raven_project_names(tmp_path: Path,
     config_path = _write_config(workspace, "runtime_project_names", num_simulations=1)
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
@@ -1881,7 +1881,7 @@ def test_render_static_scenes_invokes_matlab_once_per_scene_hrtf(tmp_path: Path,
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
     matlab_calls: list[Path] = []
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         matlab_calls.append(manifest_path)
         index_path = layout["render_index_path"]
         planned_records = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
@@ -1941,7 +1941,7 @@ def test_render_static_scenes_num_workers_one_uses_sequential_path(tmp_path: Pat
     def fail_if_executor_is_used(*args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         raise AssertionError("ThreadPoolExecutor should not be used when num_workers <= 1")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         matlab_calls.append(manifest["receiver"]["hrtfs"][0]["hrtf_id"])
         Path(manifest["render"]["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -1979,7 +1979,7 @@ def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
 
     render_order: list[str] = []
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         hrtf_id = manifest["receiver"]["hrtfs"][0]["hrtf_id"]
         render_order.append(hrtf_id)
@@ -2024,7 +2024,7 @@ def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
 
     render_order: list[str] = []
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         render_order.append(manifest["receiver"]["hrtfs"][0]["hrtf_id"])
         render = manifest["render"]
@@ -2071,7 +2071,7 @@ def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_
     )
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -2128,7 +2128,7 @@ def test_render_static_scenes_preserves_public_geometry_poses_and_orientations_i
     config_path = _write_config(workspace, "raven_z_axis")
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -2224,7 +2224,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
 
     matlab_calls: list[str] = []
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         variant_id = f"{manifest['scene_id']}__{manifest['receiver']['hrtfs'][0]['hrtf_id']}"
         matlab_calls.append(variant_id)
@@ -2268,7 +2268,7 @@ def test_render_static_scenes_failure_summary_keeps_failed_variants_visible(
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(workspace, "failed_run", resume_if_possible=False)
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         variant_id = f"{manifest['scene_id']}__{manifest['receiver']['hrtfs'][0]['hrtf_id']}"
         if variant_id.endswith("binaural_hrtf"):
@@ -2322,7 +2322,7 @@ def test_render_static_scenes_parallel_prepares_before_fanout_and_parent_indexes
         upsert_threads.append(threading.current_thread().name)
         original_upsert(index_path, records, record)
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         nonlocal worker_completed
         runtime_manifests = sorted(layout["runtime_manifest_dir"].glob("scene_static_0001__*.json"))
         assert len(runtime_manifests) == 3
@@ -2397,7 +2397,7 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
             submitted_variant_ids.append(task["variant_paths"]["variant_id"])
             return super().submit(fn, *args, **kwargs)
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         variant_id = f"{manifest['scene_id']}__{manifest['receiver']['hrtfs'][0]['hrtf_id']}"
         matlab_variant_ids.append(variant_id)
@@ -2431,7 +2431,7 @@ def test_render_static_scenes_parallel_indexes_all_submitted_results_before_rais
     config_path = _write_config(workspace, "parallel_failure", num_simulations=1, num_workers=2)
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         hrtf_id = manifest["receiver"]["hrtfs"][0]["hrtf_id"]
         render = manifest["render"]
@@ -2461,7 +2461,7 @@ def test_render_static_scenes_reports_metadata_inconsistencies(tmp_path: Path, m
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(workspace, "metadata_inconsistent", save_render_metadata=True)
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)

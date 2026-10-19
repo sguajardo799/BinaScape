@@ -115,7 +115,7 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
     (tmp_path / "hearing_profiles.yaml").write_text(_hearing_profiles_yaml(), encoding="utf-8")
     submissions: list[list[dict[str, object]]] = []
 
-    def fake_render(manifest_path: Path, matlab_executable: str = "matlab") -> None:
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)

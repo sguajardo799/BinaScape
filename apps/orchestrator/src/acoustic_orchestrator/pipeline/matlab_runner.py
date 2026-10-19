@@ -7,6 +7,7 @@ from typing import NotRequired, TypedDict
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
+from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -27,16 +28,43 @@ class RenderVariantPaths(TypedDict):
     sample_rate_hz: NotRequired[int]
 
 
-def render_manifest_with_matlab(manifest_path: Path, matlab_executable: str = "matlab") -> None:
-    if not MATLAB_ENTRYPOINT.is_file():
-        raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
-
+def render_manifest_with_matlab(
+    manifest_path: Path, matlab_executable: str = "matlab", *, diagnostics_dir: Path | None = None
+) -> None:
     manifest_path = manifest_path.resolve()
+    diagnostics = MatlabDiagnostics(manifest_path, diagnostics_dir)
+    context = ""
+    if diagnostics.ready:
+        context = (
+            f", struct('attempt_id', '{diagnostics.attempt_id}', "
+            f"'events_path', '{_escape_matlab_path(diagnostics.events_path)}')"
+        )
     batch_command = (
         f"addpath(genpath('{_escape_matlab_path(MATLAB_APP_DIR)}')); "
-        f"run_raven_static_render('{_escape_matlab_path(manifest_path)}');"
+        f"run_raven_static_render('{_escape_matlab_path(manifest_path)}'{context});"
     )
-    subprocess.run([matlab_executable, "-batch", batch_command], check=True)
+    command = [matlab_executable, "-batch", batch_command]
+    console = diagnostics.begin(command)
+    exit_code = None
+    error = None
+    observed = False
+    try:
+        if not MATLAB_ENTRYPOINT.is_file():
+            raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
+        options = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
+        completed = subprocess.run(command, check=True, **options)
+        exit_code = completed.returncode
+        observed = True
+    except Exception as exc:
+        error = exc
+        if isinstance(exc, subprocess.CalledProcessError):
+            exit_code = exc.returncode
+        observed = True
+        raise
+    finally:
+        diagnostics.close_console(console)
+        if observed:
+            diagnostics.safely(lambda: diagnostics.finish(exit_code, error))
 
 
 def write_single_receiver_render_manifest(

@@ -334,6 +334,7 @@ class PlannedVariant(TypedDict):
 class RenderTask(TypedDict):
     runtime_manifest_path: Path
     variant_paths: RenderVariantPaths
+    diagnostics_dir: Path
 
 
 class RenderResult(TypedDict):
@@ -387,6 +388,7 @@ def _prepare_render_task(
     return {
         "runtime_manifest_path": runtime_manifest_path,
         "variant_paths": planned_variant["variant_paths"],
+        "diagnostics_dir": resolve_artifact_layout(config.outputs, config.experiment.experiment_id)["matlab_diagnostics_dir"],
     }
 
 
@@ -657,7 +659,10 @@ def _run_render_tasks_in_parallel(
 def _run_single_render_task(task: RenderTask, *, matlab_executable: str) -> RenderResult:
     render_error: Exception | None = None
     try:
-        render_manifest_with_matlab(task["runtime_manifest_path"], matlab_executable=matlab_executable)
+        render_manifest_with_matlab(
+            task["runtime_manifest_path"], matlab_executable=matlab_executable,
+            diagnostics_dir=task["diagnostics_dir"],
+        )
     except Exception as exc:
         render_error = exc
     return {"task": task, "error": render_error}

@@ -73,6 +73,53 @@ evitando una sustitución silenciosa por el HRTF predeterminado al serializar.
 Los archivos v1.7 rechazados por el backend deben reemplazarse o convertirse
 fuera de esta ruta; no se convierten automáticamente ni se omiten errores.
 
+## Diagnóstico opcional del render estático
+
+El entrypoint sigue aceptando solo el manifiesto. Para emitir eventos incrementales
+JSONL, puede recibir un segundo argumento (el directorio destino debe existir):
+
+```matlab
+diagnostics = struct('attempt_id', 'identificador-unico-del-intento', ...
+    'events_path', 'D:/outputs/run/metadata/diagnostics/matlab/intento/events.jsonl');
+run_raven_static_render('example/scene_static_0001.json', diagnostics)
+```
+
+El orquestador asigna el UUID y crea el contexto automáticamente por invocación.
+`render_static_scene(cfg, diagnostics)` también acepta contexto opcional; sin él,
+ambas funciones conservan sus llamadas anteriores y no crean archivos de eventos.
+Este diagnóstico no habilita el render dinámico, que continúa sin soporte.
+
+`emit_render_event` escribe una línea UTF-8 completa y cierra el archivo por evento.
+Los campos base son `schema_version: 1`, `attempt_id`, `sequence`, `timestamp` UTC,
+`type` y `stage`. Las etapas `initialization`, `simulation` y `artifact_writing`
+emiten `stage_started`/`stage_completed`. Dentro de `simulation` se emiten
+`step_started`/`step_completed` con `step=raven_run` alrededor de `rpf.run()` y
+`step=audio_postprocessing` para respuestas, reverberación, convolución, mezcla y ruido.
+Son cuatro eventos ligeros por variante, sin instrumentación interna de RAVEN.
+
+Cada escritor que retorna correctamente emite `artifact_written` con `kind`, `path`
+y `output_type`; si falla la exportación de metadatos después del WAV, solo el WAV
+queda confirmado. Un fallo emite `error` con identificador, mensaje y stack y se
+relanza la excepción original. Las variantes múltiples conservan identidad de salida
+en sus eventos; no se colapsan sus secuencias.
+
+`entrypoint_completed` confirma únicamente que el entrypoint terminó sus escrituras.
+**No confirma que MATLAB haya cerrado correctamente** ni establece `process_status`:
+el orquestador registra ese resultado aparte, a partir del código de salida observado.
+Una caída puede dejar incompleta la última etapa o línea de eventos. Los fallos
+exclusivos del diagnóstico (incluidas advertencias configuradas como errores) no
+deben cambiar las excepciones ni resultados funcionales. La persistencia depende
+del almacenamiento disponible; no hay recuperación automática ni limpieza de logs.
+
+Pruebas sin simulación RAVEN real:
+
+```matlab
+addpath(genpath('apps/matlab'));
+results = runtests({'apps/matlab/tests/test_emit_render_event.m', ...
+    'apps/matlab/tests/test_render_diagnostics.m'});
+assertSuccess(results);
+```
+
 ## Important Files
 
 - `run_raven_static_render.m`: entrypoint for supported static rendering.

@@ -257,6 +257,64 @@ positive bands and can retry within the scene budget. This measured T30 is
 distinct from the seven-band Sabine estimate used by sampling. The runtime also
 supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
+## Diagnóstico por invocación MATLAB
+
+Cada intento real (incluidos reintentos T30) tiene un UUID y archivos separados:
+`{artifact_root}/{run_name}/metadata/diagnostics/matlab/{attempt_id}/`.
+Las variantes reanudadas sin ejecutar MATLAB no crean intentos. El runner Python
+directo acepta `diagnostics_dir=`; si se omite, usa `matlab_diagnostics/` junto al
+manifiesto. No se añaden opciones obligatorias al YAML.
+
+- `input_manifest.json`: copia de entrada; sobrevive a sobrescrituras o descartes T30.
+- `console.log`: stdout y stderr combinados, escritos a disco sin reproducción en vivo.
+- `events.jsonl`: eventos MATLAB incrementales, con versión, intento, secuencia y UTC.
+- `invocation.json`: resumen inicial `running`, actualizado al observar la terminación.
+
+El resumen versión 1 contiene identidades, comando como lista, rutas, tiempos UTC,
+duración monotónica en segundos, código de salida (`null` sin resultado de proceso),
+error, última etapa/subpaso iniciado y completado, y limitaciones en `diagnostic_errors`.
+Ejemplo de campos independientes del resumen (extracto):
+
+```json
+{
+  "schema_version": 1,
+  "process_status": "failed",
+  "exit_code": 7,
+  "entrypoint_completed": true,
+  "failure_location": "post_entrypoint"
+}
+```
+
+`entrypoint_completed` no implica éxito del proceso: solo una terminación observada
+con código cero establece `process_status=succeeded`. Sin evento final se conserva
+`entrypoint_completed=false`, aunque el proceso termine con cero. `running` tras una
+caída del orquestador no confirma que MATLAB siga vivo. No hay reconciliación automática.
+
+Las etapas son `initialization`, `simulation` y `artifact_writing`; dentro de
+`simulation` se distinguen `raven_run` y `audio_postprocessing`, sin instrumentar
+internamente RAVEN. Sin eventos, un fallo queda `indeterminate`; un fallo posterior
+al evento final es `post_entrypoint`, sin atribuir una causa concreta al cierre.
+Cada artefacto registra ruta, existencia anterior/posterior y `write_confirmed`
+solo por evento del intento actual. Existencia no equivale a escritura ni validación.
+
+Estos archivos **no cambian el índice de render, la reanudación ni las excepciones**.
+Los fallos exclusivos del diagnóstico advierten y conservan la evidencia posible;
+si no se puede abrir el log se hereda la consola y si no se puede preparar contexto
+se ejecuta sin eventos. La persistencia depende del almacenamiento disponible.
+Una línea final incompleta de eventos se ignora con advertencia.
+
+La retención es manual: no se borran diagnósticos al descartar WAV/metadatos.
+Los logs y copias pueden crecer y contener rutas locales; revísalos antes de compartirlos.
+
+Comprobación opt-in con MATLAB/ITA/RAVEN reales (el destino debe ser nuevo):
+
+```sh
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_matlab_diagnostics.py --output-root <directorio-nuevo>
+```
+
+Verifica un render array-only y un manifiesto inválido, conserva la evidencia y
+escribe `acceptance.json`. No simula fallos nativos de cierre ni modifica ejemplos versionados.
+
 ## Circular Array Configuration
 
 Configuration loading/validation accepts an optional `receiver_outputs.circular_array`.
