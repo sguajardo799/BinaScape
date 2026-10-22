@@ -15,6 +15,19 @@ class ExperimentConfig(StrictConfigModel):
     random_seed: int
 
 
+class MatlabProcessRetryConfig(StrictConfigModel):
+    max_attempts: Annotated[int, Field(strict=True, ge=1)] = 3
+    initial_delay_s: Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)] = 2.0
+    max_delay_s: Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)] = 30.0
+    max_consecutive_failures: Annotated[int, Field(strict=True, ge=1)] = 5
+
+    @model_validator(mode="after")
+    def validate_delays(self) -> "MatlabProcessRetryConfig":
+        if self.max_delay_s < self.initial_delay_s:
+            raise ValueError("max_delay_s must be at least initial_delay_s")
+        return self
+
+
 class ExecutionConfig(StrictConfigModel):
     num_simulations: int
     num_workers: int
@@ -22,6 +35,7 @@ class ExecutionConfig(StrictConfigModel):
     resume_if_possible: bool = True
     save_scene_manifest: bool = True
     save_render_metadata: bool = True
+    matlab_process_retry: MatlabProcessRetryConfig = Field(default_factory=MatlabProcessRetryConfig)
 
 
 class RavenConfig(StrictConfigModel):

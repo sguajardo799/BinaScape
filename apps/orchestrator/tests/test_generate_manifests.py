@@ -8,6 +8,7 @@ import yaml
 
 import pytest
 from typer.testing import CliRunner
+from render_fixtures import simulate_matlab_process, write_render_metadata, write_render_wav
 
 import acoustic_orchestrator.pipeline.render_pipeline as render_pipeline
 import acoustic_orchestrator.experiment.sampler as sampler
@@ -224,25 +225,22 @@ def test_array_only_pipeline_status_and_resume(tmp_path: Path, monkeypatch: pyte
         assert manifest["render"]["active_output_type"] == "circular_array"
         if result_mode == "failed":
             raise RuntimeError("array backend failed")
-        wav_path = Path(manifest["render"]["output_wav_path"])
-        wav_path.parent.mkdir(parents=True, exist_ok=True)
-        with wave.open(str(wav_path), "wb") as audio:
-            audio.setnchannels(2 if result_mode == "partial" else 8)
-            audio.setsampwidth(2)
-            audio.setframerate(44100)
-            audio.writeframes(bytes(32*audio.getnchannels()*2))
-        metadata = {
-            "scene_id": manifest["scene_id"], "output_type": "circular_array",
-            "receiver": {"coordinate_frame": "public_xyz_y_up", "circular_array": manifest["receiver"]["circular_array"]},
-            "summary": {"room": {"reverberation": {"t30_s": [0 if result_mode == "invalid_t30" else 0.4]*10}}},
-        }
-        Path(manifest["render"]["output_metadata_path"]).write_text(json.dumps(metadata), encoding="utf-8")
+        _write_valid_raven_metadata(manifest, [0 if result_mode == "invalid_t30" else 0.4]*10)
+        if result_mode == "partial":
+            wav_path = Path(manifest["render"]["output_wav_path"])
+            with wave.open(str(wav_path), "wb") as audio:
+                audio.setnchannels(2)
+                audio.setsampwidth(2)
+                audio.setframerate(44100)
+                audio.writeframes(bytes(32*2*2))
 
-    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render_array)
-    if result_mode == "failed":
-        with pytest.raises(RenderStaticRunError):
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(render_array))
+    if result_mode in ("failed", "partial"):
+        with pytest.raises(RenderStaticRunError) as caught:
             render_static_scenes(config_path)
         assert len(calls) == 1
+        if result_mode == "partial":
+            assert caught.value.summary["partial_variants"] == 1
         return
     manifests, summary = render_static_scenes(config_path)
     config = load_config(config_path)
@@ -285,20 +283,9 @@ def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monke
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         output_type = manifest["render"]["active_output_type"]
         rendered.append(output_type)
-        wav_path = Path(manifest["render"]["output_wav_path"])
-        wav_path.parent.mkdir(parents=True, exist_ok=True)
-        with wave.open(str(wav_path), "wb") as audio:
-            audio.setnchannels(8 if output_type == "circular_array" else 2)
-            audio.setsampwidth(2)
-            audio.setframerate(44100)
-            audio.writeframes(bytes(64*audio.getnchannels()))
-        payload = {"scene_id": manifest["scene_id"], "output_type": output_type,
-                   "summary": {"room": {"reverberation": {"t30_s": [0.4]*10}}}}
-        if output_type == "circular_array":
-            payload["receiver"] = {"coordinate_frame": "public_xyz_y_up", "circular_array": manifest["receiver"]["circular_array"]}
-        Path(manifest["render"]["output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+        _write_valid_raven_metadata(manifest, [0.4]*10)
 
-    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render_mixed)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(render_mixed))
     render_static_scenes(path)
     config = load_config(path)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
@@ -705,7 +692,7 @@ def test_runtime_manifests_preserve_scene_background_noise(tmp_path: Path, monke
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     render_static_scenes(config_path)
 
@@ -728,7 +715,7 @@ def test_runtime_manifests_use_unique_stable_raven_project_names(tmp_path: Path,
         Path(manifest["render"]["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     render_static_scenes(config_path)
     first_project_names = [
@@ -1894,7 +1881,7 @@ def test_render_static_scenes_invokes_matlab_once_per_scene_hrtf(tmp_path: Path,
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     manifest_paths, summary = render_static_scenes(config_path)
 
@@ -1949,7 +1936,7 @@ def test_render_static_scenes_num_workers_one_uses_sequential_path(tmp_path: Pat
         _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", fail_if_executor_is_used)
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     _, summary = render_static_scenes(config_path)
 
@@ -1989,7 +1976,7 @@ def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
         _write_valid_raven_metadata(manifest, [0.5] * (9 if len(render_order) == 1 else 10))
 
     monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_with_available_retry)
-    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     manifest_paths, summary = render_static_scenes(config_path)
 
@@ -2033,7 +2020,7 @@ def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
         _write_valid_raven_metadata(manifest, [0.5] * 9 + [float("nan")])
 
     monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_at_budget)
-    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     manifest_paths, summary = render_static_scenes(config_path)
 
@@ -2052,7 +2039,7 @@ def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
     assert failures[-1]["stage"] == "raven_t30"
     invalid_band = failures[-1]["raven_t30_rejections"][0]["invalid_bands"][0]
     assert invalid_band["frequency_hz"] == 16000
-    assert invalid_band["value"] == "nan"
+    assert invalid_band["value"] is None  # MATLAB serializes non-finite values as null.
     assert config.scene_validation.max_scene_attempts == failures[-1]["scene_attempts"]
 
 
@@ -2078,7 +2065,7 @@ def test_render_static_scenes_prepares_trimmed_runtime_audio_once_per_scene(tmp_
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     render_static_scenes(config_path)
 
@@ -2135,7 +2122,7 @@ def test_render_static_scenes_preserves_public_geometry_poses_and_orientations_i
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     render_static_scenes(config_path)
 
@@ -2216,11 +2203,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
         outputs=config.outputs,
         receiver_output=config.receiver_outputs.binaural_hrtf,
     )
-    Path(resumed_variant["runtime_manifest_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(resumed_variant["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(resumed_variant["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(resumed_variant["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    _write_valid_raven_metadata(first_scene)
+    _prepare_legacy_render_fixture(config, first_scene, resumed_variant["output_type"])
 
     matlab_calls: list[str] = []
 
@@ -2239,7 +2222,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     with pytest.raises(RenderStaticRunError, match="matlab failed hard") as exc_info:
         render_static_scenes(config_path)
@@ -2247,10 +2230,10 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
     assert resumed_variant["variant_id"] not in matlab_calls
     assert exc_info.value.summary["index_path"].endswith("render_index.jsonl")
     assert exc_info.value.summary["completed_variants"] == 2
-    assert exc_info.value.summary["partial_variants"] == 1
-    assert exc_info.value.summary["failed_variants"] == 0
+    assert exc_info.value.summary["partial_variants"] == 0
+    assert exc_info.value.summary["failed_variants"] == 1
     assert exc_info.value.summary["planned_variants"] == 3
-    assert exc_info.value.summary["inconsistent_variants"] == 0
+    assert exc_info.value.summary["inconsistent_variants"] == 1
     index_path = layout["render_index_path"]
     records = {
         record["variant_id"]: record
@@ -2258,7 +2241,7 @@ def test_render_static_scenes_resumes_completed_variants_and_keeps_partial_failu
     }
     assert records[resumed_variant["variant_id"]]["status"] == "completed"
     assert records[resumed_variant["variant_id"]]["resumed"] is True
-    assert any(record["status"] == "partial" and record["attempted"] for record in records.values())
+    assert any(record["status"] == "failed" and record["attempted"] for record in records.values())
     assert sum(record["status"] == "planned" for record in records.values()) == 3
 
 
@@ -2280,7 +2263,7 @@ def test_render_static_scenes_failure_summary_keeps_failed_variants_visible(
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     with pytest.raises(RenderStaticRunError, match="matlab failed hard") as exc_info:
         render_static_scenes(config_path)
@@ -2342,7 +2325,7 @@ def test_render_static_scenes_parallel_prepares_before_fanout_and_parent_indexes
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", RecordingThreadPoolExecutor)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.upsert_variant", recording_upsert)
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     _, summary = render_static_scenes(config_path)
 
@@ -2377,9 +2360,7 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
         outputs=config.outputs,
         receiver_output=config.receiver_outputs.binaural_hrtf,
     )
-    Path(resumed_variant["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(resumed_variant["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    _write_valid_raven_metadata(first_scene)
+    _prepare_legacy_render_fixture(config, first_scene, resumed_variant["output_type"])
 
     original_executor = render_pipeline.ThreadPoolExecutor
     executor_worker_counts: list[int] = []
@@ -2407,7 +2388,7 @@ def test_render_static_scenes_parallel_resumes_completed_variant_and_submits_onl
         _write_valid_raven_metadata(manifest)
 
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.ThreadPoolExecutor", RecordingThreadPoolExecutor)
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     _, summary = render_static_scenes(config_path)
 
@@ -2445,16 +2426,16 @@ def test_render_static_scenes_parallel_indexes_all_submitted_results_before_rais
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
         _write_valid_raven_metadata(manifest)
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     with pytest.raises(RenderStaticRunError, match="parallel matlab failed") as exc_info:
         render_static_scenes(config_path)
 
     assert exc_info.value.summary["completed_variants"] == 2
-    assert exc_info.value.summary["partial_variants"] == 1
+    assert exc_info.value.summary["failed_variants"] == 1
     assert exc_info.value.summary["planned_variants"] == 0
     records = [json.loads(line) for line in layout["render_index_path"].read_text(encoding="utf-8").splitlines()]
-    assert {record["status"] for record in records} == {"completed", "partial"}
+    assert {record["status"] for record in records} == {"completed", "failed"}
 
 
 def test_render_static_scenes_reports_metadata_inconsistencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2488,13 +2469,15 @@ def test_render_static_scenes_reports_metadata_inconsistencies(tmp_path: Path, m
             encoding="utf-8",
         )
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
-    _, summary = render_static_scenes(config_path)
-
-    assert summary["completed_variants"] == 6
-    assert summary["inconsistent_variants"] == 6
-    assert summary["planned_variants"] == 0
+    with pytest.raises(RenderStaticRunError) as caught:
+        render_static_scenes(config_path)
+    summary = caught.value.summary
+    assert summary["completed_variants"] == 0
+    assert summary["partial_variants"] == 1
+    assert summary["inconsistent_variants"] == 1
+    assert summary["planned_variants"] == 5
 
 
 def test_render_static_cli_reports_summary_when_render_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2670,28 +2653,20 @@ class _MaxUniformRng:
         return maximum
 
 
+def _prepare_legacy_render_fixture(config, scene, output_type):
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    rewrites = render_pipeline.prepare_scene_source_assets(scene, layout["prepared_audio_dir"] / scene["scene_id"])
+    planned = render_pipeline._build_planned_variants_from_manifest(config, scene, layout["runtime_manifest_dir"])
+    variant = next(item for item in planned if item["variant_paths"]["output_type"] == output_type)
+    task = render_pipeline._prepare_render_task(config, variant, layout["runtime_manifest_dir"], rewrites)
+    _write_valid_raven_metadata(json.loads(task["runtime_manifest_path"].read_text(encoding="utf-8")))
+
+
 def _write_valid_raven_metadata(manifest: dict, t30_s: list[float] | None = None) -> None:
-    render = manifest["render"]
-    metadata_path = Path(render["output_metadata_path"])
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "scene_id": manifest["scene_id"],
-                "hrtf_id": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
-                "summary": {
-                    "room": {
-                        "reverberation": {
-                            "t30_s": t30_s if t30_s is not None else [0.5] * 10,
-                        }
-                    }
-                },
-                "output_wav_path": render["output_wav_path"],
-                "output_metadata_path": render["output_metadata_path"],
-            }
-        ),
-        encoding="utf-8",
-    )
+    # Historical helper name: emit a matched PCM/metadata pair rather than
+    # allowing text placeholders to stand in for successful renders.
+    write_render_wav(manifest)
+    write_render_metadata(manifest, t30_s)
 
 
 def test_generated_sources_preserve_identity_and_relative_recording(tmp_path: Path) -> None:
@@ -2802,6 +2777,7 @@ def _write_config(
     include_optional_hartf_outputs: bool = True,
     optional_hartf_outputs_enabled: bool = True,
     resume_if_possible: bool = False,
+    overwrite_existing: bool = True,
     enable_floor: bool = True,
     enable_ceiling: bool = True,
     save_render_metadata: bool = False,
@@ -2820,6 +2796,8 @@ def _write_config(
     clapping_probability: float = 0.4,
     speech_directivity: str | None = "./assets/directivity/speech_talker.daff",
     background_noise_block: str = "",
+    render_sample_rate_hz: int = 44100,
+    process_max_attempts: int = 1,
 ) -> Path:
     config_path = workspace / f"{run_name}.yml"
     optional_hartf_outputs = """
@@ -2859,16 +2837,22 @@ experiment:
 execution:
   num_simulations: {num_simulations}
   num_workers: {num_workers}
-  overwrite_existing: true
+  overwrite_existing: {str(overwrite_existing).lower()}
   resume_if_possible: {str(resume_if_possible).lower()}
   save_scene_manifest: true
   save_render_metadata: {str(save_render_metadata).lower()}
+  # Existing acceptance fixtures exercise one invocation; resilience tests
+  # override this explicitly and model tests cover production defaults.
+  matlab_process_retry:
+    max_attempts: {process_max_attempts}
+    initial_delay_s: 0
+    max_delay_s: 0
 
 raven:
   base_rpf_file: ./base_room.rpf
 
 render:
-  sample_rate_hz: 48000
+  sample_rate_hz: {render_sample_rate_hz}
   generate_rir: false
   generate_brir: true
   simulation_type_rt: true

@@ -63,14 +63,14 @@ def verify(root: Path) -> None:
     assert len(records) == functional_summary["render_jobs"]
 
     invalid = root / "invalid.json"
-    invalid.write_text('{"schema_version": "unsupported"}', encoding="utf-8")
+    invalid_payload = json.loads(Path(record["manifest_snapshot_path"]).read_text(encoding="utf-8"))
+    invalid_payload["schema_version"] = "unsupported"
+    invalid.write_text(json.dumps(invalid_payload), encoding="utf-8")
     invalid_diagnostics = root / "invalid_attempts"
-    try:
-        render_manifest_with_matlab(invalid, diagnostics_dir=invalid_diagnostics)
-    except subprocess.CalledProcessError as exc:
-        error_code = exc.returncode
-    else:
-        raise AssertionError("Invalid manifest unexpectedly succeeded")
+    invalid_result = render_manifest_with_matlab(invalid, diagnostics_dir=invalid_diagnostics,
+                                                attempts_dir=root / "invalid_functional_attempts")
+    assert isinstance(invalid_result.error, subprocess.CalledProcessError), invalid_result
+    error_code = invalid_result.exit_code
     invalid_path = next(invalid_diagnostics.glob("*/invocation.json"))
     failure = json.loads(invalid_path.read_text(encoding="utf-8"))
     assert failure["exit_code"] == error_code != 0

@@ -10,10 +10,20 @@ experiment:
 execution:
   num_simulations: 30
   num_workers: 2
-  overwrite_existing: true
+  # Reanudación protegida: reutiliza entradas/salidas válidas sin reescribirlas.
+  overwrite_existing: false
   resume_if_possible: true
   save_scene_manifest: true
   save_render_metadata: true
+  # Política de proceso, independiente del remuestreo acústico T30.
+  matlab_process_retry:
+    max_attempts: 3 # Incluye la primera invocación; 1 desactiva reintentos.
+    initial_delay_s: 2.0 # Esperas por defecto: 2 s y 4 s.
+    max_delay_s: 30.0 # Finito, no negativo y >= initial_delay_s.
+    max_consecutive_failures: 5 # Corte persistente del lote; entero positivo.
+  # max_attempts también es entero positivo estricto (no booleano).
+  # Reiniciar no renueva presupuestos. Solo una ejecución nueva intencional con
+  # resume_if_possible=false y overwrite_existing=true abre cadenas nuevas.
 
 raven:
   base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf

@@ -133,7 +133,9 @@ def test_same_identity_does_not_constrain_selection_or_pool_reuse(tmp_path: Path
 def test_flat_sampling_matches_pre_identity_baseline(tmp_path: Path) -> None:
     # Captured before adding identity fields; covers all sampled scene properties.
     workspace = _build_workspace(tmp_path, speech_wav_names=["z.wav", "A.WAV", "clip_ID13.wav"])
-    paths = generate_static_manifests(_write_config(workspace, "identity_baseline"))
+    # Keep the historical input of this sampling-only baseline. Render tests
+    # now default to the backend's supported 44100 Hz instead.
+    paths = generate_static_manifests(_write_config(workspace, "identity_baseline", render_sample_rate_hz=48000))
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     for payload in payloads:
         for source in payload["sources"]:

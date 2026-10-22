@@ -8,7 +8,7 @@ import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 def diagnostic_warning(message: str) -> None:
@@ -24,8 +24,14 @@ def diagnostic_warning(message: str) -> None:
 class MatlabDiagnostics:
     """Attempt-local files; callers must not use these to accept/resume outputs."""
 
-    def __init__(self, manifest_path: Path, diagnostics_dir: Path | None = None) -> None:
-        self.attempt_id = uuid4().hex
+    def __init__(
+        self, manifest_path: Path, diagnostics_dir: Path | None = None, *,
+        attempt_id: str | None = None, variant_id: str | None = None,
+        input_snapshot_path: Path | None = None,
+    ) -> None:
+        # Functional attempts own identity when provided. Standalone diagnostic
+        # callers keep their existing UUID-per-invocation behavior.
+        self.attempt_id = uuid4().hex if attempt_id is None else UUID(attempt_id).hex
         self.directory = (diagnostics_dir or manifest_path.parent / "matlab_diagnostics") / self.attempt_id
         self.manifest_path = manifest_path
         self.snapshot_path = self.directory / "input_manifest.json"
@@ -35,7 +41,7 @@ class MatlabDiagnostics:
         self.started = time.monotonic()
         self.record: dict[str, Any] = {
             "schema_version": 1, "attempt_id": self.attempt_id,
-            "scene_id": None, "variant_id": manifest_path.stem, "output_type": None,
+            "scene_id": None, "variant_id": variant_id if variant_id is not None else manifest_path.stem, "output_type": None,
             "manifest_path": manifest_path.as_posix(), "manifest_snapshot_path": self.snapshot_path.as_posix(),
             "console_path": self.console_path.as_posix(), "events_path": self.events_path.as_posix(),
             "started_at": self._now(), "finished_at": None, "duration_s": None,
@@ -48,7 +54,7 @@ class MatlabDiagnostics:
         self.ready = False
         try:
             self.directory.mkdir(parents=True, exist_ok=False)
-            shutil.copyfile(manifest_path, self.snapshot_path)
+            shutil.copyfile(input_snapshot_path or manifest_path, self.snapshot_path)
             self.ready = True
         except Exception as exc:
             self.warn(exc)
@@ -168,10 +174,11 @@ class MatlabDiagnostics:
         self.record.update(
             finished_at=self._now(), duration_s=max(0.0, time.monotonic() - self.started),
             exit_code=exit_code,
-            process_status=("succeeded" if exit_code == 0 else "launch_failed" if exit_code is None else "failed"),
+            process_status=("succeeded" if exit_code == 0 else "failed" if exit_code is not None else
+                            "launch_failed" if isinstance(error, OSError) else "termination_unobserved"),
             error=None if error is None else {"type": type(error).__name__, "message": str(error)},
         )
         if error is not None:
-            self.record["failure_location"] = "launch" if exit_code is None else "indeterminate"
+            self.record["failure_location"] = "launch" if exit_code is None and isinstance(error, OSError) else "indeterminate"
         self.safely(self.collect_evidence)
         self.safely(self.save)

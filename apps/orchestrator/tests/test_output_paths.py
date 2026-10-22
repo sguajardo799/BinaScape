@@ -9,6 +9,7 @@ from acoustic_orchestrator.pipeline.output_paths import (
     resolve_artifact_layout,
     resolve_clarity_job_paths,
     resolve_output_paths,
+    resolve_render_attempts_dir,
 )
 
 
@@ -53,12 +54,22 @@ def test_resolve_output_paths_applies_templates_and_subdirectories(tmp_path: Pat
     assert layout["runtime_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "runtime" / "render"
     assert layout["prepared_audio_dir"] == tmp_path / "artifacts" / "run_a" / "cropped_audio"
     assert layout["render_index_path"] == tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "render_index.jsonl"
+    assert layout["render_attempts_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "render_attempts"
+    assert not layout["render_attempts_dir"].is_relative_to(layout["matlab_diagnostics_dir"])
     assert Path(resolved["wav_path"]).parts[-2:] == ("bte_rear_hartf", "scene_static_0001__bte_rear_hartf.wav")
     assert Path(resolved["metadata_path"]).parts[-2:] == (
         "bte_rear_hartf",
         "scene_static_0001__bte_rear_hartf__render.json",
     )
     assert resolved["output_subdir"] == "bte_rear_hartf"
+
+
+def test_render_attempts_fallback_and_explicit_root(tmp_path: Path) -> None:
+    manifest = tmp_path / "runtime" / "scene__binaural_hrtf.json"
+    assert resolve_render_attempts_dir(manifest) == tmp_path / "runtime" / "render_attempts"
+    explicit = tmp_path / "run" / "metadata" / "render_attempts"
+    assert resolve_render_attempts_dir(manifest, explicit) == explicit
+    assert not explicit.exists()  # Resolving paths has no filesystem side effects.
 
 
 def test_resolve_output_paths_keeps_variant_id_stable_when_public_names_change(tmp_path: Path) -> None:

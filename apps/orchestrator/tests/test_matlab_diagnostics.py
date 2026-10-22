@@ -65,11 +65,10 @@ def test_process_result_and_console(tmp_path, monkeypatch, error):
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
     if error:
-        with pytest.raises(type(error)) as caught:
-            render_manifest_with_matlab(manifest)
-        assert caught.value is error
+        result = render_manifest_with_matlab(manifest)
+        assert result.error is error
     else:
-        assert render_manifest_with_matlab(manifest) is None
+        assert render_manifest_with_matlab(manifest).error is None
     record = summary(tmp_path)
     assert record["process_status"] == ("succeeded" if error is None else "failed" if isinstance(error, subprocess.CalledProcessError) else "launch_failed")
     assert record["exit_code"] == (0 if error is None else 7 if isinstance(error, subprocess.CalledProcessError) else None)
@@ -84,8 +83,9 @@ def test_prelaunch_failure_and_matlab_path_escaping(tmp_path, monkeypatch):
     manifest = write_manifest(directory)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.MATLAB_ENTRYPOINT", tmp_path / "absent.m")
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", lambda *a, **k: pytest.fail("must not launch"))
-    with pytest.raises(FileNotFoundError, match="entrypoint"):
-        render_manifest_with_matlab(manifest)
+    result = render_manifest_with_matlab(manifest)
+    assert isinstance(result.error, FileNotFoundError)
+    assert "entrypoint" in str(result.error)
     record = summary(directory)
     assert record["process_status"] == "launch_failed"
     assert "John''s render" in record["command"][2]
@@ -203,7 +203,12 @@ def test_diagnostic_failures_never_replace_process_result(tmp_path, monkeypatch,
     def fail(*args, **kwargs):
         raise OSError("diagnostic-only failure")
     if failure == "directory":
-        monkeypatch.setattr(Path, "mkdir", fail)
+        original_mkdir = Path.mkdir
+        def mkdir(path, *args, **kwargs):
+            if "matlab_diagnostics" in path.parts:
+                fail()
+            return original_mkdir(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "mkdir", mkdir)
     elif failure == "snapshot":
         monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_diagnostics.shutil.copyfile", fail)
     elif failure in {"open", "flush", "close"}:
@@ -231,7 +236,12 @@ def test_diagnostic_failures_never_replace_process_result(tmp_path, monkeypatch,
     elif failure == "events":
         monkeypatch.setattr(MatlabDiagnostics, "read_events", fail)
     elif failure == "replace":
-        monkeypatch.setattr(Path, "replace", fail)
+        original_replace = Path.replace
+        def replace(source, target):
+            if "matlab_diagnostics" in source.parts:
+                fail()
+            return original_replace(source, target)
+        monkeypatch.setattr(Path, "replace", replace)
     else:
         monkeypatch.setattr(MatlabDiagnostics, "read_events", fail)
         monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_diagnostics.warnings.warn", fail)
@@ -253,9 +263,7 @@ def test_diagnostic_failures_never_replace_process_result(tmp_path, monkeypatch,
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         if process_fails:
-            with pytest.raises(subprocess.CalledProcessError) as caught:
-                render_manifest_with_matlab(manifest)
-            assert caught.value is original_error
+            assert render_manifest_with_matlab(manifest).error is original_error
         else:
             render_manifest_with_matlab(manifest)
     assert len(calls) == 1
@@ -308,9 +316,7 @@ def test_runner_failure_matrix(tmp_path, monkeypatch, case, count, location, las
         write_events(diag, complete_events(tmp_path)[:count])
         raise error
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
-    with pytest.raises(type(error)) as caught:
-        render_manifest_with_matlab(manifest)
-    assert caught.value is error
+    assert render_manifest_with_matlab(manifest).error is error
     record = summary(tmp_path)
     assert record["exit_code"] == (None if case == "launch" else 23)
     assert record["failure_location"] == location
@@ -334,8 +340,7 @@ def test_entrypoint_and_process_status_are_independent(tmp_path, monkeypatch, fi
         return SimpleNamespace(returncode=code)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
     if code:
-        with pytest.raises(subprocess.CalledProcessError):
-            render_manifest_with_matlab(manifest)
+        assert isinstance(render_manifest_with_matlab(manifest).error, subprocess.CalledProcessError)
     else:
         render_manifest_with_matlab(manifest)
     record = summary(tmp_path)
@@ -379,7 +384,8 @@ def test_concurrent_attempt_directories_are_isolated(tmp_path, monkeypatch, same
     replacements = []
     original_replace = Path.replace
     def replace(source, target):
-        replacements.append((source, target))
+        if source.is_relative_to(root):
+            replacements.append((source, target))
         return original_replace(source, target)
     monkeypatch.setattr(Path, "replace", replace)
     def run(command, **kwargs):
@@ -445,7 +451,7 @@ def test_concurrent_diagnostic_failure_does_not_affect_other_attempt(tmp_path, m
     with pytest.warns(RuntimeWarning, match="only this attempt"):
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(render_manifest_with_matlab, path, diagnostics_dir=root) for path in inputs]
-            assert [future.result(timeout=20) for future in futures] == [None, None]
+            assert all(future.result(timeout=20).error is None for future in futures)
     assert len(calls) == len(set(calls)) == 2
     summaries = [json.loads(path.read_text()) for path in root.glob("*/invocation.json")]
     healthy = next(record for record in summaries if Path(record["manifest_path"]).parent.name == "healthy")

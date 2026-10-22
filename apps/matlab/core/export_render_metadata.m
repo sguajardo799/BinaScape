@@ -59,13 +59,27 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
         mkdir(out_dir);
     end
 
-    fid = fopen(output_metadata_path, 'w');
+    fid = fopen(output_metadata_path, 'wb');
     if fid == -1
         error('Could not open metadata output file: %s', output_metadata_path);
     end
 
-    fwrite(fid, txt, 'char');
-    fclose(fid);
+    try
+        bytes = unicode2native(txt, 'UTF-8');
+        if fwrite(fid, bytes, 'uint8') ~= numel(bytes)
+            error('BinaScape:Metadata:WriteFailed', 'Escritura incompleta: %s', output_metadata_path);
+        end
+        status = fclose(fid);
+        fid = -1;
+        if status ~= 0
+            error('BinaScape:Metadata:CloseFailed', 'No se pudo cerrar: %s', output_metadata_path);
+        end
+    catch ME
+        if fid ~= -1
+            try, fclose(fid); catch, end
+        end
+        rethrow(ME);
+    end
 end
 
 function identity = variant_identity(variant)

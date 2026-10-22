@@ -9,6 +9,9 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     render_static_scenes,
     run_clarity_handoff,
 )
+from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
+from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
+from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
 
 
 app = typer.Typer(help="CLI del orquestador acústico")
@@ -76,6 +79,36 @@ def clarity_handoff(
     )
 
 
+@app.command("reconcile-static")
+def reconcile_static(
+    run_root: Path,
+    chain: str = typer.Option(..., "--chain", help="UUID de la cadena interrumpida"),
+    attempt: str | None = typer.Option(None, "--attempt", help="UUID exacto del intento que se autoriza reconciliar"),
+    apply: bool = typer.Option(False, "--apply", help="Publica la reconciliación; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Reconcilia una interrupción sin inventar un código de salida ni renderizar."""
+    try:
+        result = reconcile_interrupted_chain(
+            run_root, chain, apply=apply, confirm_stopped=confirm_stopped,
+            expected_attempt=attempt, reason=reason,
+        )
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reconciliación bloqueada: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"{'Reconciliado' if apply else 'Solo lectura'}: escena={result['scene_id']} "
+        f"cadena={chain} intento={result['attempt_id']} consumidos={result['consumed_attempts']} "
+        f"restantes={result['remaining_attempts']} siguiente_estado={result['next_state']} "
+        "exit_code=null termination_observed=false"
+    )
+    if apply:
+        typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --attempt <UUID> --confirm-stopped --reason <motivo>.")
+
+
 def main() -> None:
     app()
 
@@ -113,6 +146,19 @@ def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, con
                     f"fallidas={summary['failed_variants']} "
                     f"reanudadas={summary['resumed_variants']} "
                     f"inconsistencias={summary['inconsistent_variants']}"
+                ),
+                (
+                    "MATLAB "
+                    f"procesos_fallidos={summary.get('failed_matlab_processes', 0)} "
+                    f"recuperados={summary.get('recovered_matlab_processes', 0)} "
+                    f"recuperaciones_reanudadas={summary.get('resumed_recovered_variants', 0)}"
+                ),
+                (
+                    "Proceso "
+                    f"invocaciones={summary.get('matlab_invocations', summary['render_jobs'])} "
+                    f"reintentos={summary.get('process_retries', 0)} "
+                    f"variantes_tras_reintento={summary.get('variants_completed_after_retry', 0)} "
+                    f"corte={summary.get('circuit_open', False)}"
                 ),
                 (
                     "Muestreo "

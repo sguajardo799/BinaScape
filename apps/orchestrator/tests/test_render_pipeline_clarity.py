@@ -1,4 +1,6 @@
 import json
+import wave
+from render_fixtures import simulate_matlab_process, write_render_metadata, write_render_wav, write_variant_fixture
 from pathlib import Path
 
 import pytest
@@ -117,24 +119,8 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
 
     def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        render = manifest["render"]
-        Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-        Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
-        Path(render["output_metadata_path"]).write_text(
-            json.dumps(
-                {
-                    "scene_id": manifest["scene_id"],
-                    "output_type": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
-                    "hrtf_id": manifest["receiver"]["hrtfs"][0]["hrtf_id"],
-                    "summary": {"room": {"reverberation": {"t30_s": [0.5] * 10}}},
-                    "render": {
-                        "output_wav_path": render["output_wav_path"],
-                        "output_metadata_path": render["output_metadata_path"],
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
+        write_render_wav(manifest)
+        write_render_metadata(manifest)
 
     def fake_submit(runner, manifest_path: Path):
         jobs = _read_jsonl(manifest_path)
@@ -152,7 +138,7 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
             "message": "submitted",
         }
 
-    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", fake_render)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
     monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_handoff.submit_clarity_manifest", fake_submit)
 
     _, summary = render_static_scenes(config_path)
@@ -342,10 +328,7 @@ def _prepare_completed_render_variant(config_path: Path) -> dict[str, Path]:
     layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
     variant_record = _completed_variant_record(layout)
     layout["render_index_path"].write_text(json.dumps(variant_record) + "\n", encoding="utf-8")
-    Path(variant_record["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(variant_record["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    Path(variant_record["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(variant_record["render_metadata_path"]).write_text("{}", encoding="utf-8")
+    write_variant_fixture(variant_record, metadata=True)
     Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(), encoding="utf-8")
     return layout
 
@@ -463,7 +446,11 @@ def _write_config(
     (assets_root / "hrtf").mkdir(parents=True, exist_ok=True)
     (assets_root / "hrtf" / "sample.daff").write_text("daff", encoding="utf-8")
     (assets_root / "audio").mkdir(parents=True, exist_ok=True)
-    (assets_root / "audio" / "sample.wav").write_text("wav", encoding="utf-8")
+    with wave.open(str(assets_root / "audio" / "sample.wav"), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(44100)
+        audio.writeframes(bytes(200 * 2))
     for material_id in ["brick", "wood", "plaster"]:
         material_dir = assets_root / "materials" / material_id
         material_dir.mkdir(parents=True, exist_ok=True)

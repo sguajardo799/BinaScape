@@ -7,11 +7,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from uuid import uuid4
 import wave
 
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
+from acoustic_orchestrator.pipeline.render_validation import RenderValidation, RenderValidity, validate_render
+from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs
+from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.render_history import RenderHistory, history_root, load_render_history, resume_evidence
 
 
 _INDEX_LOCKS_GUARD = threading.Lock()
@@ -69,6 +73,14 @@ class VariantRecord(TypedDict):
     observed_outputs: ObservedOutputsRecord
     metadata_snapshot: MetadataSnapshot | None
     validation: ValidationRecord
+    render_validity: NotRequired[RenderValidity]
+    attempt_id: NotRequired[str]
+    attempt_outcome_path: NotRequired[str]
+    completion_path: NotRequired[str]
+    process_status: NotRequired[str]
+    exit_code: NotRequired[int | None]
+    decision: NotRequired[str]
+    recovery_reason: NotRequired[str | None]
     updated_at: str
 
 
@@ -159,7 +171,7 @@ def build_planned_variant_record(
     *,
     metadata_required: bool,
 ) -> VariantRecord:
-    return {
+    record: VariantRecord = {
         "variant_id": variant_paths["variant_id"],
         "scene_id": variant_paths["scene_id"],
         "output_type": variant_paths["output_type"],
@@ -180,6 +192,7 @@ def build_planned_variant_record(
         "validation": {"ok": True, "issues": []},
         "updated_at": _now_isoformat(),
     }
+    return record
 
 
 def inspect_variant(
@@ -188,9 +201,14 @@ def inspect_variant(
     metadata_required: bool,
     attempted: bool,
     resumed: bool = False,
+    render_validation: RenderValidation | None = None,
+    resume_history: RenderHistory | None = None,
 ) -> VariantRecord:
     observed_outputs = _observe_outputs(variant_paths)
     metadata_snapshot, validation_issues = _read_render_metadata(variant_paths["render_metadata_path"])
+    if render_validation is None:
+        render_validation = validate_render(variant_paths, metadata_required=metadata_required)
+    validation_issues.extend(render_validation.as_record()["issues"])
 
     required_outputs = [
         observed_outputs["runtime_manifest"],
@@ -201,9 +219,9 @@ def inspect_variant(
 
     if not attempted and not resumed:
         status: VariantStatus = "planned"
-    elif all(required_outputs):
+    elif all(required_outputs) and render_validation.validity == "valid":
         status = "completed"
-    elif any(required_outputs):
+    elif observed_outputs["rendered_wav"] or observed_outputs["render_metadata"]:
         status = "partial"
     else:
         status = "failed"
@@ -216,10 +234,10 @@ def inspect_variant(
             metadata_snapshot=metadata_snapshot,
         )
     )
-    if variant_paths["output_type"] == "circular_array" and validation_issues and status == "completed":
+    if validation_issues and status == "completed":
         status = "partial"
 
-    return {
+    record: VariantRecord = {
         "variant_id": variant_paths["variant_id"],
         "scene_id": variant_paths["scene_id"],
         "output_type": variant_paths["output_type"],
@@ -233,12 +251,26 @@ def inspect_variant(
         "receiver_ir_path": variant_paths["receiver_ir_path"],
         "observed_outputs": observed_outputs,
         "metadata_snapshot": metadata_snapshot,
+        "render_validity": render_validation.validity,
         "validation": {
             "ok": not validation_issues,
-            "issues": validation_issues,
+            "issues": list(dict.fromkeys(validation_issues)),
         },
         "updated_at": _now_isoformat(),
     }
+    if resumed:
+        history = resume_history if resume_history is not None else load_render_history(history_root(variant_paths))
+        allowed, prior = resume_evidence(history, variant_paths, None)
+        if allowed and prior is not None:
+            for field_name in ("attempt_id", "completion_path", "process_status", "exit_code", "decision", "recovery_reason"):
+                cast(dict[str, Any], record)[field_name] = prior.get(field_name)
+            record["attempt_outcome_path"] = prior["_outcome_path"].as_posix()
+        elif not allowed:
+            record["validation"]["ok"] = False
+            record["validation"]["issues"].append("resume_history_not_accepted")
+            record["render_validity"] = "not_verifiable"
+            record["status"] = "partial" if observed_outputs["rendered_wav"] or observed_outputs["render_metadata"] else "failed"
+    return record
 
 
 def should_resume_variant(
@@ -246,6 +278,8 @@ def should_resume_variant(
     variant_paths: RenderVariantPaths,
     *,
     metadata_required: bool,
+    history: RenderHistory | None = None,
+    expected_manifest: dict[str, Any] | None = None,
 ) -> bool:
     existing_record = existing_records.get(variant_paths["variant_id"])
     if existing_record is not None:
@@ -254,13 +288,21 @@ def should_resume_variant(
         if not existing_record["validation"]["ok"]:
             return False
 
-    current_record = inspect_variant(
-        variant_paths,
-        metadata_required=metadata_required,
-        attempted=False,
-        resumed=True,
-    )
-    return current_record["status"] == "completed" and current_record["validation"]["ok"]
+    if history is None:
+        history = load_render_history(history_root(variant_paths, existing_record))
+    allowed, _ = resume_evidence(history, variant_paths, existing_record, expected_manifest)
+    if not allowed:
+        return False
+    if expected_manifest is not None:
+        try:
+            current = read_json_object(Path(variant_paths["runtime_manifest_path"]))
+            if not equivalent_render_inputs(expected_manifest, current):
+                return False
+        except (OSError, ValueError):
+            return False
+
+    validation = validate_render(variant_paths, metadata_required=metadata_required, profile="reuse")
+    return validation.validity == "valid"
 
 
 def upsert_variant(index_path: Path, records: dict[str, VariantRecord], record: VariantRecord) -> None:
@@ -452,7 +494,7 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
     metadata_snapshot = cast(MetadataSnapshot | None, record.get("metadata_snapshot"))
     validation = cast(ValidationRecord | None, record.get("validation")) or {"ok": True, "issues": []}
 
-    return {
+    normalized: VariantRecord = {
         "variant_id": cast(str, record["variant_id"]),
         "scene_id": cast(str, record["scene_id"]),
         "output_type": cast(str, record["output_type"]),
@@ -472,6 +514,13 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
         },
         "updated_at": cast(str, record.get("updated_at", _now_isoformat())),
     }
+    if "render_validity" in record:
+        normalized["render_validity"] = cast(RenderValidity, record["render_validity"])
+    for field_name in ("attempt_id", "attempt_outcome_path", "completion_path", "process_status", "exit_code",
+                       "decision", "recovery_reason"):
+        if field_name in record:
+            cast(dict[str, Any], normalized)[field_name] = record[field_name]
+    return normalized
 
 
 def _normalize_clarity_record(record: dict[str, Any]) -> ClarityRecord:
@@ -542,7 +591,7 @@ def _read_render_metadata(render_metadata_path: str | None) -> tuple[MetadataSna
 
     try:
         payload = cast(dict[str, Any], json.loads(metadata_path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         return None, [f"render_metadata_parse_error: {exc}"]
 
     if not isinstance(payload, dict):

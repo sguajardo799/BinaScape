@@ -1,4 +1,4 @@
-function run_raven_static_render(config_path, diagnostics)
+function run_raven_static_render(config_path, diagnostics, completion_context)
     % Entry point para render estático.
     %
     % Uso esperado:
@@ -7,6 +7,9 @@ function run_raven_static_render(config_path, diagnostics)
     addpath(genpath(fileparts(mfilename('fullpath'))));
     if nargin < 2
         diagnostics = [];
+    end
+    if nargin < 3
+        completion_context = [];
     end
 
     fprintf('[INFO] Static render started\n');
@@ -17,7 +20,22 @@ function run_raven_static_render(config_path, diagnostics)
         if isstruct(diagnostics) && isscalar(diagnostics)
             diagnostics.initialization_started = true;
         end
-        cfg = load_scene_config(config_path, @validate_static_scene_config);
+        try
+            cfg = load_scene_config(config_path, @validate_static_scene_config);
+        catch input_error
+            % Solo carga/validación acredita invalid_input; nunca simulación.
+            try
+                write_render_failure(config_path, completion_context, input_error);
+            catch report_error
+                % Ni almacenamiento ni warnings-as-errors sustituyen el original.
+                try
+                    warning('BinaScape:Failure:ReportFailed', ...
+                        'No se pudo publicar el informe funcional: %s', report_error.message);
+                catch
+                end
+            end
+            rethrow(input_error);
+        end
         fprintf('[INFO] Config loaded\n');
 
         result = render_static_scene(cfg, diagnostics);
@@ -36,6 +54,7 @@ function run_raven_static_render(config_path, diagnostics)
                 'path', cfg.render.outputs(i).metadata_path, 'kind', 'metadata'));
             fprintf('[INFO] Variant %s written to %s\n', get_render_output_type(run_result), cfg.render.outputs(i).wav_path);
         end
+        write_render_completion(config_path, cfg, completion_context);
         emit_render_event(diagnostics, 'stage_completed', 'artifact_writing');
 
         fprintf('[INFO] Static render completed successfully\n');

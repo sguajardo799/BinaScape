@@ -105,8 +105,16 @@ def test_completed_artifacts_and_failed_process_remain_independent(tmp_path, mon
     config_path = _write_config(workspace, "failed_process", num_simulations=1, resume_if_possible=False)
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", successful_process)
+    previous_outputs = {}
     if preexisting:
         render_static_scenes(config_path)
+        previous_records = load_variant_index(layout["render_index_path"])
+        previous_canonical = previous_records["scene_static_0001__binaural_hrtf"]
+        previous_outputs = {Path(previous_canonical[key]): Path(previous_canonical[key]).read_bytes()
+                            for key in ("rendered_wav_path", "render_metadata_path")}
+        untouched = {Path(record[key]): (Path(record[key]).read_bytes(), Path(record[key]).stat().st_mtime_ns)
+                     for record in previous_records.values() if record["output_type"] != "binaural_hrtf"
+                     for key in ("rendered_wav_path", "render_metadata_path")}
     original_error = subprocess.CalledProcessError(31, "matlab")
     failed_directory = []
     def fail(command, **kwargs):
@@ -121,18 +129,31 @@ def test_completed_artifacts_and_failed_process_remain_independent(tmp_path, mon
     with pytest.raises(RenderStaticRunError) as caught:
         render_static_scenes(config_path)
     assert caught.value.__cause__ is original_error
-    assert caught.value.summary["completed_variants"] == 1
+    assert caught.value.summary["completed_variants"] == (2 if preexisting else 1)
     records = load_variant_index(layout["render_index_path"])
     canonical = records["scene_static_0001__binaural_hrtf"]
-    assert canonical["status"] == "completed"
-    assert canonical["validation"]["ok"] is True
+    assert canonical["status"] == ("failed" if preexisting else "completed")
+    assert canonical["validation"]["ok"] is (not preexisting)
+    assert canonical["decision"] == "abort"
+    if preexisting:
+        assert all(not path.exists() for path in previous_outputs)
+        journals = [json.loads(path.read_text(encoding="utf-8"))
+                    for path in (layout["render_attempts_dir"].parent / "replaced_outputs").glob("*/archive.json")]
+        entries = {Path(entry["original_path"]): entry
+                   for journal in journals if journal["state"] == "complete" for entry in journal["entries"]}
+        for path, content in previous_outputs.items():
+            assert Path(entries[path]["archive_path"]).read_bytes() == content
+            assert entries[path]["size_bytes"] == len(content)
+        assert all((path.read_bytes(), path.stat().st_mtime_ns) == value for path, value in untouched.items())
+        assert all(record["status"] == "completed" for record in records.values()
+                   if record["output_type"] != "binaural_hrtf")
     evidence = json.loads((failed_directory[0] / "invocation.json").read_text())
     assert evidence["process_status"] == "failed"
     assert evidence["exit_code"] == 31
     assert evidence["entrypoint_completed"] is (not preexisting)
     assert evidence["failure_location"] == ("indeterminate" if preexisting else "post_entrypoint")
-    assert all(a["observed_before"] is preexisting for a in evidence["artifacts"])
-    assert all(a["observed_after"] is True for a in evidence["artifacts"])
+    assert all(a["observed_before"] is False for a in evidence["artifacts"])
+    assert all(a["observed_after"] is (not preexisting) for a in evidence["artifacts"])
     assert all(a["write_confirmed"] is False for a in evidence["artifacts"])
 
 
@@ -162,7 +183,8 @@ def test_diagnostic_failure_does_not_change_pipeline_state(tmp_path, monkeypatch
             _, result = render_static_scenes(config_path)
         records = load_variant_index(layout["render_index_path"])
         resume = {key: should_resume_variant(records, record, metadata_required=True) for key, record in records.items()}
-        normalized = {key: {field: value for field, value in record.items() if field != "updated_at"}
+        normalized = {key: {field: value for field, value in record.items()
+                            if field not in {"updated_at", "attempt_id", "attempt_outcome_path", "completion_path"}}
                       for key, record in records.items()}
         return result, normalized, resume
     baseline = execute_and_observe()

@@ -19,11 +19,11 @@ El orquestador SHALL asignar una identidad única a cada intento de invocar MATL
 - **THEN** no se registra una invocación nueva ni un éxito de proceso ficticio
 
 ### Requirement: Registro del resultado del proceso
-El orquestador SHALL conservar por intento el comando, tiempos de inicio y fin, duración no negativa, código de salida si existe, error de lanzamiento o ejecución y rutas de diagnóstico y artefactos esperados. SHALL conservar la salida de consola de MATLAB en un log identificable cuando el almacenamiento esté disponible.
+El orquestador SHALL conservar por intento el comando, tiempos de inicio y fin, duración no negativa, código de salida si existe, error de lanzamiento o ejecución y rutas de diagnóstico y artefactos esperados. SHALL conservar la salida de consola de MATLAB en un log identificable cuando el almacenamiento esté disponible. El resultado del proceso SHALL conservarse independientemente de que la política funcional propague el fallo o permita continuar.
 
 #### Scenario: Proceso con salida no cero
 - **WHEN** MATLAB termina con un código no cero
-- **THEN** el resumen conserva ese código, la duración, la asociación al log y las rutas esperadas antes de propagar el fallo
+- **THEN** el resumen conserva ese código, la duración, la asociación al log y las rutas esperadas, tanto si el fallo se propaga como si la aceptación funcional permite continuar
 
 #### Scenario: Ejecutable no disponible
 - **WHEN** no se puede lanzar el ejecutable MATLAB
@@ -74,11 +74,12 @@ El diagnóstico SHALL distinguir rutas esperadas, archivos observados antes y de
 - **THEN** se conserva la confirmación del WAV, escritura como etapa no completada y ausencia de confirmación para los metadatos
 
 ### Requirement: Compatibilidad funcional y aislamiento del diagnóstico
-El diagnóstico SHALL NOT cambiar estados del índice de render, validación, reanudación, reintentos T30, planificación, salidas acústicas ni propagación de errores del renderer. Las llamadas estáticas existentes sin contexto de diagnóstico SHALL seguir aceptándose. Los fallos exclusivos de diagnóstico SHALL advertirse sin sustituir errores originales ni convertir un render correcto en fallido.
+El diagnóstico SHALL NOT autorizar aceptación ni cambiar estados del índice, validación, reanudación, reintentos T30, planificación, salidas acústicas o decisión funcional. La recuperación y propagación de errores SHALL regirse por el contrato funcional independiente. Las llamadas estáticas existentes sin contexto de diagnóstico SHALL seguir aceptándose. Los fallos exclusivos de diagnóstico SHALL advertirse sin sustituir errores originales ni convertir un render correcto en fallido.
 
 #### Scenario: Artefactos completos con proceso fallido
-- **WHEN** las reglas actuales clasifican los artefactos como completed pero MATLAB termina con error
-- **THEN** el índice conserva ese estado, el diagnóstico conserva el fallo del proceso y el error sigue propagándose
+- **WHEN** existen artefactos completos pero MATLAB termina con error
+- **THEN** el diagnóstico conserva el fallo del proceso y no decide su recuperación
+- **AND** solo una constancia funcional válida del intento y validación completa satisfactoria permiten continuar con advertencia; en ausencia de esas condiciones el fallo no se recupera
 
 #### Scenario: Diagnóstico no escribible
 - **WHEN** falla la creación o actualización de un archivo exclusivo de diagnóstico
@@ -103,3 +104,11 @@ El diagnóstico SHALL NOT cambiar estados del índice de render, validación, re
 #### Scenario: Llamada MATLAB anterior
 - **WHEN** se invoca el entrypoint estático con solo el manifiesto, sin contexto de diagnóstico
 - **THEN** la llamada mantiene su contrato funcional anterior
+
+#### Scenario: Evento final sin constancia funcional
+- **WHEN** se conserva `entrypoint_completed` pero falta una constancia funcional válida y el proceso termina con error
+- **THEN** el evento mantiene su significado diagnóstico y no autoriza recuperación
+
+#### Scenario: Recuperación sin eventos diagnósticos
+- **WHEN** la constancia funcional y todas las validaciones permiten recuperar un proceso fallido pero no se conservaron eventos
+- **THEN** la decisión funcional no cambia, `entrypoint_completed` no se inventa y el diagnóstico no atribuye una causa de cierre no confirmada

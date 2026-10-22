@@ -11,9 +11,9 @@ function setup(testCase)
     testCase.TestData.previous_directory = pwd;
     testCase.TestData.context = struct('attempt_id', char(java.util.UUID.randomUUID), ...
         'events_path', fullfile(root, 'events.jsonl'));
-    output = struct('project_name', 'test-project', 'wav_path', fullfile(root, 'test.wav'), ...
+    output = struct('project_name', 'test-project', 'output_type', 'test', 'wav_path', fullfile(root, 'test.wav'), ...
         'metadata_path', fullfile(root, 'test.json'));
-    DIAGNOSTIC_TEST_CFG = struct('render', struct('sample_rate_hz', 44100, ...
+    DIAGNOSTIC_TEST_CFG = struct('scene_id', 'scene', 'render', struct('sample_rate_hz', 44100, ...
         'effective_seed', 1, 'seed_source', 'test', 'outputs', output), ...
         'receiver', struct('hrtfs', struct('hrtf_id', 'test', 'hrtf_path', 'test.daff')), ...
         'background_noise', []);
@@ -40,11 +40,13 @@ function setup(testCase)
         "function write_output_wav(varargin)"
         "global DIAGNOSTIC_TEST_FAILURE"
         "if strcmp(DIAGNOSTIC_TEST_FAILURE, 'wav'), error('Test:Wav', 'wav failed'); end"
+        "fid=fopen(varargin{3}, 'wb'); fwrite(fid, uint8('wav'), 'uint8'); fclose(fid);"
         "end"]);
     write_stub(root, 'export_render_metadata', [
         "function export_render_metadata(varargin)"
         "global DIAGNOSTIC_TEST_FAILURE"
         "if strcmp(DIAGNOSTIC_TEST_FAILURE, 'metadata'), error('Test:Metadata', 'metadata failed'); end"
+        "fid=fopen(varargin{3}, 'wb'); fwrite(fid, uint8('{}'), 'uint8'); fclose(fid);"
         "end"]);
     write_stub(root, 'DiagnosticsRavenStub', [
         "classdef DiagnosticsRavenStub < handle"
@@ -93,6 +95,23 @@ function testSuccessStageAndStepOrder(testCase)
     step_events = events(startsWith(types, 'step_'));
     verifyEqual(testCase, cellfun(@(e) e.step, step_events, 'UniformOutput', false), ...
         {'raven_run'; 'raven_run'; 'audio_postprocessing'; 'audio_postprocessing'});
+end
+
+function testOptionalFunctionalContextPreservesLegacyCalls(testCase)
+    % El contrato funcional es independiente del argumento de diagnóstico.
+    [input, context] = functional_context(testCase);
+    run_raven_static_render('stub-input.json');
+    verifyFalse(testCase, isfile(testCase.TestData.context.events_path));
+    run_raven_static_render('stub-input.json', []);
+    verifyFalse(testCase, isfile(testCase.TestData.context.events_path));
+    run_raven_static_render(input, [], context);
+    verifyFalse(testCase, isfile(testCase.TestData.context.events_path));
+    verifyTrue(testCase, isfile(context.completion_path));
+    context.attempt_id = repmat('b', 1, 32);
+    context.completion_path = fullfile(testCase.TestData.root, 'second-completion.json');
+    run_raven_static_render(input, testCase.TestData.context, context);
+    events = read_events(testCase);
+    verifyEqual(testCase, events{end}.type, 'entrypoint_completed');
 end
 
 function testFailuresDoNotCompleteActiveStage(testCase)
@@ -160,6 +179,7 @@ function testLegacyAndMultiVariantCallsPreserveResults(testCase)
     DIAGNOSTIC_TEST_CFG.receiver.hrtfs(2) = struct('hrtf_id', 'second', 'hrtf_path', 'second.daff');
     second = DIAGNOSTIC_TEST_CFG.render.outputs(1);
     second.project_name = 'test-second';
+    second.output_type = 'second';
     second.wav_path = fullfile(testCase.TestData.root, 'second.wav');
     second.metadata_path = fullfile(testCase.TestData.root, 'second.json');
     DIAGNOSTIC_TEST_CFG.render.outputs(2) = second;
@@ -178,6 +198,57 @@ function testLegacyAndMultiVariantCallsPreserveResults(testCase)
     verifyEqual(testCase, cellfun(@(e) e.output_type, writes, 'UniformOutput', false), ...
         {'test'; 'test'; 'second'; 'second'});
     verifyEqual(testCase, numel(unique(cellfun(@(e) e.sequence, events))), numel(events));
+end
+
+function testFunctionalCompletionRequiresBothWriters(testCase)
+    global DIAGNOSTIC_TEST_FAILURE
+    [input, context] = functional_context(testCase);
+    for mode = ["wav", "metadata"]
+        DIAGNOSTIC_TEST_FAILURE = char(mode);
+        identifier = 'Test:Wav';
+        if mode == "metadata", identifier = 'Test:Metadata'; end
+        verifyError(testCase, @() run_raven_static_render(input, [], context), identifier);
+        verifyFalse(testCase, isfile(context.completion_path));
+    end
+    DIAGNOSTIC_TEST_FAILURE = '';
+    run_raven_static_render(input, [], context);
+    receipt = jsondecode(fileread(context.completion_path));
+    verifyEqual(testCase, {receipt.artifacts.kind}, {'wav', 'metadata'});
+    for item = transpose(receipt.artifacts(:))
+        verifyEqual(testCase, item.sha256, sha256_file(item.path));
+    end
+end
+
+function testFunctionalCompletionSurvivesUnavailableDiagnostics(testCase)
+    [input, context] = functional_context(testCase);
+    broken = testCase.TestData.context;
+    broken.events_path = fullfile(testCase.TestData.root, 'missing', 'events.jsonl');
+    state = warning('query', 'BinaScape:Diagnostics:Unavailable');
+    testCase.addTeardown(@() warning(state));
+    warning('error', 'BinaScape:Diagnostics:Unavailable');
+    run_raven_static_render(input, broken, context);
+    verifyTrue(testCase, isfile(context.completion_path));
+    verifyFalse(testCase, isfile(broken.events_path));
+end
+
+function testFunctionalPublicationErrorIsNotDiagnostic(testCase)
+    [input, context] = functional_context(testCase);
+    context.completion_path = fullfile(testCase.TestData.root, 'missing', 'completion.json');
+    verifyError(testCase, @() run_raven_static_render(input, testCase.TestData.context, context), ...
+        'BinaScape:Completion:WriteFailed');
+    events = read_events(testCase);
+    verifyEqual(testCase, events{end}.type, 'error');
+    verifyFalse(testCase, any(cellfun(@(e) strcmp(e.type, 'entrypoint_completed'), events)));
+end
+
+function [input, context] = functional_context(testCase)
+    input = fullfile(testCase.TestData.root, 'functional-input.json');
+    fid = fopen(input, 'wb');
+    fwrite(fid, uint8('{}'), 'uint8');
+    fclose(fid);
+    context = struct('attempt_id', repmat('a', 1, 32), 'variant_id', 'scene__test', ...
+        'manifest_sha256', sha256_file(input), ...
+        'completion_path', fullfile(testCase.TestData.root, 'completion.json'));
 end
 
 function testDiagnosticAndWarningFailuresPreserveOriginalException(testCase)

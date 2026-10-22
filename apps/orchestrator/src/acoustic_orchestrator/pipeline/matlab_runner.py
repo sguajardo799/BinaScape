@@ -1,13 +1,17 @@
 import json
 import re
 import subprocess
+import time
 from copy import deepcopy
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
+from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -28,43 +32,89 @@ class RenderVariantPaths(TypedDict):
     sample_rate_hz: NotRequired[int]
 
 
+@dataclass
+class MatlabProcessResult:
+    attempt: RenderAttempt
+    exit_code: int | None
+    error: Exception | None
+    termination_observed: bool
+    process_status: str
+
+
 def render_manifest_with_matlab(
-    manifest_path: Path, matlab_executable: str = "matlab", *, diagnostics_dir: Path | None = None
-) -> None:
+    manifest_path: Path, matlab_executable: str = "matlab", *, diagnostics_dir: Path | None = None,
+    attempts_dir: Path | None = None,
+    attempt: RenderAttempt | None = None,
+) -> MatlabProcessResult:
     manifest_path = manifest_path.resolve()
-    diagnostics = MatlabDiagnostics(manifest_path, diagnostics_dir)
-    context = ""
+    attempt = attempt or RenderAttempt(manifest_path, attempts_dir)
+    if attempt.manifest_path != manifest_path or attempt.record["command"] is not None:
+        raise ValueError("attempt must be fresh and belong to this manifest")
+    started = time.monotonic()
+    diagnostics = MatlabDiagnostics(manifest_path, diagnostics_dir, attempt_id=attempt.attempt_id,
+                                    variant_id=attempt.variant_id, input_snapshot_path=attempt.snapshot_path)
+    context = "[]"
     if diagnostics.ready:
         context = (
-            f", struct('attempt_id', '{diagnostics.attempt_id}', "
+            f"struct('attempt_id', '{diagnostics.attempt_id}', "
             f"'events_path', '{_escape_matlab_path(diagnostics.events_path)}')"
         )
+    escaped_variant = attempt.variant_id.replace("'", "''")
+    completion_context = (
+        f"struct('attempt_id', '{attempt.attempt_id}', 'variant_id', '{escaped_variant}', "
+        f"'manifest_sha256', '{attempt.manifest_sha256}', "
+        f"'completion_path', '{_escape_matlab_path(attempt.completion_path)}', "
+        f"'failure_path', '{_escape_matlab_path(attempt.failure_path)}')"
+    )
     batch_command = (
         f"addpath(genpath('{_escape_matlab_path(MATLAB_APP_DIR)}')); "
-        f"run_raven_static_render('{_escape_matlab_path(manifest_path)}'{context});"
+        f"run_raven_static_render('{_escape_matlab_path(attempt.snapshot_path)}', {context}, {completion_context});"
     )
     command = [matlab_executable, "-batch", batch_command]
+    attempt.record["command"] = command
+    attempt.save()  # Functional storage must be ready before launching MATLAB.
     console = diagnostics.begin(command)
     exit_code = None
-    error = None
-    observed = False
+    error: Exception | None = None
+    finished = False
+    termination_observed = False
     try:
         if not MATLAB_ENTRYPOINT.is_file():
             raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
-        options = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
+        options: dict[str, Any] = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
         completed = subprocess.run(command, check=True, **options)
+        if type(completed.returncode) is not int:
+            raise RuntimeError("No se observó un código de salida válido de MATLAB")
         exit_code = completed.returncode
-        observed = True
+        termination_observed = True
+        if exit_code != 0:
+            error = subprocess.CalledProcessError(exit_code, command)
+        finished = True
     except Exception as exc:
         error = exc
         if isinstance(exc, subprocess.CalledProcessError):
             exit_code = exc.returncode
-        observed = True
-        raise
+            termination_observed = type(exit_code) is int
+        finished = True
     finally:
         diagnostics.close_console(console)
-        if observed:
+        if finished:
             diagnostics.safely(lambda: diagnostics.finish(exit_code, error))
+    process_status = ("succeeded" if exit_code == 0 else "failed" if termination_observed else
+                      "launch_failed" if isinstance(error, OSError) else "termination_unobserved")
+    attempt.record.update(
+        process_status=process_status, exit_code=exit_code, termination_observed=termination_observed,
+        finished_at=datetime.now(UTC).isoformat(), duration_s=max(0.0, time.monotonic() - started),
+        error=None if error is None else {"type": type(error).__name__, "message": str(error)},
+    )
+    try:
+        attempt.save()
+    except Exception as storage_error:
+        if error is not None:
+            error.add_note(f"Functional process evidence could not be persisted: {storage_error}")
+            raise error from storage_error
+        raise
+    return MatlabProcessResult(attempt, exit_code, error, termination_observed, process_status)
 
 
 def write_single_receiver_render_manifest(
@@ -75,7 +125,20 @@ def write_single_receiver_render_manifest(
     receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
     source_path_rewrites: dict[str, str] | None = None,
 ) -> Path:
+    manifest_path, variant_manifest = build_single_receiver_render_manifest(
+        scene_manifest, hrtf, output_dir, outputs, receiver_output, source_path_rewrites,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(variant_manifest, indent=2), encoding="utf-8", newline="\n")
+    return manifest_path
+
+
+def build_single_receiver_render_manifest(
+    scene_manifest: dict, hrtf: dict, output_dir: Path, outputs: OutputsConfig,
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
+    source_path_rewrites: dict[str, str] | None = None,
+) -> tuple[Path, dict]:
+    """Build expected runtime input without overwriting resume evidence."""
     variant_paths = build_render_variant_paths(
         scene_manifest=scene_manifest,
         hrtf=hrtf,
@@ -107,8 +170,7 @@ def write_single_receiver_render_manifest(
             source["audio_path"] = rewritten_path
 
     manifest_path = Path(variant_paths["runtime_manifest_path"])
-    manifest_path.write_text(json.dumps(variant_manifest, indent=2), encoding="utf-8")
-    return manifest_path
+    return manifest_path, variant_manifest
 
 
 # Compatibilidad para consumidores del helper anterior, sin cambiar el contrato.

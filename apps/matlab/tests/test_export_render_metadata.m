@@ -167,6 +167,21 @@ function testSourceProvenanceSurvivesContextSummaryAndJsonForAllOutputs(testCase
     end
 end
 
+function testMetadataIsUtf8(testCase)
+    cfg = struct('schema_version', '3.0', 'scene_id', 'escena_á', ...
+        'job_id', 'job', 'scene_type', 'static');
+    result = struct('fs', 44100, 'hrtf_id', 'test', 'summary', struct('note', 'áéí ñ'));
+    output_path = [tempname '.json'];
+    testCase.addTeardown(@() delete_if_exists(output_path));
+    export_render_metadata(cfg, result, output_path);
+    fid = fopen(output_path, 'rb');
+    bytes = fread(fid, Inf, '*uint8');
+    fclose(fid);
+    payload = jsondecode(native2unicode(bytes.', 'UTF-8'));
+    verifyEqual(testCase, payload.scene_id, cfg.scene_id);
+    verifyEqual(testCase, payload.summary.note, result.summary.note);
+end
+
 function delete_if_exists(path_value)
     if isfile(path_value)
         delete(path_value);
