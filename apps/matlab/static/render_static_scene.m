@@ -1,4 +1,4 @@
-function result = render_static_scene(cfg)
+function result = render_static_scene(cfg, diagnostics)
     % Renderiza una escena estática.
     %
     % Requiere:
@@ -21,6 +21,12 @@ function result = render_static_scene(cfg)
     %   result.fs      -> frecuencia de muestreo
     %   result.summary -> struct con metadata resumida
 
+    if nargin < 2
+        diagnostics = [];
+    end
+    if ~isstruct(diagnostics) || ~isfield(diagnostics, 'initialization_started') || ~diagnostics.initialization_started
+        emit_render_event(diagnostics, 'stage_started', 'initialization');
+    end
     fs = 44100;
     if double(cfg.render.sample_rate_hz) ~= fs
         error('BinaScape:Matlab:UnsupportedSampleRate', ...
@@ -39,7 +45,7 @@ function result = render_static_scene(cfg)
         else
             active_hrtf = cfg.receiver.hrtfs(i);
         end
-        runs(i) = render_single_receiver_run(cfg, active_hrtf, cfg.render.outputs(i), fs);
+        runs(i) = render_single_receiver_run(cfg, active_hrtf, cfg.render.outputs(i), fs, diagnostics, i > 1);
     end
 
     result = struct();
@@ -56,7 +62,7 @@ function result = render_static_scene(cfg)
     end
 end
 
-function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, fs)
+function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, fs, diagnostics, start_initialization)
     run_manifest = cfg;
     is_array = isempty(active_hrtf);
     if ~is_array
@@ -66,8 +72,13 @@ function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, f
     run_ctx = struct();
     if is_array
         run_ctx.output_type = 'circular_array';
+        event_details = struct('output_type', 'circular_array');
     else
         run_ctx.hrtf_id = active_hrtf.hrtf_id;
+        event_details = struct('output_type', active_hrtf.hrtf_id);
+    end
+    if start_initialization
+        emit_render_event(diagnostics, 'stage_started', 'initialization', event_details);
     end
     run_ctx.project_name = output_cfg.project_name;
     run_ctx.effective_seed = cfg.render.effective_seed;
@@ -93,7 +104,15 @@ function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, f
     rpf.setFixPoissonSequence(1);
     %rpf.plotModel;
 
+    emit_render_event(diagnostics, 'stage_completed', 'initialization', event_details);
+    emit_render_event(diagnostics, 'stage_started', 'simulation', event_details);
+    step_details = event_details;
+    step_details.step = 'raven_run';
+    emit_render_event(diagnostics, 'step_started', 'simulation', step_details);
     rpf.run();
+    emit_render_event(diagnostics, 'step_completed', 'simulation', step_details);
+    step_details.step = 'audio_postprocessing';
+    emit_render_event(diagnostics, 'step_started', 'simulation', step_details);
     if is_array
         channels = cfg.receiver.circular_array.num_microphones;
         BRIR = collect_circular_array_responses(rpf, ctx.n_sources, channels, fs);
@@ -128,6 +147,8 @@ function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, f
     run_result.audio = mix;
     run_result.fs = fs;
     run_result.summary = mix_summary;
+    emit_render_event(diagnostics, 'step_completed', 'simulation', step_details);
+    emit_render_event(diagnostics, 'stage_completed', 'simulation', event_details);
 end
 
 function [mix, summary] = mix_rendered_sources(ctx, BRIR, fs, room_reverberation, filter_length, channels, downmix)

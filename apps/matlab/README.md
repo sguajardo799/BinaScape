@@ -73,6 +73,141 @@ evitando una sustitución silenciosa por el HRTF predeterminado al serializar.
 Los archivos v1.7 rechazados por el backend deben reemplazarse o convertirse
 fuera de esta ruta; no se convierten automáticamente ni se omiten errores.
 
+## Diagnóstico opcional del render estático
+
+El entrypoint sigue aceptando solo el manifiesto. Para emitir eventos incrementales
+JSONL, puede recibir un segundo argumento (el directorio destino debe existir):
+
+```matlab
+diagnostics = struct('attempt_id', 'identificador-unico-del-intento', ...
+    'events_path', 'D:/outputs/run/metadata/diagnostics/matlab/intento/events.jsonl');
+run_raven_static_render('example/scene_static_0001.json', diagnostics)
+```
+
+El orquestador asigna el UUID y crea el contexto automáticamente por invocación.
+`render_static_scene(cfg, diagnostics)` también acepta contexto opcional; sin él,
+ambas funciones conservan sus llamadas anteriores y no crean archivos de eventos.
+Este diagnóstico no habilita el render dinámico, que continúa sin soporte.
+
+`emit_render_event` escribe una línea UTF-8 completa y cierra el archivo por evento.
+Los campos base son `schema_version: 1`, `attempt_id`, `sequence`, `timestamp` UTC,
+`type` y `stage`. Las etapas `initialization`, `simulation` y `artifact_writing`
+emiten `stage_started`/`stage_completed`. Dentro de `simulation` se emiten
+`step_started`/`step_completed` con `step=raven_run` alrededor de `rpf.run()` y
+`step=audio_postprocessing` para respuestas, reverberación, convolución, mezcla y ruido.
+Son cuatro eventos ligeros por variante, sin instrumentación interna de RAVEN.
+
+Cada escritor que retorna correctamente emite `artifact_written` con `kind`, `path`
+y `output_type`; si falla la exportación de metadatos después del WAV, solo el WAV
+queda confirmado. Un fallo emite `error` con identificador, mensaje y stack y se
+relanza la excepción original. Las variantes múltiples conservan identidad de salida
+en sus eventos; no se colapsan sus secuencias.
+
+`entrypoint_completed` confirma únicamente que el entrypoint terminó sus escrituras.
+**No confirma que MATLAB haya cerrado correctamente** ni establece `process_status`:
+el orquestador registra ese resultado aparte, a partir del código de salida observado.
+Una caída puede dejar incompleta la última etapa o línea de eventos. Los fallos
+exclusivos del diagnóstico (incluidas advertencias configuradas como errores) no
+deben cambiar las excepciones ni resultados funcionales. La persistencia depende
+del almacenamiento disponible; no hay recuperación automática ni limpieza de logs.
+
+Pruebas sin simulación RAVEN real:
+
+```matlab
+addpath(genpath('apps/matlab'));
+results = runtests({'apps/matlab/tests/test_emit_render_event.m', ...
+    'apps/matlab/tests/test_render_diagnostics.m'});
+assertSuccess(results);
+```
+
+## Constancia funcional opcional de finalización
+
+La firma compatible del entrypoint es:
+
+`run_raven_static_render(config_path, diagnostics, completion_context)`
+
+El tercer argumento es opcional y no se mezcla con los eventos diagnósticos. Una
+llamada con solo manifiesto, o manifiesto y diagnóstico, mantiene su contrato
+anterior y no crea constancia. Para emitirla sin diagnóstico, usar `[]` como segundo
+argumento. Ejemplo de preparación manual (revisar antes las rutas acústicas del
+manifiesto y usar un directorio nuevo):
+
+```matlab
+addpath(genpath('apps/matlab'));
+attempt_id = erase(char(java.util.UUID.randomUUID), '-');
+attempt_root = fullfile('D:/outputs/run/metadata/render_attempts', attempt_id);
+mkdir(attempt_root);
+snapshot_path = fullfile(attempt_root, 'input_manifest.json');
+copyfile('example/scene_static_0001.json', snapshot_path);
+completion_context = struct('attempt_id', attempt_id, ...
+    'variant_id', 'scene_static_0001__binaural_hrtf', ...
+    'manifest_sha256', sha256_file(snapshot_path), ...
+    'completion_path', fullfile(attempt_root, 'completion.json'), ...
+    'failure_path', fullfile(attempt_root, 'failure.json'));
+run_raven_static_render(snapshot_path, [], completion_context);
+```
+
+El productor comprueba el SHA-256 de los bytes exactos del manifiesto, escribe y
+cierra todos los WAV y metadatos y publica `completion.json` como última operación
+funcional. Sus campos versión 1 son `schema_version`, `attempt_id`, `scene_id`,
+`variant_id`, `output_type`, `manifest_sha256` y `artifacts`. Cada artefacto incluye
+`kind`, `path` absoluta normalizada, `size_bytes` y `sha256`. Para varias salidas,
+inventaría todas y usa `output_type=batch`; el orquestador selecciona una variante
+por invocación. Los hashes se calculan por bloques mediante Java, sin comandos de
+shell; no se reserializa el manifiesto para calcular su huella.
+
+La publicación usa temporal UTF-8 y renombrado atómico del mismo directorio mediante
+Java NIO. Si la plataforma no ofrece esa operación, se propaga el error: no se
+degrada a copiar y borrar. Un temporal remanente no es evidencia de finalización y
+una constancia final existente no se reemplaza. Se presupone un único escritor por
+intento y rutas públicas distintas para variantes concurrentes; no se garantiza
+durabilidad ante pérdida eléctrica ni semántica de sistemas de archivos de red no
+ensayados. El directorio funcional debe existir antes del render.
+
+Los errores de escritura, cierre, hash o publicación son funcionales y se propagan;
+los fallos exclusivos de diagnóstico siguen siendo de mejor esfuerzo. La constancia
+no acredita fidelidad física, validez del WAV o T30, ni demuestra que MATLAB cerró
+correctamente. El pipeline del orquestador exige además validación independiente
+completa antes de continuar con advertencia tras un código no cero. El render
+dinámico continúa sin soporte.
+
+Pruebas de contrato y fallos de escritura sin RAVEN:
+
+```matlab
+results = runtests({'apps/matlab/tests/test_render_completion.m', ...
+    'apps/matlab/tests/test_render_diagnostics.m', ...
+    'apps/matlab/tests/test_export_render_metadata.m'});
+assertSuccess(results);
+```
+
+## Informe funcional opcional de entrada inválida
+
+El mismo tercer argumento admite aditivamente `failure_path`. Solo un error de
+`load_scene_config` o de `validate_static_scene_config` intenta publicar
+`failure.json`; un fallo posterior de inicialización, simulación o escritura no
+se clasifica como entrada inválida. Las firmas de uno/dos argumentos y los
+contextos anteriores sin `failure_path` no requieren ni generan este informe.
+
+El esquema 1 contiene `schema_version`, `attempt_id`, `variant_id`,
+`manifest_sha256`, `category=invalid_input` y `error` con `identifier` y `message`
+originales. `scene_id` y `output_type` se incluyen solo si el contexto los aporta:
+no se deducen de una entrada rechazada. Antes de publicar se comprueba el hash de
+los bytes del snapshot. El directorio debe existir; se escribe/cierra un temporal
+UTF-8 y se renombra atómicamente sin reemplazar evidencia previa ni degradar a
+copia/borrado. Un error al guardar el informe (incluso si la advertencia también
+falla) conserva y relanza la excepción de entrada original.
+
+Este archivo **no es éxito ni finalización**: `completion.json` acredita otro
+hecho funcional y los eventos JSONL siguen siendo diagnóstico de mejor esfuerzo.
+Su ausencia no prueba transitoriedad ni identifica la causa de un fallo desconocido.
+Python verifica esquema estricto, identidad y hash contra el snapshot independiente;
+un informe corrupto/ajeno o la coexistencia con una constancia, incluso corrupta,
+es conflicto de integridad. El clasificador debe consultar esta verificación antes
+de aceptar recuperación o programar otro intento; no interpreta la consola.
+
+Prueba aislada sin RAVEN: `runtests('apps/matlab/tests/test_render_failure.m')`
+desde la raíz, después de `addpath(genpath('apps/matlab'))`.
+
 ## Important Files
 
 - `run_raven_static_render.m`: entrypoint for supported static rendering.

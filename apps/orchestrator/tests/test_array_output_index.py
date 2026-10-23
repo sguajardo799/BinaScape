@@ -4,6 +4,7 @@ from pathlib import Path
 import wave
 
 import pytest
+from render_fixtures import write_variant_fixture
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig
 from acoustic_orchestrator.experiment.receiver_geometry import build_circular_array_descriptor
@@ -20,14 +21,7 @@ def _outputs(tmp_path: Path, *, metadata: bool = True) -> dict:
         "rendered_wav_path": str(tmp_path / "array.wav"), "render_metadata_path": str(tmp_path / "meta.json"),
         "receiver_ir_path": None, "circular_array": descriptor, "sample_rate_hz": 44100,
     }
-    runtime = {"receiver": {"hrtfs": [], "circular_array": descriptor}, "render": {"active_output_type": "circular_array"}}
-    Path(paths["runtime_manifest_path"]).write_text(json.dumps(runtime), encoding="utf-8")
-    _write_wav(Path(paths["rendered_wav_path"]), 8, 44100)
-    if metadata:
-        payload = {"scene_id": "scene", "output_type": "circular_array", "receiver": {
-            "coordinate_frame": "public_xyz_y_up", "circular_array": descriptor,
-        }}
-        Path(paths["render_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+    write_variant_fixture(paths, metadata=metadata)
     return paths
 
 

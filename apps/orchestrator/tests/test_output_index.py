@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import pytest
+from render_fixtures import write_variant_fixture
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths, build_render_variant_paths
@@ -60,10 +62,7 @@ def test_build_render_variant_paths_returns_deterministic_identity(tmp_path: Pat
 
 def test_inspect_variant_returns_normalized_record_payload(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     record = inspect_variant(variant_paths, metadata_required=False, attempted=True, resumed=True)
 
@@ -85,6 +84,7 @@ def test_inspect_variant_returns_normalized_record_payload(tmp_path: Path) -> No
             "render_metadata": False,
         },
         "metadata_snapshot": None,
+        "render_validity": "valid",
         "validation": {"ok": True, "issues": []},
         "updated_at": record["updated_at"],
     }
@@ -128,25 +128,61 @@ def test_upsert_variant_rewrites_current_record_per_variant(tmp_path: Path) -> N
 
 def test_metadata_disabled_allows_completed_without_metadata(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     record = inspect_variant(variant_paths, metadata_required=False, attempted=True)
 
     assert record["status"] == "completed"
 
 
-def test_failed_attempt_with_partial_outputs_stays_partial(tmp_path: Path) -> None:
+def test_runtime_input_alone_is_not_a_produced_output(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
     Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
     Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
+    assert record["status"] == "failed"
+    assert summarize_variant_index({record["variant_id"]: record})["failed_variants"] == 1
+
+
+def test_wav_without_required_metadata_is_partial(tmp_path: Path) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths)
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
     assert record["status"] == "partial"
-    assert summarize_variant_index({record["variant_id"]: record})["partial_variants"] == 1
+    assert record["render_validity"] == "incomplete"
+
+
+@pytest.mark.parametrize("case", ["text_wav", "truncated_wav", "empty_metadata", "changed_source"])
+def test_all_present_but_invalid_artifacts_never_complete_or_resume(tmp_path: Path, case: str) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths, metadata=True)
+    wav, metadata = Path(paths["rendered_wav_path"]), Path(paths["render_metadata_path"])
+    if case == "text_wav":
+        wav.write_text("not audio", encoding="utf-8")
+    elif case == "truncated_wav":
+        wav.write_bytes(wav.read_bytes()[:-4])
+    elif case == "empty_metadata":
+        metadata.write_text("{}", encoding="utf-8")
+    else:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+        payload["summary"]["sources"][0]["gain_db"] = 8
+        metadata.write_text(json.dumps(payload), encoding="utf-8")
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
+    assert record["status"] == "partial"
+    assert record["render_validity"] == "invalid"
+    assert not record["validation"]["ok"]
+    assert not should_resume_variant({}, paths, metadata_required=True)
+
+
+def test_render_validity_survives_index_roundtrip(tmp_path: Path) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths, metadata=True)
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
+    index = tmp_path / "index.jsonl"
+    upsert_variant(index, {}, record)
+    assert load_variant_index(index)[record["variant_id"]]["render_validity"] == "valid"
 
 
 def test_failed_attempt_with_zero_outputs_is_failed(tmp_path: Path) -> None:
@@ -216,7 +252,7 @@ def test_inspect_variant_collects_metadata_snapshot_from_summary_fallback(tmp_pa
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
-    assert record["status"] == "completed"
+    assert record["status"] == "partial"  # Snapshot extraction is not acceptance.
     assert record["metadata_snapshot"] == {
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -224,7 +260,7 @@ def test_inspect_variant_collects_metadata_snapshot_from_summary_fallback(tmp_pa
         "rendered_wav_path": variant_paths["rendered_wav_path"],
         "render_metadata_path": variant_paths["render_metadata_path"],
     }
-    assert record["validation"] == {"ok": True, "issues": []}
+    assert record["validation"]["ok"] is False
 
 
 def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Path) -> None:
@@ -250,7 +286,7 @@ def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Pat
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
-    assert record["status"] == "completed"
+    assert record["status"] == "partial"
     assert record["validation"]["ok"] is False
     assert any("scene_id" in issue for issue in record["validation"]["issues"])
     assert any("output_type" in issue or "hrtf_id" in issue for issue in record["validation"]["issues"])
@@ -260,10 +296,7 @@ def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Pat
 
 def test_should_resume_only_when_outputs_are_observably_complete(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     assert should_resume_variant({}, variant_paths, metadata_required=False) is True
     assert should_resume_variant({}, variant_paths, metadata_required=True) is False

@@ -23,6 +23,8 @@ class ArtifactLayout(TypedDict):
     clarity_manifest_dir: Path
     clarity_jobs_path: Path
     render_index_path: Path
+    matlab_diagnostics_dir: Path
+    render_attempts_dir: Path
     sampling_failures_path: Path
     clarity_index_path: Path
     render_outputs_root: Path
@@ -47,11 +49,18 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
         "clarity_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "clarity",
         "clarity_jobs_path": run_root / "metadata" / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
         "render_index_path": run_root / "metadata" / "indexes" / "render_index.jsonl",
+        "matlab_diagnostics_dir": run_root / "metadata" / "diagnostics" / "matlab",
+        "render_attempts_dir": run_root / "metadata" / "render_attempts",
         "sampling_failures_path": run_root / "metadata" / "indexes" / "scene_sampling_failures.jsonl",
         "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
         "render_outputs_root": run_root / "output_audio" / "render",
         "degraded_output_root": run_root / "output_audio" / "degraded",
     }
+
+
+def resolve_render_attempts_dir(manifest_path: Path, attempts_dir: Path | None = None) -> Path:
+    """Resolve functional storage independently of best-effort diagnostics."""
+    return (attempts_dir if attempts_dir is not None else manifest_path.parent / "render_attempts").resolve()
 
 
 def resolve_output_paths(

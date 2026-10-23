@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import pytest
+from render_fixtures import write_variant_fixture
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.clarity_handoff import build_clarity_job_record, get_clarity_job_issues, prepare_clarity_handoff
@@ -100,10 +101,7 @@ def test_prepare_clarity_handoff_expands_variant_per_profile_and_skips_invalid_v
         + "\n",
         encoding="utf-8",
     )
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    Path(_completed_variant_record(layout)["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["render_metadata_path"]).write_text("{}", encoding="utf-8")
+    write_variant_fixture(_completed_variant_record(layout), metadata=True)
     Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(), encoding="utf-8")
 
     summary = prepare_clarity_handoff(config, submit=False)
@@ -183,10 +181,7 @@ def test_prepare_clarity_handoff_persists_blocked_records_for_invalid_hearing_pr
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
     layout["render_index_path"].write_text(json.dumps(_completed_variant_record(layout)) + "\n", encoding="utf-8")
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    Path(_completed_variant_record(layout)["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["render_metadata_path"]).write_text("{}", encoding="utf-8")
+    write_variant_fixture(_completed_variant_record(layout), metadata=True)
     Path(config.hearing_degradation.hearing_profiles_path).write_text(
         "\n".join(
             [
@@ -265,10 +260,7 @@ def test_prepare_clarity_handoff_reports_blocked_submission_without_backend(
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
     layout["render_index_path"].write_text(json.dumps(_completed_variant_record(layout)) + "\n", encoding="utf-8")
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    Path(_completed_variant_record(layout)["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(_completed_variant_record(layout)["render_metadata_path"]).write_text("{}", encoding="utf-8")
+    write_variant_fixture(_completed_variant_record(layout), metadata=True)
     Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(profile_ids=["mild_loss"]), encoding="utf-8")
     monkeypatch.setattr(
         "acoustic_orchestrator.pipeline.clarity_handoff.submit_clarity_manifest",

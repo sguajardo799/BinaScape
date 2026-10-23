@@ -7,6 +7,10 @@ from acoustic_orchestrator.config.validator import load_hearing_profile_catalog
 from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.clarity_runner import submit_clarity_manifest
 from acoustic_orchestrator.pipeline.clarity_eligibility import is_clarity_output_eligible
+from acoustic_orchestrator.pipeline.matlab_runner import build_single_receiver_render_manifest, receiver_variants
+from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.render_history import RenderHistory, load_render_history, resume_evidence
+from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
 from acoustic_orchestrator.pipeline.output_index import (
     ClarityBackendInvocationRecord,
     ClarityJobManifestRecord,
@@ -26,6 +30,7 @@ from acoustic_orchestrator.pipeline.output_paths import (
     ArtifactLayout,
     resolve_artifact_layout,
     resolve_clarity_job_paths,
+    get_receiver_output_config,
 )
 
 
@@ -75,6 +80,7 @@ def prepare_clarity_handoff(
         )
 
     render_records = load_variant_index(layout["render_index_path"])
+    render_history = load_render_history(layout["render_attempts_dir"])
     clarity_records = dict(load_clarity_index(layout["clarity_index_path"]))
     planned_jobs: list[ClarityJobManifestRecord] = []
     try:
@@ -120,6 +126,7 @@ def prepare_clarity_handoff(
         if not is_clarity_output_eligible(variant_record["output_type"]):
             continue
         manifest_path = layout["clarity_jobs_path"]
+        revalidation_issues = _revalidate_render_input(config, variant_record, render_history)
         for hearing_profile in hearing_profiles:
             job = build_clarity_job_record(
                 config=config,
@@ -131,6 +138,7 @@ def prepare_clarity_handoff(
                 config=config,
                 variant_record=variant_record,
                 job=job,
+                revalidation_issues=revalidation_issues,
             )
 
             if not eligibility_issues and resume_enabled and should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
@@ -191,6 +199,39 @@ def prepare_clarity_handoff(
                 "Jobs de Clarity preparados" if planned_jobs else "No hay jobs de Clarity pendientes para preparar o reenviar"
             ),
         )
+
+    # Planning can involve many profiles and index writes. Check disk evidence
+    # again at the submission boundary, not only before creating the jobs.
+    current_render_records = load_variant_index(layout["render_index_path"])
+    current_history = load_render_history(layout["render_attempts_dir"])
+    checked_inputs: dict[str, list[str]] = {}
+    valid_jobs = []
+    for job in planned_jobs:
+        variant = current_render_records.get(job["variant_id"])
+        if variant is None:
+            input_issues = ["render_revalidation:index_record_missing"]
+        else:
+            if job["variant_id"] not in checked_inputs:
+                checked_inputs[job["variant_id"]] = _revalidate_render_input(config, variant, current_history)
+            input_issues = get_clarity_job_issues(
+                config=config, variant_record=variant, job=job,
+                revalidation_issues=checked_inputs[job["variant_id"]],
+            )
+        if input_issues:
+            upsert_clarity_record(
+                layout["clarity_index_path"], clarity_records,
+                build_clarity_record(job, manifest_path=layout["clarity_jobs_path"], status="blocked",
+                                    attempted=False, resumed=False, runnable=False, validation_issues=input_issues),
+            )
+        else:
+            valid_jobs.append(job)
+    if len(valid_jobs) != len(planned_jobs):
+        planned_jobs = valid_jobs
+        write_clarity_job_manifest(layout["clarity_jobs_path"], planned_jobs)
+    if not planned_jobs:
+        return _build_summary(records=clarity_records, layout=layout, config=config, submitted=False,
+                              auto_submit=submit_enabled, backend_command=None,
+                              message="Entradas de render rechazadas al revalidar antes del envío")
 
     submission = submit_clarity_manifest(config.hearing_degradation.runner, layout["clarity_jobs_path"])
     if submission["status"] == "blocked":
@@ -294,6 +335,7 @@ def get_clarity_job_issues(
     config: AppConfig,
     variant_record: VariantRecord,
     job: ClarityJobManifestRecord,
+    revalidation_issues: list[str] | None = None,
 ) -> list[str]:
     issues: list[str] = []
 
@@ -332,6 +374,64 @@ def get_clarity_job_issues(
     if not Path(job["hearing_profiles_path"]).is_file():
         issues.append(f"missing_hearing_profiles:{job['hearing_profiles_path']}")
 
+    for field_name, input_path, expected_path in (
+        ("input_wav_path", job["input_wav_path"], variant_record["rendered_wav_path"]),
+        ("input_render_metadata_path", job["input_render_metadata_path"], variant_record["render_metadata_path"]),
+    ):
+        try:
+            if not expected_path or Path(input_path).resolve() != Path(expected_path).resolve():
+                issues.append(f"render_revalidation:job_{field_name}_mismatch")
+        except (OSError, ValueError):
+            issues.append(f"render_revalidation:job_{field_name}_invalid")
+    for field_name, job_value, render_value in (
+        ("variant_id", job["variant_id"], variant_record["variant_id"]),
+        ("scene_id", job["scene_id"], variant_record["scene_id"]),
+        ("output_type", job["output_type"], variant_record["output_type"]),
+    ):
+        if job_value != render_value:
+            issues.append(f"render_revalidation:job_{field_name}_mismatch")
+    if not issues:
+        issues.extend(revalidation_issues if revalidation_issues is not None else _revalidate_render_input(config, variant_record))
+
+    return issues
+
+
+def _revalidate_render_input(
+    config: AppConfig, record: VariantRecord, history: RenderHistory | None = None,
+) -> list[str]:
+    """Read current input evidence once per variant, not once per hearing profile."""
+    validation = validate_render(record, metadata_required=True, profile="reuse")
+    issues = [f"render_revalidation:{issue}" for issue in validation.as_record()["issues"]]
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    expected_manifest = None
+    if not issues:
+        try:
+            current = read_json_object(Path(record["runtime_manifest_path"]))
+            scene_path = layout["scene_manifest_dir"] / f"{record['scene_id']}.json"
+            if scene_path.is_file():
+                scene = read_json_object(scene_path)
+                descriptor = next(
+                    item for item in receiver_variants(scene)
+                    if item.get("hrtf_id", item.get("output_type")) == record["output_type"]
+                )
+                prepared_root = (layout["prepared_audio_dir"] / record["scene_id"]).resolve()
+                runtime_sources = current["sources"]
+                runtime_sources = runtime_sources if isinstance(runtime_sources, list) else [runtime_sources]
+                rewrites = {source["source_id"]: source["audio_path"] for source in runtime_sources
+                            if Path(source["audio_path"]).resolve().is_relative_to(prepared_root)}
+                _, expected_manifest = build_single_receiver_render_manifest(
+                    scene, descriptor, layout["runtime_manifest_dir"], config.outputs,
+                    get_receiver_output_config(config, record["output_type"]), rewrites,
+                )
+                if not equivalent_render_inputs(expected_manifest, current):
+                    issues.append("render_revalidation:current_scene_mismatch")
+        except (OSError, ValueError, TypeError, KeyError, StopIteration) as exc:
+            issues.append(f"render_revalidation:runtime_input_unverifiable:{exc}")
+    if history is None:
+        history = load_render_history(layout["render_attempts_dir"])
+    allowed, _ = resume_evidence(history, record, record, expected_manifest)
+    if not allowed:
+        issues.append("render_history_not_accepted")
     return issues
 
 
@@ -389,6 +489,8 @@ def _is_blocking_issue(issues: list[str]) -> bool:
             "missing_input_wav",
             "missing_input_render_metadata",
             "missing_hearing_profiles",
+            "render_revalidation:",
+            "render_history_not_accepted",
         ]
     )
 
