@@ -105,6 +105,11 @@ def test_scene_mean_exports_are_additive_and_round_trip_nulls(sample_run):
     assert json.loads(rows[0]["selected_frequencies_hz"]) == [125, 250]
     summary = json.loads(artifacts["summary"].read_text())
     assert summary["rt30_scene_means"] == expected
+    metrics = json.loads(artifacts["metrics_json"].read_text())
+    scene_metrics = [r for r in metrics if r["key"].startswith("rt30_scene_mean_")]
+    assert len(scene_metrics) == 3
+    assert scene_metrics[0]["n_excluded"] == 1
+    assert scene_metrics[1]["observations"][0]["value"] == expected[0]["raven_mean_s"]
     assert summary["rt30_matched_means"][0]["n_pairs"] == 1
     assert summary["rt30_matched_means"][0]["sabine_mean_s"] == 0.5
     for stem in ("rt30_pairs", "rt30_records", "rt30_consolidated"):
