@@ -12,6 +12,33 @@ La arquitectura transversal se describe en [visión general](../../docs/architec
 - El flujo soportado es estático. Aunque el modelo enumera `dynamic`, la validación lo rechaza y el renderer dinámico MATLAB sigue siendo un placeholder.
 - Python planifica el ruido de fondo; MATLAB sintetiza o carga el ruido y lo mezcla después del render.
 
+### Observación de progreso
+
+`pipeline/progress.py` contiene `ProgressEvent`, el callback opcional y un
+`ProgressReporter` por ejecución. Los eventos de presentación no son evidencia
+de aceptación, reanudación ni autorización de reintentos. Un callback defectuoso
+se desactiva sin sustituir errores funcionales; `KeyboardInterrupt` se propaga.
+No se persiste este estado en manifiestos o índices.
+
+`terminal_progress.py` pertenece al CLI: Rich escribe en stderr y un solo hilo
+posee la presentación interactiva. Las llamadas programáticas no crean interfaz
+sin solicitar observación. Un consumidor puede recoger eventos sin imprimir:
+
+```python
+from acoustic_orchestrator.pipeline.progress import ProgressReporter
+
+events = []
+report = ProgressReporter(events.append)
+report.begin("evaluacion", 1, "escenas")
+report.start("scene_0001")
+report.resolve("scene_0001", "nuevas")
+report.finish()
+```
+
+El ETA usa solo unidades nuevas aceptadas y necesita tres muestras por etapa.
+Las reutilizaciones actualizan contadores pero no velocidad; el paralelismo se
+estima por tiempo de reloj, sin multiplicar dos veces por workers.
+
 ## Módulos actuales
 
 | Área | Módulo | Responsabilidad |

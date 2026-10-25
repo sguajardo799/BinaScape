@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import typer
+from acoustic_orchestrator.terminal_progress import TerminalProgress
 
 from acoustic_orchestrator.pipeline.render_pipeline import (
     RenderSummary,
@@ -23,8 +24,14 @@ def callback() -> None:
 
 
 @app.command("generate-manifests")
-def generate_manifests(config: Path) -> None:
-    manifest_paths, sampling = generate_static_manifests_with_summary(config)
+def generate_manifests(
+    config: Path,
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr"),
+) -> None:
+    with TerminalProgress(enabled=not no_progress) as terminal:
+        manifest_paths, sampling = generate_static_manifests_with_summary(
+            config, progress=terminal if not no_progress else None,
+        )
     typer.echo(
         " ".join(
             [
@@ -43,9 +50,13 @@ def generate_manifests(config: Path) -> None:
 
 
 @app.command("render-static")
-def render_static(config: Path) -> None:
+def render_static(
+    config: Path,
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr"),
+) -> None:
     try:
-        manifest_paths, summary = render_static_scenes(config)
+        with TerminalProgress(enabled=not no_progress) as terminal:
+            manifest_paths, summary = render_static_scenes(config, progress=terminal if not no_progress else None)
     except RenderStaticRunError as exc:
         _echo_render_summary(exc.manifest_paths, exc.summary, config)
         raise typer.Exit(code=1) from exc
@@ -61,8 +72,10 @@ def render_static(config: Path) -> None:
 def clarity_handoff(
     config: Path,
     submit: bool = typer.Option(False, "--submit", help="Ejecuta el backend de Clarity después de preparar el manifiesto"),
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr, incluido Clarity"),
 ) -> None:
-    summary = run_clarity_handoff(config, submit=submit)
+    with TerminalProgress(enabled=not no_progress) as terminal:
+        summary = run_clarity_handoff(config, submit=submit, progress=terminal if not no_progress else None)
     typer.echo(
         " ".join(
             [

@@ -6,6 +6,7 @@ import yaml
 from acoustic_orchestrator.config.validator import load_hearing_profile_catalog
 from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.clarity_runner import submit_clarity_manifest
+from acoustic_orchestrator.pipeline.progress import ProgressReporter
 from acoustic_orchestrator.pipeline.clarity_eligibility import is_clarity_output_eligible
 from acoustic_orchestrator.pipeline.matlab_runner import build_single_receiver_render_manifest, receiver_variants
 from acoustic_orchestrator.pipeline.render_attempt import read_json_object
@@ -63,6 +64,24 @@ def prepare_clarity_handoff(
     config: AppConfig,
     *,
     submit: bool | None = None,
+    progress: ProgressReporter | None = None,
+) -> ClaritySummary:
+    progress = progress or ProgressReporter()
+    progress.begin("Clarity preparacion" if config.hearing_degradation.enabled else "Clarity deshabilitado")
+    summary = _prepare_clarity_handoff(config, submit=submit, progress=progress)
+    progress.counters.update({
+        "planificados": summary["planned_jobs"], "reutilizados": summary["resumed_jobs"],
+        "bloqueados": summary["blocked_jobs"], "omitidos": summary["skipped_jobs"],
+    })
+    message = summary["message"]
+    if not summary["submitted"] and summary["planned_jobs"] and not summary["auto_submit"]:
+        message += "; ejecucion pendiente"
+    progress.finish(message)
+    return summary
+
+
+def _prepare_clarity_handoff(
+    config: AppConfig, *, submit: bool | None, progress: ProgressReporter,
 ) -> ClaritySummary:
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     submit_enabled = config.hearing_degradation.runner.auto_submit if submit is None else submit
@@ -202,6 +221,8 @@ def prepare_clarity_handoff(
 
     # Planning can involve many profiles and index writes. Check disk evidence
     # again at the submission boundary, not only before creating the jobs.
+    progress.finish("jobs preparados")
+    progress.begin("Clarity revalidando entradas")
     current_render_records = load_variant_index(layout["render_index_path"])
     current_history = load_render_history(layout["render_attempts_dir"])
     checked_inputs: dict[str, list[str]] = {}
@@ -233,7 +254,7 @@ def prepare_clarity_handoff(
                               auto_submit=submit_enabled, backend_command=None,
                               message="Entradas de render rechazadas al revalidar antes del envío")
 
-    submission = submit_clarity_manifest(config.hearing_degradation.runner, layout["clarity_jobs_path"])
+    submission = submit_clarity_manifest(config.hearing_degradation.runner, layout["clarity_jobs_path"], progress=progress)
     if submission["status"] == "blocked":
         for job in planned_jobs:
             upsert_clarity_record(

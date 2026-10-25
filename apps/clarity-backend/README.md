@@ -13,7 +13,7 @@ it through files and subprocesses instead of importing backend internals.
 - Python `>=3.12,<3.13`
 - `uv`
 - Dependencies declared in `pyproject.toml`, including `pyclarity`, `numpy`,
-  `scipy`, `soundfile`, and `PyYAML`
+  `scipy`, `soundfile`, `PyYAML`, and `rich`
 - Input WAV files compatible with the current MSBG integration
 
 Current integration note: the MSBG path used here expects stereo WAV input at
@@ -58,6 +58,31 @@ Preferred invocation from the repository root:
 ```sh
 uv run --project apps/clarity-backend clarity-backend run-manifest path/to/clarity_jobs.jsonl
 ```
+
+### Progress and ETA
+
+The CLI owns a local progress display on stderr. It counts each nonempty manifest
+line as one variant/profile job and advances only after its result metadata has
+been written. Completed and failed counts are separate; an interrupted traversal
+leaves unresolved jobs pending. A completed traversal with failures still exits
+with status `1`. Progress never changes the requested WAV or JSON sidecar paths,
+metadata contents, or the DSP algorithm.
+
+Elapsed time remains visible during long jobs in an interactive terminal. The
+approximate ETA needs three newly completed jobs in the current invocation;
+failed jobs do not provide fast timing samples. There is no global pipeline ETA.
+With redirected stderr, only brief transitions are printed without animation or
+ANSI. Disable both forms without hiding functional errors:
+
+```sh
+uv run --project apps/clarity-backend clarity-backend run-manifest path/to/clarity_jobs.jsonl --no-progress
+```
+
+Direct Python calls to `run_manifest(path)` are silent by default. An optional
+`progress=events.append` callback receives transient `JobEvent` observations, not
+functional evidence. Presentation failures do not replace processing errors.
+When the orchestrator launches this backend, its own display is suspended so
+the two applications do not compete for the terminal.
 
 When called from `apps/orchestrator`, the sibling invocation is typically:
 

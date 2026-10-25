@@ -12,6 +12,7 @@ from acoustic_orchestrator.config.models import CircularArrayOutputConfig, Outpu
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
+from acoustic_orchestrator.pipeline.progress import ProgressReporter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -45,6 +46,7 @@ def render_manifest_with_matlab(
     manifest_path: Path, matlab_executable: str = "matlab", *, diagnostics_dir: Path | None = None,
     attempts_dir: Path | None = None,
     attempt: RenderAttempt | None = None,
+    progress: ProgressReporter | None = None,
 ) -> MatlabProcessResult:
     manifest_path = manifest_path.resolve()
     attempt = attempt or RenderAttempt(manifest_path, attempts_dir)
@@ -74,6 +76,9 @@ def render_manifest_with_matlab(
     attempt.record["command"] = command
     attempt.save()  # Functional storage must be ready before launching MATLAB.
     console = diagnostics.begin(command)
+    if progress is not None:
+        progress.emit("attempt_begin", key=attempt.variant_id, attempt_id=attempt.attempt_id,
+                      events_path=diagnostics.events_path.as_posix())
     exit_code = None
     error: Exception | None = None
     finished = False
@@ -100,6 +105,8 @@ def render_manifest_with_matlab(
         diagnostics.close_console(console)
         if finished:
             diagnostics.safely(lambda: diagnostics.finish(exit_code, error))
+        if progress is not None:
+            progress.emit("attempt_end", key=attempt.variant_id, attempt_id=attempt.attempt_id)
     process_status = ("succeeded" if exit_code == 0 else "failed" if termination_observed else
                       "launch_failed" if isinstance(error, OSError) else "termination_unobserved")
     attempt.record.update(
