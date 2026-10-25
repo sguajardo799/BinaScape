@@ -45,6 +45,7 @@ def build_analysis(
         "rt30_records": data.rt30_records,
         "rt30_comparisons": data.rt30_comparisons,
         "rt30_consolidated": data.rt30_consolidated,
+        "rt30_scene_means": data.rt30_scene_means,
         "materials": data.materials,
         "sampling_records": data.sampling_records,
         "sampling_batches": data.sampling_batches,

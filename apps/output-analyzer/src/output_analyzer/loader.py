@@ -32,6 +32,7 @@ class AnalysisData:
     rt30_comparisons: list[JsonObject] = data_field(default_factory=list)
     rt30_consolidated: list[JsonObject] = data_field(default_factory=list)
     rt30_records: list[JsonObject] = data_field(default_factory=list)
+    rt30_scene_means: list[JsonObject] = data_field(default_factory=list)
     materials: list[JsonObject] = data_field(default_factory=list)
     sampling_records: list[JsonObject] = data_field(default_factory=list)
     sampling_batches: list[JsonObject] = data_field(default_factory=list)
@@ -1075,6 +1076,7 @@ def load_run(run_dir: str | Path) -> AnalysisData:
             data.rt30_comparisons.append(row)
             if valid:
                 data.rt30_pairs.append(row)
+    data.rt30_scene_means = _rt30_scene_means(data)
     _coverage(data, reader, expected, renders)
     for (variant, profile), doc in degraded.items():
         data.degraded_records.append(_degraded(doc, reader))
@@ -1102,6 +1104,65 @@ def load_run(run_dir: str | Path) -> AnalysisData:
         f"{i['category']}: {i['entity']} {i['field']}" for i in data.incidents
     ]
     return data
+
+
+def _rt30_scene_means(data):
+    """Complete selected-band means, independent of paired-band availability."""
+    sampling = {row["scene_id"]: row for row in data.sampling_records}
+    records = {"sabine": defaultdict(dict), "raven": defaultdict(dict)}
+    for row in data.rt30_records:
+        if row.get("method") == "Sabine estimate":
+            records["sabine"][row["scene_id"]][row.get("frequency_hz")] = row
+    for row in data.rt30_consolidated:
+        records["raven"][row["scene_id"]][row.get("frequency_hz")] = row
+    result = []
+    for scene_id in sorted({row["scene_id"] for row in data.scenes}):
+        sample = sampling.get(scene_id, {})
+        raw = _nested(sample, "reverberation_sampling", "mean_bands_hz")
+        frequencies = [_number(f) for f in raw] if isinstance(raw, list) else []
+        valid_selection = bool(frequencies) and all(
+            f is not None and f > 0 for f in frequencies
+        ) and len(set(frequencies)) == len(frequencies)
+        selected = sorted(frequencies) if valid_selection else []
+        row = dict(
+            scene_id=scene_id,
+            selected_frequencies_hz=selected,
+            band_group="bands_" + "_".join(str(f).replace(".", "p") for f in selected)
+            if selected else "selection_unavailable",
+            n_expected_bands=len(selected),
+            selection_exclusion_reason=None if selected else "missing_or_invalid_selected_frequencies",
+            provenance=sorted({sample["metadata_path"]} if sample.get("metadata_path") else set()),
+        )
+        paths = set(row["provenance"])
+        for method in ("sabine", "raven"):
+            values, unavailable, causes = [], [], set()
+            for frequency in selected:
+                band = records[method][scene_id].get(frequency, {})
+                value = _number(band.get("value_s"))
+                if value is not None and value > 0:
+                    values.append(value)
+                else:
+                    unavailable.append(frequency)
+                if band.get("cause_id"):
+                    causes.add(band["cause_id"])
+                paths.update(band.get("provenance", []))
+                if band.get("metadata_path"):
+                    paths.add(band["metadata_path"])
+            row.update({
+                f"{method}_mean_s": _mean(values) if selected and not unavailable else None,
+                f"{method}_n_valid_bands": len(values),
+                f"{method}_unavailable_frequencies_hz": unavailable,
+                f"{method}_cause_ids": sorted(causes),
+                f"{method}_exclusion_reason": row["selection_exclusion_reason"]
+                or ("missing_invalid_or_conflicted_selected_band" if unavailable else None),
+            })
+        row["provenance"] = sorted(paths)
+        row["difference_mean_s"] = (
+            row["raven_mean_s"] - row["sabine_mean_s"]
+            if row["raven_mean_s"] is not None and row["sabine_mean_s"] is not None else None
+        )
+        result.append(row)
+    return result
 
 
 def _coverage(data, reader, expected, renders):
@@ -1346,6 +1407,7 @@ def summary_for(data: AnalysisData) -> JsonObject:
         populations=populations,
         general_parameters=data.general_parameters,
         rt30_matched_means=matched,
+        rt30_scene_means=data.rt30_scene_means,
         expected_variant_count=len(known) if known else None,
         variant_completeness=sum(r["present"] for r in known) / len(known)
         if known

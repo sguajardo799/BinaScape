@@ -46,6 +46,8 @@ RT30 Sabine estimates and RAVEN reported T30 are metadata, not WAV measurements.
 
 ## Export observation units
 
+Complete scene means use each manifest's explicit `mean_bands_hz`, not all reported bands or render-variant weighting. `rt30_scene_means` contains one row per unique scene with selected frequencies, per-method complete means, valid-band counts, unavailable frequencies, exclusion reasons and metadata provenance. Every selected band must be finite and positive. Missing/invalid/duplicate selections make both means unavailable; a missing or conflicted RAVEN band does not suppress an independently complete Sabine mean. Extra bands never enter these means. Existing `summary.json` → `rt30_matched_means` and room-card means still use available matched pairs and can be partial; their semantics are unchanged.
+
 All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/JSONL preserve nested fields and nulls; CSV is a flat transport with serialized nested values. Null/missing values mean unavailable, never an imputed zero.
 
 | File stem | Observation unit |
@@ -59,6 +61,7 @@ All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/J
 | `rt30_consolidated` | One RAVEN scene/frequency estimate, dispersion, variants and exclusion cause; no HRTF weighting |
 | `rt30_comparisons` | All candidate scene/frequency comparisons, including excluded pairs and reasons |
 | `rt30_pairs` | Consolidated scene/frequency pair, with Sabine, RAVEN and difference in seconds |
+| `rt30_scene_means` | Unique scene, complete selected-band means per method, exclusions and provenance; also retained in summary.json |
 | `materials` | Scene/surface material and area, walls identified by `wall_ids` |
 | `sampling_records` | Available sampling metadata/failure observations |
 | `sampling_failures` | Parsed rows from the optional sampling failure index |
