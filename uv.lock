@@ -261,6 +261,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pyclarity" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "scipy" },
     { name = "soundfile" },
 ]
@@ -270,6 +271,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyclarity", specifier = "==0.8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.7" },
     { name = "scipy", specifier = ">=1.17" },
     { name = "soundfile", specifier = ">=0.13" },
 ]

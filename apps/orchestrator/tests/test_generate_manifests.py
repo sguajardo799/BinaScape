@@ -1978,7 +1978,13 @@ def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
     monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_with_available_retry)
     monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
-    manifest_paths, summary = render_static_scenes(config_path)
+    progress_events = []
+    manifest_paths, summary = render_static_scenes(config_path, progress=progress_events.append)
+    canonical = [e for e in progress_events if e.stage == "Render canonico" and e.kind == "resolved"]
+    assert len(canonical) == 1
+    assert canonical[0].outcome == "aceptadas"
+    assert canonical[0].counters["remuestreos_T30"] == 1
+    assert canonical[0].counters["invocaciones"] == 2
 
     assert render_order[:2] == ["binaural_hrtf", "binaural_hrtf"]
     assert render_order[2:] == ["bte_front_hartf", "bte_rear_hartf"]
@@ -2022,7 +2028,11 @@ def test_invalid_canonical_raven_t30_exhausts_shared_scene_budget(
     monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_at_budget)
     monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
-    manifest_paths, summary = render_static_scenes(config_path)
+    progress_events = []
+    manifest_paths, summary = render_static_scenes(config_path, progress=progress_events.append)
+    canonical = [e for e in progress_events if e.stage == "Render canonico" and e.kind == "resolved"]
+    assert len(canonical) == 1
+    assert canonical[0].outcome == "fallidas"
 
     assert manifest_paths == []
     assert render_order == ["binaural_hrtf"]
@@ -2429,13 +2439,18 @@ def test_render_static_scenes_parallel_indexes_all_submitted_results_before_rais
     monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
 
     with pytest.raises(RenderStaticRunError, match="parallel matlab failed") as exc_info:
-        render_static_scenes(config_path)
+        progress_events = []
+        render_static_scenes(config_path, progress=progress_events.append)
 
     assert exc_info.value.summary["completed_variants"] == 2
     assert exc_info.value.summary["failed_variants"] == 1
     assert exc_info.value.summary["planned_variants"] == 0
     records = [json.loads(line) for line in layout["render_index_path"].read_text(encoding="utf-8").splitlines()]
     assert {record["status"] for record in records} == {"completed", "failed"}
+    resolved = [e for e in progress_events if e.kind == "resolved" and e.stage == "Otras variantes"]
+    assert len(resolved) == len({e.key for e in resolved}) == 2
+    assert resolved[-1].counters["fallidas"] == 1
+    assert progress_events[-1].outcome == "interrumpido"
 
 
 def test_render_static_scenes_reports_metadata_inconsistencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2485,7 +2500,7 @@ def test_render_static_cli_reports_summary_when_render_fails(tmp_path: Path, mon
     config_path = _write_config(workspace, "cli_render_failure")
     runner = CliRunner()
 
-    def fake_render_static(_config_path: Path) -> tuple[list[Path], RenderSummary]:
+    def fake_render_static(_config_path: Path, **kwargs) -> tuple[list[Path], RenderSummary]:
         raise RenderStaticRunError(
             manifest_paths=[Path("scene_static_0001.json")],
             summary={
@@ -2529,7 +2544,7 @@ def test_render_static_cli_preserves_generate_manifests_command(tmp_path: Path, 
 
     monkeypatch.setattr(
         "acoustic_orchestrator.cli.render_static_scenes",
-        lambda config_path: (
+        lambda config_path, **kwargs: (
             [Path("scene_static_0001.json")],
             RenderSummary(
                 {
@@ -2598,7 +2613,7 @@ def test_render_static_cli_returns_partial_exit_code_for_sampling_failures(
     )
     monkeypatch.setattr(
         "acoustic_orchestrator.cli.render_static_scenes",
-        lambda config: ([tmp_path / "scene_static_0001.json"], summary),
+        lambda config, **kwargs: ([tmp_path / "scene_static_0001.json"], summary),
     )
 
     result = CliRunner().invoke(app, ["render-static", str(tmp_path / "config.yml")])
@@ -2636,7 +2651,7 @@ def test_generate_manifests_cli_exit_code_reflects_sampling_batch_status(
     }
     monkeypatch.setattr(
         "acoustic_orchestrator.cli.generate_static_manifests_with_summary",
-        lambda config: (manifests, summary),
+        lambda config, **kwargs: (manifests, summary),
     )
 
     result = CliRunner().invoke(app, ["generate-manifests", str(config_path)])

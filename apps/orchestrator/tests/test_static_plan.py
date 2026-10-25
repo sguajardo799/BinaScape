@@ -38,7 +38,78 @@ def publish(config, layout):
 
 def snapshot(root):
     return {p.relative_to(root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
-            for p in root.rglob("*") if p.is_file()}
+             for p in root.rglob("*") if p.is_file()}
+
+
+def test_plan_progress_new_reused_and_conflict_is_read_only(tmp_path):
+    from acoustic_orchestrator.pipeline.progress import ProgressReporter
+
+    config, layout = fixture_config(tmp_path)
+    events = []
+    inspect_static_plan(config, layout, progress=ProgressReporter(events.append))
+    resolved = [e for e in events if e.kind == "resolved"]
+    assert [e.outcome for e in resolved] == ["nuevas"] * 3
+    assert [e.completed for e in resolved] == [1, 2, 3]
+    assert not layout["run_root"].exists()
+    plan = publish(config, layout)
+    events.clear()
+    inspect_static_plan(config, layout, progress=ProgressReporter(events.append))
+    assert [e.outcome for e in events if e.kind == "resolved"] == ["conservadas"] * 3
+    plan.manifests[-1].path.write_text("{")
+    before = snapshot(layout["run_root"])
+    events.clear()
+    with pytest.raises(StaticPlanConflict):
+        inspect_static_plan(config, layout, progress=ProgressReporter(events.append))
+    assert events[-1].completed == 3
+    assert "no publicado" in events[-1].outcome
+    assert events[-1].counters["conflictos"] == 1
+    assert snapshot(layout["run_root"]) == before
+
+
+def test_publication_announced_only_after_revalidation(tmp_path):
+    from acoustic_orchestrator.pipeline.progress import ProgressReporter
+
+    config, layout = fixture_config(tmp_path)
+    plan = inspect_static_plan(config, layout)
+    events = []
+    with static_writer_lock(layout) as lock:
+        apply_static_plan(plan, lock=lock, progress=ProgressReporter(events.append))
+    assert [e.stage for e in events if e.kind == "begin"] == [
+        "Verificando plan antes de publicar", "Publicando plan"]
+    events.clear()
+    stale = inspect_static_plan(config, layout)
+    stale.manifests[0].path.write_text("{")
+    with static_writer_lock(layout) as lock:
+        with pytest.raises(StaticPlanConflict):
+            apply_static_plan(stale, lock=lock, progress=ProgressReporter(events.append))
+    assert not any(e.stage == "Publicando plan" for e in events)
+
+
+@pytest.mark.parametrize("interrupted_index", [0, 1])
+def test_interrupted_sampling_leaves_scene_pending(tmp_path, interrupted_index):
+    from acoustic_orchestrator.pipeline.progress import ProgressReporter
+
+    config, layout = fixture_config(tmp_path)
+    events = []
+    report = ProgressReporter(events.append)
+
+    def interrupt_scene(config, rng, scene_index):
+        if scene_index == interrupted_index:
+            raise KeyboardInterrupt
+        return sampler.sample_static_scene(config, rng, scene_index)
+
+    with pytest.raises(KeyboardInterrupt):
+        inspect_static_plan(config, layout, sample_scene=interrupt_scene, progress=report)
+
+    resolved = [event for event in events if event.kind == "resolved"]
+    assert len(resolved) == interrupted_index
+    assert all(event.outcome == "nuevas" for event in resolved)
+    assert events[-1].completed == interrupted_index
+    assert events[-1].total == config.execution.num_simulations
+    assert report.counters["conflictos"] == 0
+    assert len(report.starts) == 1  # The interrupted scene remains in progress.
+    assert not any(event.kind == "finish" and event.stage == "Planificacion" for event in events)
+    assert not layout["run_root"].exists()
 
 
 def test_read_only_inspection_and_no_resampling_on_recorded_reuse(tmp_path, monkeypatch):

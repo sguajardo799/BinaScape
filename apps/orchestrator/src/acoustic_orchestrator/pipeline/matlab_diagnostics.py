@@ -11,6 +11,58 @@ from typing import Any, BinaryIO, Callable
 from uuid import UUID, uuid4
 
 
+class MatlabActivityReader:
+    """Bounded incremental diagnostic tail. Never warns or decides outcomes."""
+
+    def __init__(self, path: Path, attempt_id: str) -> None:
+        self.path = path
+        self.attempt_id = attempt_id
+        self.offset = 0
+        self.tail = b""
+        self.sequence = 0
+        self.activity = "arranque / actividad interna desconocida"
+
+    def poll(self) -> str:
+        try:
+            with self.path.open("rb") as stream:
+                stream.seek(self.offset)
+                data = stream.read(65536)
+                self.offset = stream.tell()
+            lines = (self.tail + data).split(b"\n")
+            self.tail = lines.pop()
+            if len(self.tail) > 65536:
+                self.tail = b""  # Discard oversized diagnostic records.
+            for line in lines:
+                try:
+                    event = json.loads(line.decode("utf-8"))
+                    if (not isinstance(event, dict) or event.get("schema_version") != 1
+                            or event.get("attempt_id") != self.attempt_id
+                            or type(event.get("sequence")) is not int
+                            or event["sequence"] <= self.sequence
+                            or not isinstance(event.get("timestamp"), str)):
+                        continue
+                    kind = event.get("type")
+                    if kind in {"stage_started", "stage_completed"}:
+                        if event.get("stage") not in {"initialization", "simulation", "artifact_writing"}:
+                            continue
+                        activity = event["stage"]
+                    elif kind in {"step_started", "step_completed"}:
+                        if event.get("stage") != "simulation" or event.get("step") not in {"raven_run", "audio_postprocessing"}:
+                            continue
+                        activity = f"simulation / {event['step']}"
+                    elif kind == "entrypoint_completed":
+                        activity = "entrypoint completado; esperando terminacion del proceso"
+                    else:
+                        continue
+                    self.sequence = event["sequence"]
+                    self.activity = activity
+                except (ValueError, TypeError, UnicodeError):
+                    continue
+        except OSError:
+            pass
+        return self.activity
+
+
 def diagnostic_warning(message: str) -> None:
     try:
         warnings.warn(f"MATLAB diagnostics: {message}", RuntimeWarning, stacklevel=2)

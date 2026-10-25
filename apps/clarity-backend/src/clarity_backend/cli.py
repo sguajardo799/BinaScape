@@ -2,10 +2,12 @@ import argparse
 import json
 import math
 from pathlib import Path
+from time import monotonic
 
 import yaml
 
 from clarity_backend import msbg
+from clarity_backend.progress import ClarityProgress, JobCallback, JobEvent
 
 
 SCHEMA_VERSION = "1.0"
@@ -17,24 +19,53 @@ def main() -> None:
 
     run_manifest_parser = subparsers.add_parser("run-manifest", help="Procesa un manifiesto JSONL de jobs de Clarity")
     run_manifest_parser.add_argument("manifest_path", type=Path)
+    run_manifest_parser.add_argument("--no-progress", action="store_true", help="Desactiva el progreso en stderr")
 
     args = parser.parse_args()
     if args.command == "run-manifest":
-        run_manifest(args.manifest_path)
+        with ClarityProgress(enabled=not args.no_progress) as progress:
+            run_manifest(args.manifest_path, progress=progress if not args.no_progress else None)
 
 
-def run_manifest(manifest_path: Path) -> None:
+def run_manifest(manifest_path: Path, *, progress: JobCallback | None = None) -> None:
     manifest_path = manifest_path.resolve()
     if not manifest_path.is_file():
         raise FileNotFoundError(f"No existe el manifiesto de Clarity: {manifest_path}")
 
-    failed_jobs = 0
-    for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
-        if not raw_line.strip():
-            continue
-        job = json.loads(raw_line)
-        if not _process_job(job):
-            failed_jobs += 1
+    lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    total = sum(bool(line.strip()) for line in lines)
+    failed_jobs = completed_jobs = 0
+    started = monotonic()
+
+    def emit(kind: str, **kwargs) -> None:
+        nonlocal progress
+        if progress is not None:
+            try:
+                progress(JobEvent(kind, total, completed=completed_jobs, failed=failed_jobs,
+                                  elapsed=max(0.0, monotonic() - started), **kwargs))
+            except Exception:
+                progress = None
+
+    emit("begin")
+    interrupted = True
+    try:
+        for raw_line in lines:
+            if not raw_line.strip():
+                continue
+            job = json.loads(raw_line)
+            job_started = monotonic()
+            key = str(job.get("job_id", "")) if isinstance(job, dict) else ""
+            emit("start", key=key)
+            succeeded = _process_job(job)
+            if succeeded:
+                completed_jobs += 1
+            else:
+                failed_jobs += 1
+            emit("resolved", key=key, duration=max(0.0, monotonic() - job_started),
+                 status="completed" if succeeded else "failed")
+        interrupted = False
+    finally:
+        emit("finish", status="interrumpido" if interrupted else "con fallos" if failed_jobs else "completo")
 
     if failed_jobs:
         raise SystemExit(1)

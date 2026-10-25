@@ -262,6 +262,59 @@ supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
 ## Diagnóstico por invocación MATLAB
 
+### Progreso de planificación
+
+`generate-manifests` muestra el avance por escenas evaluadas en stderr, con
+contadores de nuevas, conservadas y fallidas. Evaluar todas las escenas no
+significa que el plan se haya publicado: verificación y publicación aparecen
+como operaciones separadas. El ETA es aproximado y necesita tres escenas nuevas
+evaluadas satisfactoriamente; las conservadas no aportan muestras de velocidad.
+En una consola redirigida solo se escriben transiciones sin animación ni ANSI.
+Para desactivar toda presentación de progreso (no el resumen final):
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml --no-progress
+```
+
+### Progreso del render
+
+`render-static` muestra primero canónicas por escena y después las variantes
+restantes por trabajo. Se distinguen aceptadas, reutilizadas y fallidas, además
+de invocaciones, reintentos de proceso y remuestreos T30. Reintentar no completa
+otra unidad. Si el lote aborta, los trabajos no resueltos quedan pendientes.
+La última actividad MATLAB observada se consulta por UUID de intento cada 500 ms
+en terminal interactiva; sin eventos se indica actividad interna desconocida.
+`entrypoint_completed` no es aceptación ni éxito del proceso.
+
+El tiempo transcurrido sigue visible durante simulaciones largas. El ETA por
+etapa se habilita tras tres aceptaciones nuevas e incluye reintentos y esperas;
+las reutilizaciones no aportan muestras. Es aproximado, no hay ETA global ni
+porcentaje ficticio dentro de RAVEN. Las APIs aceptan un callback opcional
+`progress=events.append` y permanecen sin interfaz por defecto.
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml --no-progress
+```
+
+### Progreso de Clarity y handoff
+
+`hearing_degradation.enabled=true` habilita la preparación de jobs; solo
+`runner.auto_submit=true` en `render-static`, o `clarity-handoff --submit`, ejecuta
+el backend. La consola distingue preparación, revalidación, ejecución pendiente,
+ausencia de pendientes y bloqueo. Solo los jobs realmente enviados forman el
+total de la barra local de Clarity; reutilizados, bloqueados y omitidos no se
+presentan como procesamiento nuevo.
+
+Durante el subprocess de Clarity se suspende la presentación del orquestador y
+el backend usa stderr heredado. `--no-progress` se propaga al hijo, también desde
+`render-static`; las llamadas Python sin observador desactivan la presentación
+del backend automáticamente. Al retornar se reinspeccionan los resultados sin
+confundir una salida no cero con ausencia de todos los resultados.
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit --no-progress
+```
+
 Cada intento real (incluidos reintentos T30) tiene un UUID y archivos separados:
 `{artifact_root}/{run_name}/metadata/diagnostics/matlab/{attempt_id}/`.
 Las variantes reanudadas sin ejecutar MATLAB no crean intentos. El runner Python

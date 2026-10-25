@@ -18,6 +18,7 @@ from acoustic_orchestrator.experiment.reverberation_sampling import PROPOSAL_STR
 from acoustic_orchestrator.experiment.treatment_catalog import MIX_MODEL, MIX_MODEL_VERSION
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.clarity_handoff import ClaritySummary, prepare_clarity_handoff
+from acoustic_orchestrator.pipeline.progress import ProgressCallback, ProgressReporter
 from acoustic_orchestrator.pipeline.matlab_runner import (
     RenderVariantPaths,
     build_render_variant_paths,
@@ -90,28 +91,34 @@ class SamplingSummary(TypedDict):
     reverberation_batch: dict
 
 
-def generate_static_manifests(config_path: str | Path) -> list[Path]:
-    manifest_paths, _ = generate_static_manifests_with_summary(config_path)
+def generate_static_manifests(config_path: str | Path, *, progress: ProgressCallback | None = None) -> list[Path]:
+    manifest_paths, _ = generate_static_manifests_with_summary(config_path, progress=progress)
     return manifest_paths
 
 
-def generate_static_manifests_with_summary(config_path: str | Path) -> tuple[list[Path], SamplingSummary]:
-    _, manifest_paths, sampling_summary = _prepare_static_manifests(config_path)
+def generate_static_manifests_with_summary(
+    config_path: str | Path, *, progress: ProgressCallback | None = None,
+) -> tuple[list[Path], SamplingSummary]:
+    _, manifest_paths, sampling_summary = _prepare_static_manifests(config_path, progress=ProgressReporter(progress))
     return manifest_paths, sampling_summary
 
 
-def render_static_scenes(config_path: str | Path, matlab_executable: str = "matlab") -> tuple[list[Path], RenderSummary]:
+def render_static_scenes(
+    config_path: str | Path, matlab_executable: str = "matlab", *, progress: ProgressCallback | None = None,
+) -> tuple[list[Path], RenderSummary]:
     config = load_config(config_path)
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     with static_writer_lock(layout) as lock:
-        return _render_static_scenes_locked(config_path, matlab_executable, lock=lock)
+        return _render_static_scenes_locked(config_path, matlab_executable, lock=lock, progress=ProgressReporter(progress))
 
 
 def _render_static_scenes_locked(
     config_path: str | Path, matlab_executable: str, *, lock: StaticWriterLock,
+    progress: ProgressReporter | None = None,
 ) -> tuple[list[Path], RenderSummary]:
-    config, manifest_paths, sampling_summary = _prepare_static_manifests(config_path, lock=lock, for_render=True)
+    progress = progress or ProgressReporter()
+    config, manifest_paths, sampling_summary = _prepare_static_manifests(config_path, lock=lock, for_render=True, progress=progress)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     runtime_manifest_dir = layout["runtime_manifest_dir"]
     index_path = layout["render_index_path"]
@@ -119,7 +126,7 @@ def _render_static_scenes_locked(
     resume_history = load_render_history(layout["render_attempts_dir"])
     variant_records = dict(existing_records)
     metadata_required = config.execution.save_render_metadata
-    coordinator = _RenderCoordinator(config, layout["render_attempts_dir"], index_path, variant_records)
+    coordinator = _RenderCoordinator(config, layout["render_attempts_dir"], index_path, variant_records, progress=progress)
     # Publish the complete plan before the first render while still enforcing
     # canonical-first execution below.
     for planned_variant in _build_planned_variants(config, manifest_paths, runtime_manifest_dir):
@@ -137,13 +144,16 @@ def _render_static_scenes_locked(
     attempt_records: list[dict[str, Any]] = []
     accepted_manifest_paths: list[Path] = []
     render_tasks: list[RenderTask] = []
+    reused_remaining: list[str] = []
     prepared_source_paths_by_scene: dict[str, dict[str, str]] = {}
     first_render_error: Exception | None = None
 
+    progress.begin("Render canonico", len(manifest_paths), "escenas")
     for manifest_path in manifest_paths:
         # Strict inspection happens in preflight; retain the producer's numeric
         # spelling when deriving runtime JSON (e.g. a gain of 6.0 stays 6.0).
         scene_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        progress.start(scene_manifest["scene_id"])
         scene_index = int(scene_manifest["reverberation_sampling"]["scene_index"])
         raven_rejections: list[dict] = list(
             scene_manifest["reverberation_sampling"].get("raven_t30_rejections", [])
@@ -233,6 +243,9 @@ def _render_static_scenes_locked(
                     canonical=True, attempt_records=attempt_records,
                 )
                 if result["error"] is not None:
+                    acceptance = result.get("acceptance")
+                    if acceptance is not None and acceptance.process.attempt.record.get("commit_status") == "committed":
+                        progress.resolve(scene_manifest["scene_id"], "fallidas")
                     first_render_error = result["error"]
                     break
                 canonical_record = variant_records[canonical_paths["variant_id"]]
@@ -243,6 +256,7 @@ def _render_static_scenes_locked(
                 t30_diagnostic = {**t30_diagnostic, "metadata_path": canonical_paths["render_metadata_path"]}
             if t30_diagnostic is None:
                 accepted_manifest_paths.append(manifest_path)
+                progress.resolve(scene_manifest["scene_id"], "reutilizadas" if resumed else "aceptadas")
                 for task in prepared_tasks[1:]:
                     variant_paths = task["variant_paths"]
                     if config.execution.resume_if_possible and resume_allowed.get(
@@ -263,6 +277,7 @@ def _render_static_scenes_locked(
                                 resume_history=resume_history,
                             ),
                         )
+                        reused_remaining.append(variant_paths["variant_id"])
                     else:
                         render_tasks.append(task)
                 break
@@ -282,6 +297,7 @@ def _render_static_scenes_locked(
                 first_render_error = RenderValidationError(["acoustic_resampling_would_replace_protected_variants"])
                 break
             raven_rejections.append(t30_diagnostic)
+            progress.count("remuestreos_T30")
             # Scene-wide resampling invalidates every variant of this scene,
             # but must retain their evidence rather than silently deleting it.
             for task in prepared_tasks:
@@ -325,6 +341,7 @@ def _render_static_scenes_locked(
                 )
                 manifest_path.unlink(missing_ok=True)
                 record_static_scene_failure(config, scene_manifest["scene_id"], failure, lock=lock)
+                progress.resolve(scene_manifest["scene_id"], "fallidas")
                 break
 
             sampled_scene["background_noise"] = scene_manifest.get("background_noise")
@@ -340,6 +357,7 @@ def _render_static_scenes_locked(
         if first_render_error is not None:
             break
 
+    progress.finish("interrumpido" if first_render_error is not None else "")
     manifest_paths = accepted_manifest_paths
     _refresh_reverberation_batch(config, manifest_paths, sampling_summary)
     if first_render_error is not None:
@@ -357,6 +375,10 @@ def _render_static_scenes_locked(
         ) from first_render_error
 
     render_jobs += len(render_tasks)
+    progress.begin("Otras variantes", len(render_tasks) + len(reused_remaining), "variantes",
+                   parallel=config.execution.num_workers > 1)
+    for variant_id in reused_remaining:
+        progress.resolve(variant_id, "reutilizadas")
     first_render_error = _run_render_tasks(
         render_tasks,
         num_workers=config.execution.num_workers,
@@ -367,6 +389,7 @@ def _render_static_scenes_locked(
         attempt_records=attempt_records,
         coordinator=coordinator,
     )
+    progress.finish("interrumpido" if first_render_error is not None else "")
     if first_render_error is not None:
         raise RenderStaticRunError(
             manifest_paths=manifest_paths,
@@ -383,7 +406,10 @@ def _render_static_scenes_locked(
 
     clarity_summary = None
     if config.hearing_degradation.enabled:
-        clarity_summary = prepare_clarity_handoff(config)
+        clarity_summary = prepare_clarity_handoff(config, progress=progress)
+    else:
+        progress.begin("Clarity deshabilitado")
+        progress.finish()
 
     return manifest_paths, _build_render_summary(
         variant_records,
@@ -395,10 +421,12 @@ def _render_static_scenes_locked(
     )
 
 
-def run_clarity_handoff(config_path: str | Path, *, submit: bool | None = None) -> ClaritySummary:
+def run_clarity_handoff(
+    config_path: str | Path, *, submit: bool | None = None, progress: ProgressCallback | None = None,
+) -> ClaritySummary:
     config = load_config(config_path)
     validate_config(config)
-    return prepare_clarity_handoff(config, submit=submit)
+    return prepare_clarity_handoff(config, submit=submit, progress=ProgressReporter(progress))
 
 
 class PlannedVariant(TypedDict):
@@ -425,11 +453,13 @@ class RenderResult(TypedDict):
 class _RenderCoordinator:
     """Single owner of functional commits, retry budgets and batch dispatch."""
 
-    def __init__(self, config: AppConfig, attempts_dir: Path, index_path: Path, records: dict) -> None:
+    def __init__(self, config: AppConfig, attempts_dir: Path, index_path: Path, records: dict,
+                 *, progress: ProgressReporter | None = None) -> None:
         self.config = config
         self.attempts_dir = attempts_dir
         self.index_path = index_path
         self.records = records
+        self.progress = progress or ProgressReporter()
         self.chains: dict[str, RetryChain] = {}
         self.circuit = BatchCircuit(
             index_path.parent / "matlab_process_circuit.json",
@@ -438,6 +468,8 @@ class _RenderCoordinator:
         )
 
     def prepare(self, task: RenderTask) -> None:
+        if self.progress.stage == "Otras variantes":
+            self.progress.start(task["variant_paths"]["variant_id"])
         if self.circuit.is_open:
             raise RetryBlockedError(f"Corte de procesos MATLAB persistido: {self.circuit.path}")
         runtime = task["runtime_manifest_path"]
@@ -511,6 +543,8 @@ class _RenderCoordinator:
             return False
         acceptance = result.get("acceptance")
         if acceptance is None:
+            if self.progress.stage == "Otras variantes":
+                self.progress.resolve(result["task"]["variant_paths"]["variant_id"], "fallidas")
             return False
         attempt = acceptance.process.attempt
         reserved = result["task"].get("reserved_attempt")
@@ -530,6 +564,9 @@ class _RenderCoordinator:
                 attempt_records[-1] = dict(attempt.record)
             if decision == "scheduled" and result["error"] is not None:
                 return True
+            if self.progress.stage == "Otras variantes" and attempt.record.get("commit_status") == "committed":
+                self.progress.resolve(result["task"]["variant_paths"]["variant_id"],
+                                      "fallidas" if result["error"] is not None else "aceptadas")
             if result["error"] is not None:
                 result["error"].add_note(f"Cadena MATLAB: {chain.path}; decisión: {decision}")
         except Exception as exc:
@@ -551,6 +588,7 @@ class _RenderCoordinator:
                 return {"task": task, "error": prior_error or exc}
             result = _run_single_render_task(
                 task, matlab_executable=matlab_executable, metadata_required=metadata_required, canonical=canonical,
+                progress=self.progress,
             )
             if not self.resolve(result, metadata_required=metadata_required, attempt_records=attempt_records):
                 return result
@@ -888,6 +926,7 @@ def _run_render_tasks_in_parallel(
                     future = executor.submit(
                         _run_single_render_task, task, matlab_executable=matlab_executable,
                         metadata_required=metadata_required,
+                        progress=coordinator.progress,
                     )
                     futures[future] = task
                 except Exception as exc:
@@ -922,11 +961,18 @@ def _run_render_tasks_in_parallel(
 
 def _run_single_render_task(
     task: RenderTask, *, matlab_executable: str, metadata_required: bool = False, canonical: bool = False,
+    progress: ProgressReporter | None = None,
 ) -> RenderResult:
     render_error: Exception | None = None
     try:
         reserved = task.get("reserved_attempt")
-        runner_options = {"attempt": reserved} if reserved is not None else {}
+        runner_options: dict[str, Any] = {"attempt": reserved} if reserved is not None else {}
+        if progress is not None:
+            progress.count("invocaciones")
+            if reserved is not None and reserved.record.get("attempt_ordinal", 1) > 1:
+                progress.count("reintentos")
+            if progress.enabled:
+                runner_options["progress"] = progress
         process_result = render_manifest_with_matlab(
             task["runtime_manifest_path"], matlab_executable=matlab_executable,
             diagnostics_dir=task["diagnostics_dir"],
@@ -1053,18 +1099,21 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
 
 def _prepare_static_manifests(
     config_path: str | Path, *, lock: StaticWriterLock | None = None, for_render: bool = False,
+    progress: ProgressReporter | None = None,
 ) -> tuple[AppConfig, list[Path], SamplingSummary]:
+    progress = progress or ProgressReporter()
     config = load_config(config_path)
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
 
     if lock is None:
         with static_writer_lock(layout) as acquired:
-            return _prepare_static_manifests(config_path, lock=acquired, for_render=for_render)
-    plan = inspect_static_plan(config, layout, sample_scene=sample_static_scene)
+            return _prepare_static_manifests(config_path, lock=acquired, for_render=for_render, progress=progress)
+    plan = inspect_static_plan(config, layout, sample_scene=sample_static_scene, progress=progress)
     planned_manifests = [(item.manifest, item.path) for item in plan.manifests]
     sampling_failures = plan.failures
     failures_path = layout["sampling_failures_path"].resolve()
+    progress.begin("Verificando compatibilidad de artefactos")
     if for_render:
         _preflight_render_artifacts(config, [manifest for manifest, _ in planned_manifests])
 
@@ -1094,7 +1143,8 @@ def _prepare_static_manifests(
     for item in plan.manifests:
         if item.needs_write:
             item.manifest["reverberation_batch"] = reverberation_batch
-    manifest_paths = apply_static_plan(plan, lock=lock)
+    progress.finish()
+    manifest_paths = apply_static_plan(plan, lock=lock, progress=progress)
     failed_scene_indices = [failure["scene_index"] for failure in sampling_failures]
     generated_scenes = len(manifest_paths)
     status = reverberation_batch["status"]

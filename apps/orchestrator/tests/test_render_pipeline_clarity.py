@@ -15,7 +15,11 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
     config_path = _write_config(tmp_path)
     layout = _prepare_completed_render_variant(config_path)
 
-    first_summary = run_clarity_handoff(config_path, submit=False)
+    progress_events = []
+    first_summary = run_clarity_handoff(config_path, submit=False, progress=progress_events.append)
+    assert "ejecucion pendiente" in progress_events[-1].outcome
+    assert progress_events[-1].counters["planificados"] == 1
+    assert not any(e.stage == "Degradado" for e in progress_events)
     first_manifest_rows = _read_jsonl(layout["clarity_jobs_path"])
     assert not layout["degraded_output_root"].exists()
 
@@ -26,7 +30,10 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
         encoding="utf-8",
     )
 
-    second_summary = run_clarity_handoff(config_path, submit=False)
+    progress_events.clear()
+    second_summary = run_clarity_handoff(config_path, submit=False, progress=progress_events.append)
+    assert "No hay jobs" in progress_events[-1].outcome
+    assert progress_events[-1].counters["reutilizados"] == 1
     records = load_clarity_index(layout["clarity_index_path"])
 
     assert first_summary["planned_jobs"] == 1
@@ -122,7 +129,7 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
         write_render_wav(manifest)
         write_render_metadata(manifest)
 
-    def fake_submit(runner, manifest_path: Path):
+    def fake_submit(runner, manifest_path: Path, **kwargs):
         jobs = _read_jsonl(manifest_path)
         submissions.append(jobs)
         job = jobs[0]
@@ -163,7 +170,7 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
     layout = _prepare_completed_render_variant(config_path)
     attempts = {"count": 0}
 
-    def fake_submit(runner, manifest_path: Path):
+    def fake_submit(runner, manifest_path: Path, **kwargs):
         attempts["count"] += 1
         jobs = _read_jsonl(manifest_path)
         if attempts["count"] == 1:
@@ -249,7 +256,7 @@ def test_run_clarity_handoff_marks_mixed_backend_results_as_partial_batch(
         encoding="utf-8",
     )
 
-    def fake_submit(runner, manifest_path: Path):
+    def fake_submit(runner, manifest_path: Path, **kwargs):
         jobs = _read_jsonl(manifest_path)
         completed_job = next(job for job in jobs if job["hearing_profile_id"] == "mild_loss")
         failed_job = next(job for job in jobs if job["hearing_profile_id"] == "severe_loss")

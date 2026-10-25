@@ -264,7 +264,7 @@ def test_prepare_clarity_handoff_reports_blocked_submission_without_backend(
     Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(profile_ids=["mild_loss"]), encoding="utf-8")
     monkeypatch.setattr(
         "acoustic_orchestrator.pipeline.clarity_handoff.submit_clarity_manifest",
-        lambda runner, manifest_path: {"status": "blocked", "command": None, "message": "backend missing"},
+        lambda runner, manifest_path, **kwargs: {"status": "blocked", "command": None, "message": "backend missing"},
     )
 
     summary = prepare_clarity_handoff(config, submit=True)

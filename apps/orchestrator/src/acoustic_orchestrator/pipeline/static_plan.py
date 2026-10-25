@@ -31,6 +31,7 @@ from acoustic_orchestrator.experiment.geometry import canonical_wall_ids, signed
 from acoustic_orchestrator.experiment.manifest_writer import write_manifest
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.output_paths import ArtifactLayout, resolve_artifact_layout
+from acoustic_orchestrator.pipeline.progress import ProgressReporter
 from acoustic_orchestrator.source_audio import list_source_wavs
 
 
@@ -323,6 +324,7 @@ def _replay(
 def inspect_static_plan(
     config: AppConfig, layout: ArtifactLayout | None = None, *,
     sample_scene: Callable[..., dict] | None = None,
+    progress: ProgressReporter | None = None,
 ) -> StaticPlan:
     """Inspect the entire batch without writing; aggregate protected conflicts.
 
@@ -335,6 +337,8 @@ def inspect_static_plan(
     Existing corrupt plan records never become trusted via overwrite permission.
     ``sample_scene`` is used for generation and exact persisted-attempt replay.
     """
+    progress = progress or ProgressReporter()
+    progress.begin("Inspeccionando catalogos")
     layout = layout or resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     sample_scene = sample_scene or sampler.sample_static_scene
     plan_path = layout["render_index_path"].parent / "static_plan.json"
@@ -391,10 +395,14 @@ def inspect_static_plan(
     failed_records: dict = deepcopy(previous.get("failed_scenes", {})) if previous and not regeneration_reason else {}
     dependencies: dict[str, dict] = deepcopy(previous.get("selected_dependencies", {})) if previous and not regeneration_reason else {}
     expected_paths: set[Path] = set()
+    progress.finish()
+    progress.begin("Planificacion", config.execution.num_simulations, "escenas")
     for index in range(config.execution.num_simulations):
         scene_id = f"{config.outputs.naming.scene_id_prefix}_{index + 1:04d}"
         path = layout["scene_manifest_dir"] / f"{scene_id}.json"
         expected_paths.add(path)
+        progress.start(scene_id)
+        outcome: str | None = None
         try:
             observe(path)
             exists = path.exists()
@@ -402,6 +410,7 @@ def inspect_static_plan(
                 if exists:
                     raise ValueError("Failed scene has an unresolved manifest publication")
                 failures.append(deepcopy(failed_records[scene_id]))
+                outcome = "fallidas"
                 continue
             if not exists and previous and not regeneration_reason and any(
                 failure.get("scene_id") == scene_id and failure.get("stage") == "raven_t30"
@@ -449,6 +458,7 @@ def inspect_static_plan(
                     failures.append(failure)
                     if failure not in history:
                         history.append(failure)
+                    outcome = "fallidas"
                     continue
                 validate_static_manifest(manifest, config, index)
             manifests.append(PlannedManifest(manifest, path, not exists, index))
@@ -465,9 +475,15 @@ def inspect_static_plan(
                     raise ValueError(f"Selected dependency changed: {dependency}")
                 dependencies[key] = old or {"sha256": snapshot[2], "size_bytes": snapshot[0],
                     "provenance": "observed_at_adoption" if exists else "observed_at_generation"}
+            outcome = "conservadas" if exists else "nuevas"
         except (ValueError, OSError, KeyError, TypeError, IndexError) as exc:
             conflicts.append(f"{path}: {exc}")
             conflict_causes.append(exc.__cause__ or exc)
+            outcome = "conflictos"
+        finally:
+            # An interruption is not an evaluated scene or a compatibility conflict.
+            if outcome is not None:
+                progress.resolve(scene_id, outcome)
     # Stray manifests can indicate a changed scene count/prefix in a legacy run.
     retired = set(previous.get("retired_scene_paths", [])) if previous else set()
     for path in sorted(layout["scene_manifest_dir"].glob("*.json")):
@@ -478,7 +494,9 @@ def inspect_static_plan(
             else:
                 conflicts.append(f"{path}: Unexpected scene outside configured batch")
     if conflicts:
+        progress.finish("conflicto; plan no publicado")
         raise StaticPlanConflict(conflicts) from (conflict_causes[0] if conflict_causes else None)
+    progress.finish()
     metadata: dict = {"schema_version": PLAN_VERSION, "contract": contract, "contract_hash": contract_hash,
                 "adoption": previous.get("adoption", "legacy_replay") if previous else
                     ("legacy_replay" if any(not m.needs_write for m in manifests) else "new"),
@@ -576,17 +594,21 @@ def static_writer_lock(layout: ArtifactLayout | Path) -> Iterator[StaticWriterLo
             path.unlink()
 
 
-def apply_static_plan(plan: StaticPlan, *, lock: StaticWriterLock) -> list[Path]:
+def apply_static_plan(plan: StaticPlan, *, lock: StaticWriterLock, progress: ProgressReporter | None = None) -> list[Path]:
     """Publish after caller's artifact validation, with all preconditions checked.
 
     The lock must remain held for subsequent runtime/index/output writes too.
     Publication is individually atomic for metadata, not a multi-file transaction;
     interruption leaves deterministic scene holes for the next inspection.
     """
+    progress = progress or ProgressReporter()
+    progress.begin("Verificando plan antes de publicar")
     expected_lock = plan.plan_path.parent / "static_writer.lock"
     if lock.path != expected_lock or _loads(lock.path.read_text(encoding="utf-8")).get("token") != lock.token:
         raise StaticPlanConflict(["Batch writer lock not held"])
     revalidate_static_plan(plan)
+    progress.finish()
+    progress.begin("Publicando plan")
     for item in plan.manifests:
         if item.needs_write:
             write_manifest(item.manifest, item.path, overwrite=plan.config.execution.overwrite_existing)
@@ -594,6 +616,7 @@ def apply_static_plan(plan: StaticPlan, *, lock: StaticWriterLock) -> list[Path]
         _atomic_text(plan.failures_path, _failure_text(plan.failure_history))
     if plan.needs_plan_write:
         _atomic_text(plan.plan_path, json.dumps(plan.metadata, indent=2, sort_keys=True, allow_nan=False))
+    progress.finish()
     return [item.path for item in plan.manifests]
 
 
