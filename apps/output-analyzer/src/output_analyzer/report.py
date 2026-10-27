@@ -292,7 +292,7 @@ def _write_charts(
         "rt30_sabine_estimate",
         [row for row in data.rt30_records if row.get("method") == "Sabine estimate"],
         "value_s",
-        "Sabine estimate",
+        "Sabine estimate — pooled scene/frequency values",
         "s",
         "unique scene/frequency records",
         "acoustics",
@@ -301,7 +301,7 @@ def _write_charts(
         "rt30_raven_rpf_gett30",
         data.rt30_consolidated,
         "value_s",
-        "RAVEN consolidated T30 (variant mean)",
+        "RAVEN consolidated T30 — pooled scene/frequency values",
         "s",
         "unique scene/frequency records",
         "acoustics",
@@ -409,8 +409,135 @@ def _write_charts(
         path = images_dir / f"plan_{index:05d}.svg"
         if _write_plan(path, scene, sources):
             charts[f"plan_{geometry}_{index:05d}"] = path
-    metrics.extend(scene_metrics(data))
+    for row in scene_metrics(data):
+        metrics.append(row)
+        path = images_dir / f"{row['key']}.svg"
+        if row["chart_type"] == "scene_histogram":
+            _write_scene_histogram(path, row)
+        else:
+            _write_scene_scatter(path, row)
+        charts[row["key"]] = path
     return charts, metrics
+
+
+def _write_scene_scatter(path: Path, row: dict[str, Any]) -> None:
+    width, height = 760, 610
+    left, top, size = 100, 90, 440
+    values = [point[field] for point in row["observations"] for field in ("sabine_s", "raven_s")]
+    parts = []
+    bands = ", ".join(f"{f:g}" for f in row["selected_frequencies_hz"]) or "Not available"
+    parts.append(_label(24, 60, f"Selected bands (Hz): {bands}", "start", size=12))
+    if values:
+        low, high = min(values), max(values)
+        padding = max((high - low) * 0.05, abs(low) * 0.05 if low == high else 0, 0.01)
+        low, high = max(0, low - padding), high + padding
+        scale = size / (high - low)
+        parts.append(
+            f'<g class="scene-scatter" data-axis-min="{low}" data-axis-max="{high}" '
+            f'data-scale-x="{scale}" data-scale-y="{scale}">'
+        )
+        parts.extend([
+            _axes(left, top, size, size),
+            _numeric_x_ticks(left, top, size, size, low, high),
+            _numeric_y_ticks(left, top, size, low, high),
+            f'<line class="equality-line" x1="{left}" y1="{top + size}" '
+            f'x2="{left + size}" y2="{top}" stroke="#dc2626" stroke-width="2" stroke-dasharray="6 4"/>',
+        ])
+        for point in row["observations"]:
+            x = left + (point["sabine_s"] - low) * scale
+            y = top + size - (point["raven_s"] - low) * scale
+            parts.append(
+                f'<circle class="scene-point" data-scene-id="{html.escape(point["scene_id"], quote=True)}" '
+                f'data-x="{point["sabine_s"]}" data-y="{point["raven_s"]}" '
+                f'cx="{x:.3f}" cy="{y:.3f}" r="3" fill="#2563eb" fill-opacity="0.6">'
+                f'<title>{html.escape(point["scene_id"])}: Sabine {point["sabine_s"]:g} s; RAVEN {point["raven_s"]:g} s</title></circle>'
+            )
+        parts.append("</g>")
+    else:
+        parts.append(_label(left + size / 2, top + size / 2, "Not available — no complete paired means", "middle"))
+    parts.append(_label(left + size / 2, height - 25, "Sabine complete mean RT30 (s)", "middle"))
+    parts.append(_label(24, top + size / 2, "RAVEN complete mean T30 (s)", "middle", rotate=-90))
+    path.write_text(_svg_shell(width, height, row["title"], "".join(parts)), encoding="utf-8")
+    legend = _scene_legend(row)
+    if values:
+        legend.extend([
+            ("circle", PALETTE[0], "One point per scene with both complete means on the same selected bands; no HRTF weighting."),
+            ("line", "#dc2626", "Equality line: RAVEN = Sabine. Both axes have the same numeric range and scale; all paired values are shown."),
+        ])
+    _append_legend(path, legend)
+
+
+def _scene_legend(row: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    bands = ", ".join(f"{f:g}" for f in row["selected_frequencies_hz"]) or "Not available"
+    entries = [
+        (None, None, f"Population: unique scenes; n={row['n_valid']}; excluded={row['n_excluded']}; unit: s."),
+        (None, None, f"Selected central frequencies (Hz): {bands}. Complete arithmetic means; metadata, not WAV measurements."),
+    ]
+    if not row["n_valid"]:
+        entries.append((None, None, "No data / Not available — no observed series."))
+    return entries
+
+
+def _write_scene_histogram(path: Path, row: dict[str, Any]) -> None:
+    width, height = 1000, 510
+    left, top, plot_w, plot_h = 80, 90, 890, 270
+    edges = row["bin_edges_s"]
+    configured = row["edge_source"] == "sampling_batch"
+    labels = [
+        f"[{a:.4g}, {b:.4g}{']' if i == len(edges) - 2 else ')'}"
+        for i, (a, b) in enumerate(zip(edges, edges[1:]))
+    ]
+    counts = list(row["bin_counts"])
+    if configured:
+        labels = [f"< {edges[0]:.4g} (underflow)"] + labels + [f"> {edges[-1]:.4g} (overflow)"]
+        counts = [row["underflow_count"]] + counts + [row["overflow_count"]]
+    maximum = row["count_axis_max"]
+    bands = ", ".join(f"{f:g}" for f in row["selected_frequencies_hz"]) or "Not available"
+    parts = [_label(24, 60, f"Selected bands (Hz): {bands}", "start", size=12)]
+    parts.append(f'<g class="scene-histogram" data-count-max="{maximum}" data-edge-source="{row["edge_source"]}">')
+    parts.append(_axes(left, top, plot_w, plot_h))
+    parts.append(_numeric_y_ticks(left, top, plot_h, 0, maximum))
+    parts.append(_label(20, top + plot_h / 2, "Scene count", "middle", rotate=-90))
+    step = plot_w / max(1, len(counts))
+    targets = row["target_counts"] if row["method"] == "sabine" else None
+    for index, (label, count) in enumerate(zip(labels, counts)):
+        x = left + index * step
+        tail = configured and index in (0, len(counts) - 1)
+        if row["n_valid"]:
+            bar_h = count / maximum * plot_h
+            color = "#94a3b8" if tail else PALETTE[0 if row["method"] == "sabine" else 2]
+            parts.append(
+                f'<rect class="scene-bin" data-count="{count}" data-tail="{str(tail).lower()}" '
+                f'x="{x + 4:.2f}" y="{top + plot_h - bar_h:.2f}" width="{step - 8:.2f}" height="{bar_h:.2f}" fill="{color}"/>'
+            )
+            parts.append(_label(x + step / 2, top + plot_h - bar_h - 7, str(count), "middle", size=11))
+        target_index = index - 1 if configured else index
+        if targets is not None and 0 <= target_index < len(targets):
+            y = top + plot_h - targets[target_index] / maximum * plot_h
+            parts.append(
+                f'<line class="planned-target" data-count="{targets[target_index]}" '
+                f'x1="{x + 2:.2f}" x2="{x + step - 2:.2f}" y1="{y:.2f}" y2="{y:.2f}" '
+                'stroke="#dc2626" stroke-width="2" stroke-dasharray="5 3"/>'
+            )
+        parts.append(_label(x + step / 2, top + plot_h + 22, label, "end", size=11, rotate=-40))
+    if not row["n_valid"]:
+        parts.append(_label(left + plot_w / 2, top + plot_h / 2, "Not available — no complete means", "middle"))
+    parts.append(_label(left + plot_w / 2, height - 12, "Complete mean RT30 intervals (s)", "middle"))
+    parts.append("</g>")
+    path.write_text(_svg_shell(width, height, row["title"], "".join(parts)), encoding="utf-8")
+    legend = _scene_legend(row)
+    if row["n_valid"]:
+        legend.append(("rect", PALETTE[0 if row["method"] == "sabine" else 2], "Bars count unique scenes, not frequency records or render variants."))
+    if configured:
+        legend.append(("rect", "#94a3b8", "Underflow and overflow are separate tail counts, not finite-width intervals or RAVEN sampling failures."))
+    legend.append((None, None, f"Intervals: {row['interval_closure']}. Edge source: {row['edge_source']}."))
+    if targets is not None:
+        legend.append(("line", "#dc2626", f"Planned Sabine target counts by interval: {targets}; not observed counts and not RAVEN limits."))
+    elif row["method"] == "raven":
+        legend.append((None, None, "Sampling targets apply only to Sabine; RAVEN is not constrained to that distribution."))
+    if row["reference_unavailable_reason"]:
+        legend.append((None, None, "Sampling reference Not available: " + row["reference_unavailable_reason"] + "."))
+    _append_legend(path, legend)
 
 
 def _write_plan(
@@ -846,7 +973,8 @@ def _write_report(
                     + html.escape(caption)
                     + "</figcaption></figure>"
                 )
-        return '<div class="grid">' + "".join(figures) + "</div>"
+        layout = ' style="grid-template-columns:1fr"' if section == "scene_means" else ""
+        return f'<div class="grid"{layout}>' + "".join(figures) + "</div>"
 
     matched_means = {
         row["scene_id"]: row for row in summary.get("rt30_matched_means", [])
@@ -908,6 +1036,7 @@ def _write_report(
 <style>body{{font:14px/1.5 Arial,sans-serif;color:#1f2937;background:#f8fafc;margin:0}}header,main{{padding:24px;max-width:1200px;margin:auto}}h2{{border-bottom:1px solid #cbd5e1}}section{{margin-bottom:32px}}table{{border-collapse:collapse;width:100%;background:white}}td,th{{border:1px solid #cbd5e1;text-align:left;padding:8px;vertical-align:top;overflow-wrap:anywhere}}th{{background:#e2e8f0}}.scroll{{overflow:auto;max-height:560px}}.grid{{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}}figure{{margin:0;background:white;padding:10px}}svg{{max-width:100%;height:auto}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}figcaption{{color:#475569}}details{{margin:12px 0;padding:10px;background:white;border:1px solid #e2e8f0}}summary{{cursor:pointer;font-weight:bold}}[hidden]{{display:none!important}}.carousel{{border:1px solid #cbd5e1;padding:16px;margin-bottom:24px}}.carousel-controls{{display:flex;flex-wrap:wrap;gap:10px;align-items:center}}button,select{{font:inherit;padding:8px;max-width:100%}}:focus-visible{{outline:3px solid #2563eb;outline-offset:3px}}.carousel-card{{overflow-wrap:anywhere}}.carousel-card svg{{display:block;margin:auto}}</style></head>
 <body><header><h1>Output Analysis Report</h1><p>{html.escape(str(data.run_dir))}</p><p>Status: {html.escape(str(status))}</p></header><main>
 <section id="general-parameters"><h2>General parameters</h2><p>Supported scene/render schema: 3.0 only. Metadata only; no audio measurements.</p>{counts}{parameters}{grid("general")}</section>
+<section id="rt30-scene-means"><h2>RT30 mean distribution by scene</h2><p>Complete arithmetic means over each scene's explicitly selected bands. Each method counts unique scenes independently, never bands or HRTF variants. Identical selected-frequency sets form separate labeled groups. Values are metadata, not WAV measurements. Panels share interval boundaries and scene-count scales within each group. Planned sampling targets apply only to Sabine, not RAVEN; out-of-range RAVEN means are not sampling failures. Scatter: X = Sabine, Y = RAVEN; one point per scene with both complete means.</p>{grid("scene_means")}<details><summary>Complete scene means, excluded bands and provenance</summary>{_records_table(data.rt30_scene_means)}</details></section>
 <section><h2>Positions by geometry</h2><p>One exact public-frame X/Z floor plan per unique scene. Y is vertical. No HRTF duplication.</p>{"".join(spatial)}</section>
 <section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{_records_table(rt_by_band)}<details><summary>Per-scene means on matched bands</summary>{_records_table(summary.get("rt30_matched_means", []))}</details><details><summary>All comparison candidates and exclusions</summary>{_records_table(data.rt30_comparisons)}</details><details><summary>All aligned RT30 pairs</summary>{_records_table(data.rt30_pairs)}</details><details><summary>Consolidated RAVEN means, variant counts and dispersion</summary>{_records_table(data.rt30_consolidated)}</details><details><summary>Individual method values: variant/frequency audit</summary>{_records_table(data.rt30_records)}</details></section>
 <section><h2>Coverage and metadata quality</h2><p>Expected coverage unavailable unless an authoritative expectation is present in the coverage records. Missing optional failure indexes do not mean zero failures. Incident categories overlap; do not sum them as distinct affected entities.</p>{_html_table(["Category", "Count"], list(summary.get("incident_counts", {}).items()))}<details><summary>Population definitions and valid/excluded counts</summary><pre>{html.escape(json.dumps(summary.get("populations", {}), ensure_ascii=False, indent=2))}</pre></details>{grid("quality")}{quality}</section>
