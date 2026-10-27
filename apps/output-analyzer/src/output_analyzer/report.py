@@ -8,6 +8,8 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from .scene_distributions import scene_metrics
+
 from .loader import (
     AnalysisData,
     RT30_ABS_TOL_S,
@@ -407,6 +409,7 @@ def _write_charts(
         path = images_dir / f"plan_{index:05d}.svg"
         if _write_plan(path, scene, sources):
             charts[f"plan_{geometry}_{index:05d}"] = path
+    metrics.extend(scene_metrics(data))
     return charts, metrics
 
 
