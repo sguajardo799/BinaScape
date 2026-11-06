@@ -234,6 +234,8 @@ def test_delay_cap():
 
 
 def test_runner_uses_reserved_attempt_and_failure_path(manifest, monkeypatch):
+    from render_fixtures import isolate_test_runtime
+    isolate_test_runtime(manifest)
     current = chain(manifest)
     attempt = current.reserve_attempt(manifest)
     commands = []

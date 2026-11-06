@@ -8,7 +8,7 @@ import yaml
 
 import pytest
 from typer.testing import CliRunner
-from render_fixtures import simulate_matlab_process, write_render_metadata, write_render_wav
+from render_fixtures import simulate_matlab_process, write_render_metadata, write_render_wav, write_test_rpf
 
 import acoustic_orchestrator.pipeline.render_pipeline as render_pipeline
 import acoustic_orchestrator.experiment.sampler as sampler
@@ -40,6 +40,33 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     render_static_scenes,
 )
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
+
+
+def test_private_resources_exist_before_dispatch_and_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from acoustic_orchestrator.pipeline.raven_resources import verify_private_runtime
+    from acoustic_orchestrator.pipeline.render_attempt import sha256_file
+
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "private_dispatch", num_simulations=1)
+    seen = []
+
+    def render(manifest_path: Path, **kwargs) -> None:
+        manifest = json.loads(manifest_path.read_text())
+        preparation = verify_private_runtime(manifest)
+        assert preparation.resources.rpf_path.is_file()
+        assert manifest["project_name"] == preparation.resources.project_name
+        attempt = kwargs["attempt"]
+        assert attempt.record["manifest_sha256"] == sha256_file(manifest_path)
+        assert attempt.snapshot_path.read_bytes() == manifest_path.read_bytes()
+        seen.append(preparation.resources.directory)
+        _write_valid_raven_metadata(manifest)
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(render))
+    paths, summary = render_static_scenes(config_path)
+    assert len(set(seen)) == 3
+    assert summary["completed_variants"] == 3
+    scene = json.loads(paths[0].read_text())
+    assert Path(scene["base_rpf_file"]) == workspace / "base_room.rpf"
 
 
 def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
@@ -802,7 +829,7 @@ def test_runtime_manifests_use_unique_stable_raven_project_names(tmp_path: Path,
     assert len(first_project_names) == 3
     assert len(set(first_project_names)) == 3
     assert first_project_names == second_project_names
-    assert all(project_name.startswith("sim_test__scene_static_0001__") for project_name in first_project_names)
+    assert all(project_name.startswith("rv_") and len(project_name) < 50 for project_name in first_project_names)
     assert build_raven_project_name("sim test", "scene/static:0001") == "sim_test__scene_static_0001"
 
 
@@ -2803,6 +2830,8 @@ def _build_workspace(
         workspace / "hearing_profiles.yaml",
     ]:
         file_path.write_text("dummy", encoding="utf-8")
+
+    write_test_rpf(workspace / "base_room.rpf")
 
     for speech_wav_name in speech_wav_names or ["speech_01.wav"]:
         _write_test_wav(workspace / "assets" / "events" / "speech" / speech_wav_name, duration_s=2.0)

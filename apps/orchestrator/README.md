@@ -241,6 +241,57 @@ rutas relativas cuya instalación no puede resolverse o rutas con un prefijo
 workspace ya existente debe coincidir con su procedencia: archivos protegidos
 ausentes o alterados producen conflicto, no una reparación automática.
 
+El flujo de producción del orquestador aplica este aislamiento automáticamente
+para RAVEN, conservando el número de workers. El runner Python directo exige una
+entrada privada verificable antes de reservar el intento; no transforma un
+snapshot ya capturado. Las llamadas manuales al entrypoint MATLAB existente no
+adquieren esta garantía y no se han modificado. Pyroomacoustics no prepara estos
+recursos ni requiere una instalación RAVEN.
+
+El runner toma `writer.lock` en el workspace, tanto en llamadas directas como
+coordinadas, y rechaza un segundo escritor concurrente. Si no observa la terminación del
+proceso, conserva ese veto: no se debe borrar el lock para repetir a ciegas; se
+requiere investigar el proceso. Un intento coordinado puede continuar mediante
+la reconciliación existente: solo después de verificarla se archiva el lock del
+UUID anterior, sin retirar un lock de otro propietario. Para un runner standalone
+sin cadena de reconciliación, se requiere un workspace/run nuevo.
+
+Las variantes de una escena conservan la misma geometría, absorción, scattering,
+fuentes y pose. Las cuotas RT se cuentan por `scene_id`, no por WAV. El aislamiento
+no garantiza igualdad bit a bit de audios de IR distintas ni añade un umbral T30
+de aceptación: las comparaciones numéricas entre tripletas pertenecen al harness
+de regresión, no a una nueva política de remuestreo en producción.
+
+### Reanudación y resultados anteriores al aislamiento
+
+Con `resume_if_possible=true`, las variantes reutilizables mantienen sus
+manifiestos, audio preparado, recursos privados, WAV y sidecars sin escrituras ni
+nuevas invocaciones. La verificación comprueba procedencia y huellas, incluido el
+inventario de modelos/materiales generado por el intento aceptado. Un conflicto
+no se resuelve eliminando el lock ni renovando el presupuesto de reintentos.
+
+El índice por variante y `render.raven_isolation` en
+`metadata/indexes/static_run_summary.json` distinguen:
+
+| Estado | Interpretación |
+|---|---|
+| `verified_private` | Runtime privado con entradas y procedencia comprobadas |
+| `legacy_unverified` | Resultado histórico sin evidencia de exclusividad de recursos |
+| `unverifiable` | No pudo verificarse un recurso privado; no acredita aislamiento |
+
+Un resultado histórico puede reutilizarse si supera las validaciones estrictas
+anteriores, pero no se certifica retroactivamente su absorción efectiva. Un lote
+mixto no se presenta como completamente aislado. Los resultados que coinciden
+en T30 tampoco prueban por sí solos ausencia de contaminación entre procesos.
+
+Para obtener garantías sobre un dataset anterior, se recomienda **un nuevo run
+completo**, conservando el original. La sustitución explícita sigue usando las
+opciones existentes `overwrite_existing` y `resume_if_possible`; no añade un
+permiso implícito para reparar recursos protegidos ni para migrar cadenas
+históricas pendientes. Estas últimas requieren otro run o el reinicio explícito
+ya soportado por la política de procesos. No es necesario editar el toolbox ni
+borrar los datos originales.
+
 ## Background Noise Planning
 
 The orchestrator plans background noise metadata in the scene manifest. MATLAB

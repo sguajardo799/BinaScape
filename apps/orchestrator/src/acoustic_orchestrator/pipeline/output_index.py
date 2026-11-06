@@ -16,6 +16,7 @@ from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
 from acoustic_orchestrator.pipeline.render_validation import RenderValidation, RenderValidity, validate_render
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs
 from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.raven_resources import is_private_runtime, verify_private_runtime
 from acoustic_orchestrator.pipeline.render_history import RenderHistory, history_root, load_render_history, resume_evidence
 
 
@@ -60,6 +61,7 @@ class MetadataSnapshot(TypedDict, total=False):
 
 
 class VariantRecord(TypedDict):
+    raven_isolation: NotRequired[str]
     variant_id: str
     scene_id: str
     output_type: str
@@ -259,6 +261,21 @@ def inspect_variant(
         },
         "updated_at": _now_isoformat(),
     }
+    if observed_outputs["runtime_manifest"]:
+        try:
+            runtime = read_json_object(Path(variant_paths["runtime_manifest_path"]))
+            if runtime.get("render", {}).get("backend", "raven") == "raven":
+                if is_private_runtime(runtime):
+                    verify_private_runtime(runtime)
+                    record["raven_isolation"] = "verified_private"
+                else:
+                    record["raven_isolation"] = "legacy_unverified"
+        except (OSError, ValueError, KeyError) as exc:
+            record["raven_isolation"] = "unverifiable"
+            record["validation"]["issues"].append(f"raven_resources_unverifiable:{exc}")
+            record["validation"]["ok"] = False
+            if record["status"] == "completed":
+                record["status"] = "partial"
     if resumed:
         history = resume_history if resume_history is not None else load_render_history(history_root(variant_paths))
         allowed, prior = resume_evidence(history, variant_paths, None)
@@ -517,7 +534,7 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
     }
     if "render_validity" in record:
         normalized["render_validity"] = cast(RenderValidity, record["render_validity"])
-    for field_name in ("attempt_id", "attempt_outcome_path", "completion_path", "process_status", "exit_code",
+    for field_name in ("raven_isolation", "attempt_id", "attempt_outcome_path", "completion_path", "process_status", "exit_code",
                        "decision", "recovery_reason"):
         if field_name in record:
             cast(dict[str, Any], normalized)[field_name] = record[field_name]

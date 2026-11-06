@@ -28,6 +28,7 @@ from acoustic_orchestrator.pipeline.matlab_runner import (
     render_manifest_with_pyroomacoustics,
     write_single_receiver_render_manifest,
     receiver_variants,
+    validate_shared_scene,
 )
 from acoustic_orchestrator.pipeline.output_index import (
     build_planned_variant_record,
@@ -44,6 +45,10 @@ from acoustic_orchestrator.pipeline.render_acceptance import RenderAcceptance, R
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
 from acoustic_orchestrator.pipeline.render_backends import manifest_render_backend
 from acoustic_orchestrator.pipeline.render_history import load_render_history
+from acoustic_orchestrator.pipeline.raven_resources import (
+    persist_resource_inventory, is_private_runtime, verify_private_runtime, verify_resource_inventory,
+    archive_reconciled_writer,
+)
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt, read_json_object, sha256_file
 from acoustic_orchestrator.pipeline.process_retries import (
     BatchCircuit, RetryBlockedError, RetryChain, classify_attempt, inspect_chain, open_chain, preflight_chain,
@@ -63,6 +68,7 @@ class RenderStaticRunError(RuntimeError):
 
 
 class RenderSummary(TypedDict):
+    raven_isolation: NotRequired[dict[str, int]]
     total_variants: int
     planned_variants: int
     completed_variants: int
@@ -393,6 +399,7 @@ class _CanonicalStage:
             _, expected_manifest = build_single_receiver_render_manifest(
                 variant["scene_manifest"], variant["receiver_variant"], self.runtime_manifest_dir,
                 config.outputs, variant["receiver_output"], prepared_source_paths,
+                preserve_legacy=config.execution.resume_if_possible,
             )
             scene.resume_allowed[variant["variant_paths"]["variant_id"]] = (
                 all(Path(path).is_file() for path in prepared_source_paths.values())
@@ -683,6 +690,7 @@ class _RenderCoordinator:
                 original = scheduled.previous_process_error()
                 try:
                     scheduled.archive_attempt()
+                    archive_reconciled_writer(read_json_object(Path(scheduled.record["attempts"][-1]["outcome_path"])))
                 except Exception as exc:
                     if original is not None:
                         original.add_note(f"No se pudo conservar el intento anterior al reset explícito: {exc}")
@@ -703,6 +711,7 @@ class _RenderCoordinator:
         try:
             if chain.record["state"] == "scheduled":
                 chain.archive_attempt()
+                archive_reconciled_writer(read_json_object(Path(chain.record["attempts"][-1]["outcome_path"])))
             task["reserved_attempt"] = chain.reserve_attempt(
                 runtime, self.attempts_dir, circuit_open=self.circuit.is_open,
             )
@@ -716,6 +725,9 @@ class _RenderCoordinator:
                 attempt_records: list[dict[str, Any]] | None) -> bool:
         """Persist acceptance before retry scheduling; True means retry is due."""
         try:
+            acceptance = result.get("acceptance")
+            if acceptance is not None and acceptance.process.termination_observed:
+                persist_resource_inventory(acceptance.process.attempt)
             _upsert_attempted_render_result(
                 result, metadata_required=metadata_required, index_path=self.index_path,
                 variant_records=self.records, attempt_records=attempt_records,
@@ -849,7 +861,9 @@ def _prepare_render_task(
         config.outputs,
         planned_variant["receiver_output"],
         prepared_source_paths,
+        preserve_legacy=not materialize,
     )
+    validate_shared_scene(planned_variant["scene_manifest"], expected, prepared_source_paths)
     if materialize and not (
         runtime_manifest_path.is_file()
         and equivalent_render_inputs(expected, read_json_object(runtime_manifest_path))
@@ -1268,10 +1282,37 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
         )
         for number, variant in enumerate(_build_planned_variants_from_manifest(config, scene, layout["runtime_manifest_dir"])):
             paths = variant["variant_paths"]
+            previous_runtime = Path(paths["runtime_manifest_path"])
+            if previous_runtime.exists():
+                observed = read_json_object(previous_runtime)
+                writer = Path(observed.get("base_rpf_file") or "").parent / "writer.lock"
+                if is_private_runtime(observed) and writer.exists():
+                    owner_chain = inspect_chain(previous_runtime, chains_dir)
+                    previous = owner_chain.record["attempts"][-1] if owner_chain is not None and owner_chain.record["attempts"] else None
+                    reconciled = (
+                        owner_chain is not None and owner_chain.record["state"] == "scheduled"
+                        and previous is not None and writer.read_bytes() == previous["attempt_id"].encode("ascii")
+                        and read_json_object(Path(previous["outcome_path"])).get("retry_classification") == "confirmed_interruption"
+                    )
+                    if not reconciled:
+                        raise RetryBlockedError(f"Propietario RAVEN sin reconciliación verificada: {writer}")
+                    # preflight_chain below must still verify the reconciliation;
+                    # only archive_attempt may authorize retiring this owner.
+            if previous_runtime.exists() and not force:
+                observed_runtime = read_json_object(previous_runtime)
+                if is_private_runtime(observed_runtime):
+                    verify_private_runtime(observed_runtime)
+                    record: dict[str, Any] = cast(dict[str, Any], records.get(paths["variant_id"], {}))
+                    if record.get("attempt_outcome_path") and record.get("status") == "completed":
+                        outcome = read_json_object(Path(record["attempt_outcome_path"]))
+                        if outcome.get("raven_resources_path"):
+                            verify_resource_inventory(outcome, observed_runtime)
             runtime, expected = build_single_receiver_render_manifest(
                 scene, variant["receiver_variant"], layout["runtime_manifest_dir"],
                 config.outputs, variant["receiver_output"], rewrites,
+                preserve_legacy=config.execution.resume_if_possible,
             )
+            validate_shared_scene(scene, expected, rewrites)
             runtime_matches = runtime.is_file() and equivalent_render_inputs(expected, read_json_object(runtime))
             has_outputs = Path(paths["rendered_wav_path"]).exists() or Path(paths["render_metadata_path"]).exists()
             reusable = (
@@ -1284,6 +1325,12 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
             )
             if reusable and number == 0:
                 reusable = validate_render(paths, metadata_required=True, canonical=True, profile="reuse").validity == "valid"
+            if runtime.exists() and manifest_render_backend(expected).name == "raven" and not is_private_runtime(read_json_object(runtime)) and not reusable:
+                historical_chain = inspect_chain(runtime, chains_dir)
+                if historical_chain is not None and not force:
+                    raise RetryBlockedError(f"Migración de cadena RAVEN histórica requiere un nuevo run o reset explícito: {runtime}")
+                if not config.execution.overwrite_existing:
+                    raise FileExistsError(f"Runtime RAVEN histórico no reutilizable; use un nuevo run: {runtime}")
             # Existing compatible inputs own their exact bytes (including legacy
             # Windows CRLF). Never infer an attempt hash by reserializing them.
             digest = sha256_file(runtime) if runtime_matches else hashlib.sha256(
@@ -1424,6 +1471,9 @@ def _build_render_summary(
             and record.get("commit_status") == "committed"}),
         "circuit_open": circuit_open,
         "circuit_reason": "max_consecutive_process_failures" if circuit_open else None,
+        "raven_isolation": dict(Counter(record.get("raven_isolation", "unverifiable")
+                                         for record in variant_records.values()
+                                         if record.get("raven_isolation") is not None)),
     }
     path = index_path.parent / "static_run_summary.json"
     previous: dict[str, Any] = read_json_object(path) if path.exists() else {"schema_version": 1}
