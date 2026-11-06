@@ -213,6 +213,22 @@ preserve public coordinates: the reflection takes place inside MATLAB. Render
 metadata source positions and orientation vectors therefore use the adapted
 RAVEN coordinates for schemas 2.0/3.0.
 
+## Recursos privados de RAVEN
+
+El aislamiento se prepara desde Python sin nuevas opciones YAML. Cada variante y
+realización dispone de sus propios modelos y materiales, aunque los slots tengan
+los mismos nombres (`wall_001`, `floor`, etc.). Un nombre de proyecto RPF distinto
+por sí solo **no** aísla esos archivos mutables del toolbox.
+
+```text
+metadata/raven_resources/<variant_id>/<realization_key>/
+  base.rpf
+  provenance.json
+  RavenModels/seed.ac
+  RavenModels/<modelo generado por RAVEN>
+  materials/<slots>.mat
+```
+
 ## Background Noise Planning
 
 The orchestrator plans background noise metadata in the scene manifest. MATLAB

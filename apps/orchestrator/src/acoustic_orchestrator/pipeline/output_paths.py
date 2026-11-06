@@ -25,6 +25,7 @@ class ArtifactLayout(TypedDict):
     render_index_path: Path
     matlab_diagnostics_dir: Path
     render_attempts_dir: Path
+    raven_resources_dir: Path
     sampling_failures_path: Path
     clarity_index_path: Path
     render_outputs_root: Path
@@ -51,6 +52,7 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
         "render_index_path": run_root / "metadata" / "indexes" / "render_index.jsonl",
         "matlab_diagnostics_dir": run_root / "metadata" / "diagnostics" / "matlab",
         "render_attempts_dir": run_root / "metadata" / "render_attempts",
+        "raven_resources_dir": run_root / "metadata" / "raven_resources",
         "sampling_failures_path": run_root / "metadata" / "indexes" / "scene_sampling_failures.jsonl",
         "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
         "render_outputs_root": run_root / "output_audio" / "render",
