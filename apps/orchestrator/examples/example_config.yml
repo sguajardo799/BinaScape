@@ -86,9 +86,15 @@ receiver_outputs:
 
   # Multi-output sigue soportado. Descomenta salidas adicionales para usar
   # variantes HARTF, pero `binaural_hrtf` es el ejemplo canónico del contrato.
+  # Las salidas habilitadas se emparejan por sujeto (id10_HRTF.daff,
+  # id10_HARTF_front.daff, id10_HARTF_rear.daff -> id10), no por orden de archivo.
+  # Se selecciona una secuencia común reproducible con la semilla del experimento.
+  # num_hrtfs=1 conserva IDs sin ordinal; num_hrtfs>1 usa __1, __2, etc.
+  # Con cantidades HRTF=2/front=1/rear=1, ambas HARTF usan el sujeto de HRTF__1;
+  # deben existir al menos dos sujetos comunes en los tres catálogos.
   # bte_rear_hartf:
   #   enabled: true
-  #   ir_catalog_path: ../../../assets/hrtf/
+  #   ir_catalog_path: ../../../assets/hartf/rear/
   #   file_pattern: "*.daff"
   #   output_subdir: bte_rear_hartf
   #   num_channels: 2
@@ -96,7 +102,7 @@ receiver_outputs:
 
   # bte_front_hartf:
   #   enabled: true
-  #   ir_catalog_path: ../../../assets/hrtf/
+  #   ir_catalog_path: ../../../assets/hartf/front/
   #   file_pattern: "*.daff"
   #   output_subdir: bte_front_hartf
   #   num_channels: 2

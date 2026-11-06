@@ -1,5 +1,5 @@
 experiment:
-  experiment_id: e2e_1_worker_s{seed}
+  experiment_id: e2e_4_worker_hartf_s{seed}
   description: >
     Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
     dos HRTF binaurales por escena, dos fuentes y perfil symmetric_moderate_loss.
@@ -8,8 +8,8 @@ experiment:
   random_seed: 42
 
 execution:
-  num_simulations: 100
-  num_workers: 1
+  num_simulations: 30
+  num_workers: 4
   overwrite_existing: false
   resume_if_possible: false
   save_scene_manifest: true
@@ -65,9 +65,25 @@ receiver_outputs:
     num_channels: 2
     required: true
 
-  # HARTF deshabilitado por defecto: requiere DAFF compatibles en assets/hartf/.
-  # Para cubrir tres salidas, aportar DAFF HARTF reales, configurar ambas
-  # salidas con esos catalogos. Clarity solo admite binaural_hrtf como target.
+  bte_front_hartf:
+    enabled: true
+    ir_catalog_path: ../../assets/hartf/front/
+    file_pattern: "*.daff"
+    num_hrtfs: 1
+    output_subdir: bte_front_hartf
+    num_channels: 2
+    required: true
+
+  bte_rear_hartf:
+    enabled: true
+    ir_catalog_path: ../../assets/hartf/rear/
+    file_pattern: "*.daff"
+    num_hrtfs: 1
+    output_subdir: bte_rear_hartf
+    num_channels: 2
+    required: true
+    required: true  
+
 
 room_sampling:
   reverberation: &uniform_rt30
@@ -197,11 +213,11 @@ scene_validation:
 
 outputs:
   artifact_root: ../../outputs/
-  run_name: e2e_1_worker_s{seed}
+  run_name: e2e_4_worker_hartf_s{seed}
 
   naming:
     scene_id_prefix: scene_static
-    wav_pattern: "{scene_id}__{output_type}.wav"
+    wav_pattern: "{scene_id}__{output_type}.wav" # TODO: dar soporte a {seed}
     metadata_pattern: "{scene_id}__{output_type}__render.json"
 
 hearing_degradation:

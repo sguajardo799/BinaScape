@@ -141,6 +141,15 @@ def test_flat_sampling_matches_pre_identity_baseline(tmp_path: Path) -> None:
         for source in payload["sources"]:
             assert source.pop("identity_id") == ""
             assert source.pop("audio_relpath") == Path(source["audio_path"]).name
+        # Receiver fixtures now share subject01 for subject pairing. Project only
+        # their intentionally renamed files back to the historical source baseline;
+        # the hash still pins every other sampled field and the expected hash is unchanged.
+        legacy_names = {"bte_rear_hartf": "rear01.daff", "bte_front_hartf": "front01.daff"}
+        for receiver_ir in payload["receiver"]["hrtfs"]:
+            path = Path(receiver_ir["hrtf_path"])
+            assert path.name == "subject01.daff"
+            if receiver_ir["hrtf_id"] in legacy_names:
+                receiver_ir["hrtf_path"] = (path.parent / legacy_names[receiver_ir["hrtf_id"]]).as_posix()
     normalized = json.dumps(payloads, sort_keys=True).replace(workspace.as_posix(), "<workspace>")
     assert hashlib.sha256(normalized.encode()).hexdigest() == (
         "cd375b2ee710049b4df505af115d2af8d8ed9bb7563454aca8d3f569641880f3"
