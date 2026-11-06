@@ -1,14 +1,62 @@
-"""Deterministic, read-only description of private RAVEN resources."""
+"""Private RAVEN resources, described before any writes or process reservation."""
 
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from acoustic_orchestrator.pipeline.render_attempt import (
+    RenderAttempt,
+    read_json_object,
+    sha256_file,
+)
 
 RESOURCE_VERSION = 1
+
+
+@contextmanager
+def standalone_writer(resources: "RavenResources", owner: str | None = None) -> Iterator[dict[str, bool]]:
+    """An atomic resource owner shared by standalone and coordinated runners."""
+    path = resources.directory / "writer.lock"
+    token = (owner or uuid4().hex).encode("ascii")
+    with path.open("xb") as stream:
+        stream.write(token)
+    state = {"release": True}
+    try:
+        yield state
+    finally:
+        if state["release"] and path.read_bytes() == token:
+            path.unlink()
+
+
+def archive_reconciled_writer(outcome: dict[str, Any]) -> None:
+    """Called only after the chain verifies and archives a confirmed interruption."""
+    if outcome.get("retry_classification") != "confirmed_interruption":
+        return
+    runtime = read_json_object(Path(outcome["manifest_snapshot_path"]))
+    if runtime.get("render", {}).get("backend", "raven") != "raven":
+        return
+    resources = verify_private_runtime(runtime).resources
+    lock = resources.directory / "writer.lock"
+    if not lock.exists():
+        return
+    token = outcome["attempt_id"].encode("ascii")
+    if lock.read_bytes() != token:
+        raise ValueError(f"RAVEN writer ownership conflict: {lock}")
+    archive = Path(outcome["manifest_snapshot_path"]).parent / "raven_writer.lock"
+    if archive.exists():
+        if archive.read_bytes() != token:
+            raise ValueError(f"RAVEN writer archive conflict: {archive}")
+    else:
+        with archive.open("xb") as stream:
+            stream.write(token)
+    lock.unlink()
 
 
 def _digest(payload: Any) -> str:
@@ -166,3 +214,110 @@ def derive_resources(manifest: dict[str, Any], resources_root: Path, *,
         "path_resolution": "raven_executable_base_v1",
     }
     return RavenPreparation(resources, original, model, derived, model_bytes, provenance)
+
+
+def verify_resources(preparation: RavenPreparation) -> None:
+    resources = preparation.resources
+    if read_json_object(resources.provenance_path) != preparation.provenance:
+        raise ValueError(f"RAVEN provenance conflict: {resources.provenance_path}")
+    for path, expected in ((resources.rpf_path, preparation.provenance["rpf_sha256"]),
+                           (resources.seed_path, preparation.provenance["seed_sha256"])):
+        if path.is_symlink() or sha256_file(path) != expected:
+            raise ValueError(f"RAVEN resource conflict: {path}")
+    if not resources.materials_dir.is_dir() or resources.materials_dir.is_symlink():
+        raise ValueError(f"RAVEN material directory conflict: {resources.materials_dir}")
+
+
+def materialize_resources(preparation: RavenPreparation) -> None:
+    """Exclusive publication; an interrupted preparation is a conflict, not repair."""
+    resources = preparation.resources
+    if resources.directory.exists():
+        verify_resources(preparation)
+        return
+    resources.directory.mkdir(parents=True, exist_ok=False)
+    resources.seed_path.parent.mkdir()
+    resources.materials_dir.mkdir()
+    for path, payload in ((resources.seed_path, preparation.model_bytes),
+                           (resources.rpf_path, preparation.rpf_bytes)):
+        with path.open("xb") as stream:
+            stream.write(payload)
+    with resources.provenance_path.open("x", encoding="utf-8") as stream:
+        json.dump(preparation.provenance, stream, indent=2, allow_nan=False)
+
+
+def isolated_runtime(logical: dict[str, Any], resources_root: Path, *, materialize: bool = False) -> dict[str, Any]:
+    preparation = derive_resources(logical, resources_root)
+    if preparation.resources.directory.exists():
+        verify_resources(preparation)
+    if materialize:
+        materialize_resources(preparation)
+    runtime = deepcopy(logical)
+    runtime["base_rpf_file"] = preparation.resources.rpf_path.as_posix()
+    runtime["project_name"] = preparation.resources.project_name
+    return runtime
+
+
+def verify_private_runtime(runtime: dict[str, Any]) -> RavenPreparation:
+    """Verify a runtime's private reference without changing its captured bytes."""
+    rpf = Path(runtime.get("base_rpf_file") or "")
+    provenance = read_json_object(rpf.parent / "provenance.json")
+    logical = deepcopy(runtime)
+    logical["base_rpf_file"] = provenance["original_rpf"]
+    preparation = derive_resources(logical, rpf.parent.parent.parent)
+    if rpf.resolve() != preparation.resources.rpf_path or runtime["project_name"] != preparation.resources.project_name:
+        raise ValueError(f"RAVEN private runtime identity conflict: {rpf}")
+    verify_resources(preparation)
+    return preparation
+
+
+def is_private_runtime(runtime: dict[str, Any]) -> bool:
+    rpf = Path(runtime.get("base_rpf_file") or "")
+    return rpf.parent.parent.parent.name == "raven_resources" or (rpf.parent / "provenance.json").exists()
+
+
+def verify_resource_inventory(outcome: dict[str, Any], runtime: dict[str, Any]) -> None:
+    preparation = verify_private_runtime(runtime)
+    inventory_path = Path(outcome["raven_resources_path"])
+    if sha256_file(inventory_path) != outcome["raven_resources_sha256"]:
+        raise ValueError(f"RAVEN inventory conflict: {inventory_path}")
+    inventory = read_json_object(inventory_path)
+    if (inventory.get("schema_version") != RESOURCE_VERSION
+            or inventory.get("attempt_id") != outcome["attempt_id"]
+            or inventory.get("manifest_sha256") != outcome["manifest_sha256"]
+            or inventory.get("provenance_path") != preparation.resources.provenance_path.as_posix()
+            or inventory.get("provenance_sha256") != sha256_file(preparation.resources.provenance_path)):
+        raise ValueError(f"RAVEN inventory identity conflict: {inventory_path}")
+    seen: set[Path] = set()
+    for entry in inventory["generated_files"]:
+        path = Path(entry["path"])
+        if (path in seen or path.parent not in {preparation.resources.seed_path.parent, preparation.resources.materials_dir}
+                or path.is_symlink() or path.stat().st_size != entry["size_bytes"]
+                or sha256_file(path) != entry["sha256"]):
+            raise ValueError(f"RAVEN generated resource conflict: {path}")
+        seen.add(path)
+
+
+def persist_resource_inventory(attempt: RenderAttempt) -> None:
+    """Dispatcher-owned evidence after observed termination, never diagnostics."""
+    runtime = read_json_object(attempt.snapshot_path)
+    if runtime.get("render", {}).get("backend", "raven") != "raven":
+        return
+    preparation = verify_private_runtime(runtime)
+    resources = preparation.resources
+    entries = []
+    for directory in (resources.seed_path.parent, resources.materials_dir):
+        for path in sorted(directory.iterdir()):
+            if path == resources.seed_path:
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"Unexpected RAVEN resource: {path}")
+            entries.append({"path": path.as_posix(), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)})
+    record = {"schema_version": RESOURCE_VERSION, "attempt_id": attempt.attempt_id,
+              "manifest_sha256": attempt.manifest_sha256,
+              "provenance_path": resources.provenance_path.as_posix(),
+              "provenance_sha256": sha256_file(resources.provenance_path), "generated_files": entries}
+    path = attempt.directory / "raven_resources.json"
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(record, stream, indent=2, allow_nan=False)
+    attempt.record.update(raven_resources_path=path.as_posix(), raven_resources_sha256=sha256_file(path),
+                          raven_isolation="verified_private")
