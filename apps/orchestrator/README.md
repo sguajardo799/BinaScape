@@ -229,6 +229,18 @@ metadata/raven_resources/<variant_id>/<realization_key>/
   materials/<slots>.mat
 ```
 
+El manifiesto de escena conserva el RPF original; la entrada de ejecución usa el
+RPF privado. `provenance.json` vincula rutas, versión y SHA-256 de originales y
+entradas derivadas. La derivación solo sustituye las rutas de modelo y base de
+materiales, sin editar el original ni los modelos/materiales globales. Los
+reintentos de proceso conservan su realización; el remuestreo acústico crea otra.
+
+La preparación rechaza RPF con secciones/claves duplicadas, modelo base ilegible,
+rutas relativas cuya instalación no puede resolverse o rutas con un prefijo
+`RavenModels` ambiguo. No vuelve silenciosamente a recursos compartidos. Un
+workspace ya existente debe coincidir con su procedencia: archivos protegidos
+ausentes o alterados producen conflicto, no una reparación automática.
+
 ## Background Noise Planning
 
 The orchestrator plans background noise metadata in the scene manifest. MATLAB
