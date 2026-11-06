@@ -50,6 +50,35 @@ def outcomes(layout):
     return [read_json_object(path) for path in layout["render_attempts_dir"].rglob("outcome.json")]
 
 
+def test_private_resource_inventory_is_per_attempt_and_retry_input_is_stable(tmp_path, monkeypatch):
+    path, layout = configure(tmp_path, scenes=1, workers=1, attempts=2, optional=False)
+    calls = []
+
+    def run(command, **kwargs):
+        manifest = process_manifest(command)
+        calls.append(manifest)
+        directory = Path(manifest["base_rpf_file"]).parent
+        (directory / "RavenModels" / "room_6_faces").write_text(f"geometry attempt {len(calls)}")
+        (directory / "materials" / "wall_001.mat").write_text(f"material attempt {len(calls)}")
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(11, command)
+        return successful_process(command, **kwargs)
+
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
+    _, summary = render_static_scenes(path)
+    records = sorted(outcomes(layout), key=lambda record: record["attempt_ordinal"])
+    assert len(records) == 2
+    assert calls[0] == calls[1]
+    assert records[0]["attempt_id"] != records[1]["attempt_id"]
+    assert records[0]["manifest_sha256"] == records[1]["manifest_sha256"]
+    assert records[0]["chain_id"] == records[1]["chain_id"]
+    inventories = [read_json_object(Path(record["raven_resources_path"])) for record in records]
+    assert all(len(item["generated_files"]) == 2 for item in inventories)
+    assert inventories[0]["generated_files"] != inventories[1]["generated_files"]
+    assert all(record["raven_isolation"] == "verified_private" for record in records)
+    assert summary["completed_variants"] == 1
+
+
 def circuit_path(layout):
     return layout["render_index_path"].parent / "matlab_process_circuit.json"
 

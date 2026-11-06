@@ -229,6 +229,9 @@ def test_complete_outputs_require_separate_review_not_automatic_repeat(tmp_path)
 
 def test_cli_inspects_then_reconciles_without_rendering_and_resume_uses_new_uuid(tmp_path, monkeypatch):
     config_path, layout, _, chain, attempt = pending(tmp_path)
+    private_rpf = Path(read_json_object(attempt.snapshot_path)["base_rpf_file"])
+    writer_lock = private_rpf.parent / "writer.lock"
+    writer_lock.write_bytes(attempt.attempt_id.encode("ascii"))
     monkeypatch.setattr(recovery, "active_render_writers", lambda: [])
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run",
                         lambda *a, **k: pytest.fail("reconciliation must never launch MATLAB"))
@@ -243,6 +246,7 @@ def test_cli_inspects_then_reconciles_without_rendering_and_resume_uses_new_uuid
                                       "--confirm-stopped", "--reason", "Operator stopped all writers"])
     assert result.exit_code == 0, result.output
     assert "exit_code=null termination_observed=false" in result.output
+    assert writer_lock.exists()  # Reconciliation authorizes continuation, not rendering or cleanup here.
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", successful_process)
     _, summary = render_pipeline.render_static_scenes(config_path)
     assert summary["completed_variants"] == summary["matlab_invocations"] == 1
@@ -253,6 +257,8 @@ def test_cli_inspects_then_reconciles_without_rendering_and_resume_uses_new_uuid
     assert len({o["chain_id"] for o in records}) == 1
     assert len({o["attempt_id"] for o in records}) == 2
     assert read_json_object(attempt.outcome_path)["process_status"] == "interrupted"
+    assert not writer_lock.exists()
+    assert (attempt.directory / "raven_writer.lock").read_bytes() == attempt.attempt_id.encode("ascii")
 
 
 def test_process_probe_blocks_renderers_and_other_orchestrators_not_itself(monkeypatch):
