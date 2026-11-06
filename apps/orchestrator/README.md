@@ -292,6 +292,30 @@ históricas pendientes. Estas últimas requieren otro run o el reinicio explíci
 ya soportado por la política de procesos. No es necesario editar el toolbox ni
 borrar los datos originales.
 
+### Verificación real opt-in
+
+Con MATLAB/RAVEN y sus assets instalados, ejecutar desde la raíz del repositorio:
+
+```powershell
+.venv\Scripts\python.exe -m acoustic_orchestrator.verify_raven_isolation configs/experiments/static_example.yml --output outputs/raven_isolation_acceptance
+```
+
+La ruta de evidencia debe ser nueva. El harness resuelve las rutas de la
+configuración original, exige una respuesta por cada salida de la tripleta,
+desactiva Clarity y compara dos escenas con la misma semilla en runs de uno y
+cuatro workers. No depende de outputs previos de investigación. Genera
+`report.json`, configs efectivas y los artefactos normales del pipeline.
+La tolerancia del harness es `atol=1e-5 s`, `rtol=1e-5` en las diez bandas, tanto
+dentro de tripletas como entre runs. También inventaría los RPF técnicos nuevos
+y comprueba huellas de modelos/materiales globales y RPF original antes/después.
+No requiere que una carrera de recursos compartidos se reproduzca para pasar.
+
+Evidencia local del 2026-11-06: el mismo comando con
+`--output outputs/raven_isolation_acceptance_20261106_s42_b` produjo 12/12 procesos
+exitosos y 14 comparaciones satisfactorias, con diferencia máxima por banda de
+`1.0728e-7 s`. El reporte confirmó doce conjuntos de recursos exclusivos y huellas
+globales sin cambios. Esa carpeta es evidencia local, no una dependencia de tests.
+
 ## Background Noise Planning
 
 The orchestrator plans background noise metadata in the scene manifest. MATLAB
