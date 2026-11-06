@@ -443,6 +443,7 @@ def _revalidate_render_input(
                 _, expected_manifest = build_single_receiver_render_manifest(
                     scene, descriptor, layout["runtime_manifest_dir"], config.outputs,
                     get_receiver_output_config(config, record["output_type"]), rewrites,
+                    preserve_legacy=True,
                 )
                 if not equivalent_render_inputs(expected_manifest, current):
                     issues.append("render_revalidation:current_scene_mismatch")

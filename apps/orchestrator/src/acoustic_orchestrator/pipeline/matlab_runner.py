@@ -15,6 +15,12 @@ from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
+from acoustic_orchestrator.pipeline.raven_resources import (
+    isolated_runtime, verify_private_runtime, is_private_runtime, standalone_writer,
+)
+from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.render_backends import manifest_render_backend
+from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +57,33 @@ def render_manifest_with_matlab(
     attempt: RenderAttempt | None = None,
     progress: ProgressReporter | None = None,
 ) -> MatlabProcessResult:
+    # Never rewrite a reserved snapshot: a direct unisolated runner input is an
+    # explicit error. The builder/writer prepares resources before reservation.
+    preparation = verify_private_runtime(read_json_object(attempt.snapshot_path if attempt is not None else manifest_path))
+    try:
+        with standalone_writer(preparation.resources, attempt.attempt_id if attempt is not None else None) as lease:
+            result = _render_isolated_manifest_with_matlab(
+                manifest_path, matlab_executable, diagnostics_dir=diagnostics_dir,
+                attempts_dir=attempts_dir, attempt=attempt, progress=progress, lease=lease,
+            )
+            lease["release"] = result.termination_observed or result.process_status == "launch_failed"
+            return result
+    except FileExistsError as exc:
+        if attempt is None or attempt.record.get("command") is not None:
+            raise
+        # A reserved coordinated attempt failed before launch, not with an
+        # unobserved child. Persist that distinction without touching the owner.
+        attempt.record.update(process_status="launch_failed", exit_code=None, termination_observed=False,
+                              error={"type": type(exc).__name__, "message": str(exc)})
+        attempt.save()
+        return MatlabProcessResult(attempt, None, exc, False, "launch_failed")
+
+
+def _render_isolated_manifest_with_matlab(
+    manifest_path: Path, matlab_executable: str, *, diagnostics_dir: Path | None,
+    attempts_dir: Path | None, attempt: RenderAttempt | None, progress: ProgressReporter | None,
+    lease: dict[str, bool] | None,
+) -> MatlabProcessResult:
     attempt, diagnostics = _prepare_process(manifest_path, attempts_dir, diagnostics_dir, attempt)
     context = "[]"
     if diagnostics.ready:
@@ -74,6 +107,8 @@ def render_manifest_with_matlab(
         if not MATLAB_ENTRYPOINT.is_file():
             raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
 
+    if lease is not None:
+        lease["release"] = False  # BaseException/interruption cannot prove child termination.
     return _run_render_process(attempt, diagnostics, [matlab_executable, "-batch", batch_command],
                                progress=progress, before_launch=require_entrypoint)
 
@@ -181,6 +216,18 @@ def write_single_receiver_render_manifest(
     manifest_path, variant_manifest = build_single_receiver_render_manifest(
         scene_manifest, hrtf, output_dir, outputs, receiver_output, source_path_rewrites,
     )
+    if manifest_render_backend(variant_manifest).name == "raven":
+        # Description above is read-only; materialize only on the write path.
+        preparation = verify_private_runtime(variant_manifest) if Path(variant_manifest["base_rpf_file"]).exists() else None
+        if preparation is None:
+            _, logical = build_single_receiver_render_manifest(
+                scene_manifest, hrtf, output_dir, outputs, receiver_output, source_path_rewrites,
+                isolate_raven=False,
+            )
+            variant_manifest = isolated_runtime(
+                logical, resolve_artifact_layout(outputs, scene_manifest["project_name"])["raven_resources_dir"],
+                materialize=True,
+            )
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(variant_manifest, indent=2), encoding="utf-8", newline="\n")
     return manifest_path
@@ -190,6 +237,7 @@ def build_single_receiver_render_manifest(
     scene_manifest: dict, hrtf: dict, output_dir: Path, outputs: OutputsConfig,
     receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
     source_path_rewrites: dict[str, str] | None = None,
+    *, isolate_raven: bool = True, preserve_legacy: bool = False,
 ) -> tuple[Path, dict]:
     """Build expected runtime input without overwriting resume evidence."""
     variant_paths = build_render_variant_paths(
@@ -223,7 +271,29 @@ def build_single_receiver_render_manifest(
             source["audio_path"] = rewritten_path
 
     manifest_path = Path(variant_paths["runtime_manifest_path"])
+    if isolate_raven and manifest_render_backend(variant_manifest).name == "raven":
+        if preserve_legacy and manifest_path.is_file() and not is_private_runtime(read_json_object(manifest_path)):
+            return manifest_path, variant_manifest
+        variant_manifest = isolated_runtime(
+            variant_manifest, resolve_artifact_layout(outputs, scene_manifest["project_name"])["raven_resources_dir"],
+        )
     return manifest_path, variant_manifest
+
+
+def validate_shared_scene(scene: dict, runtime: dict, source_path_rewrites: dict[str, str] | None = None) -> None:
+    """Reject per-output acoustic resampling; prepared audio is an allowed rewrite."""
+    sources = deepcopy(scene["sources"])
+    for source in sources:
+        source["audio_path"] = (source_path_rewrites or {}).get(source["source_id"], source["audio_path"])
+    for key, expected in (("room", scene["room"]), ("sources", sources),
+                          ("background_noise", scene.get("background_noise"))):
+        if runtime.get(key) != expected:
+            raise ValueError(f"Shared scene conditions differ: {scene['scene_id']}: {key}")
+    def pose(receiver: dict) -> dict:
+        return {key: value for key, value in receiver.items()
+                if key not in {"hrtfs", "hrtf", "active_hrtf", "circular_array"}}
+    if pose(runtime["receiver"]) != pose(scene["receiver"]):
+        raise ValueError(f"Shared scene conditions differ: {scene['scene_id']}: receiver")
 
 
 # Compatibilidad para consumidores del helper anterior, sin cambiar el contrato.

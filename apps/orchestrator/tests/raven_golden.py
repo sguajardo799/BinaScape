@@ -125,7 +125,8 @@ def build_example_workspace(root: Path, name: str) -> Path:
     shutil.copy(REPOSITORY / "configs" / "hearing" / "example_profile.yaml",
                 workspace / "configs" / "hearing" / "example_profile.yaml")
     (workspace / "apps" / "clarity-backend").mkdir(parents=True)
-    (workspace / "base_room.rpf").write_text("dummy", encoding="utf-8")
+    from render_fixtures import write_test_rpf
+    write_test_rpf(workspace / "base_room.rpf")
     assets = workspace / "assets"
     (assets / "hrtf").mkdir(parents=True)
     (assets / "hrtf" / "subject01.daff").write_text("dummy", encoding="utf-8")
@@ -172,8 +173,18 @@ def capture_example_manifests(root: Path, name: str, monkeypatch) -> dict:
     replacements = [(root.resolve().as_posix(), "<TMP>"), (REPOSITORY.as_posix(), "<REPO>")]
     scenes = {path.name: _placeholders(json.loads(path.read_text(encoding="utf-8")), replacements)
               for path in sorted(layout["scene_manifest_dir"].glob("*.json"))}
-    runtimes = {path.name: _placeholders(json.loads(path.read_text(encoding="utf-8")), replacements)
-                for path in sorted(layout["runtime_manifest_dir"].glob("*.json"))}
+    # Existing goldens pin the acoustic contract, not the two technical fields
+    # deliberately changed by isolation. Verify provenance before projecting it.
+    from acoustic_orchestrator.pipeline.raven_resources import verify_private_runtime
+    from acoustic_orchestrator.pipeline.matlab_runner import build_raven_project_name
+    runtimes = {}
+    for path in sorted(layout["runtime_manifest_dir"].glob("*.json")):
+        runtime = json.loads(path.read_text(encoding="utf-8"))
+        preparation = verify_private_runtime(runtime)
+        scene = json.loads((layout["scene_manifest_dir"] / f"{runtime['scene_id']}.json").read_text())
+        runtime["base_rpf_file"] = preparation.original_rpf.as_posix()
+        runtime["project_name"] = build_raven_project_name(scene["project_name"], path.stem)
+        runtimes[path.name] = _placeholders(runtime, replacements)
     return {"scene_manifests": scenes, "runtime_manifests": runtimes}
 
 
@@ -198,6 +209,8 @@ def capture_matlab_command(root: Path, monkeypatch) -> list[str]:
 
     monkeypatch.setattr(matlab_runner.subprocess, "run", fake_run)
     monkeypatch.setattr(matlab_runner, "MATLAB_ENTRYPOINT", Path(__file__))
+    from render_fixtures import isolate_test_runtime
+    isolate_test_runtime(manifest)
     attempt = RenderAttempt(manifest, root / "attempts")
     matlab_runner.render_manifest_with_matlab(manifest, "matlab", diagnostics_dir=root / "diag",
                                               attempts_dir=root / "attempts", attempt=attempt)

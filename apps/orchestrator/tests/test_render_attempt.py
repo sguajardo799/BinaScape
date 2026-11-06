@@ -14,6 +14,7 @@ from acoustic_orchestrator.pipeline.render_attempt import (
 )
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 from acoustic_orchestrator.pipeline.matlab_runner import render_manifest_with_matlab
+from render_fixtures import isolate_test_runtime
 
 
 def write_runtime(tmp_path: Path) -> Path:
@@ -24,7 +25,7 @@ def write_runtime(tmp_path: Path) -> Path:
                    "output_wav_path": (tmp_path / "out.wav").as_posix(),
                    "output_metadata_path": (tmp_path / "out.json").as_posix()},
     }, indent=2) + "\n", encoding="utf-8")
-    return path
+    return isolate_test_runtime(path)
 
 
 def test_snapshot_preserves_exact_bytes_and_previous_attempts(tmp_path):

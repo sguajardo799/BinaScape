@@ -67,6 +67,7 @@ def test_inspect_variant_returns_normalized_record_payload(tmp_path: Path) -> No
     record = inspect_variant(variant_paths, metadata_required=False, attempted=True, resumed=True)
 
     assert record == {
+        "raven_isolation": "legacy_unverified",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",

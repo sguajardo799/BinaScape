@@ -12,6 +12,7 @@ import pytest
 from acoustic_orchestrator.pipeline.matlab_runner import render_manifest_with_matlab
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
+from render_fixtures import isolate_test_runtime
 
 
 def write_manifest(tmp_path: Path, name: str = "scene__binaural_hrtf") -> Path:
@@ -21,7 +22,7 @@ def write_manifest(tmp_path: Path, name: str = "scene__binaural_hrtf") -> Path:
         "render": {"active_output_type": "binaural_hrtf", "output_wav_path": str(tmp_path / "out.wav"),
                    "output_metadata_path": str(tmp_path / "out.json")},
     }), encoding="utf-8")
-    return manifest
+    return isolate_test_runtime(manifest)
 
 
 def test_attempt_paths_and_snapshots(tmp_path, monkeypatch):
@@ -358,6 +359,7 @@ def test_unobserved_termination_does_not_invent_success(tmp_path, monkeypatch):
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
     with pytest.raises(KeyboardInterrupt):
         render_manifest_with_matlab(manifest)
+    assert (Path(json.loads(manifest.read_text())["base_rpf_file"]).parent / "writer.lock").exists()
     record = summary(tmp_path)
     assert record["process_status"] == "running"
     assert record["exit_code"] is None
@@ -398,8 +400,16 @@ def test_concurrent_attempt_directories_are_isolated(tmp_path, monkeypatch, same
                      [{"type": "entrypoint_completed", "marker": directory.name}])
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
+    # This test isolates concurrent diagnostic storage, including identical
+    # snapshots; actual RAVEN dispatch must not run two writers of one workspace.
+    from acoustic_orchestrator.pipeline.matlab_runner import _prepare_process, _run_render_process
+
+    def diagnostic_probe(path):
+        attempt, diagnostics = _prepare_process(path, None, root, None)
+        return _run_render_process(attempt, diagnostics, ["matlab", "-batch", "mock"], progress=None)
+
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(render_manifest_with_matlab, path, diagnostics_dir=root) for path in inputs]
+        futures = [executor.submit(diagnostic_probe, path) for path in inputs]
         for future in futures:
             future.result(timeout=20)
     directories = list(root.iterdir())
