@@ -69,6 +69,53 @@ def test_private_resources_exist_before_dispatch_and_snapshot(tmp_path: Path, mo
     assert Path(scene["base_rpf_file"]) == workspace / "base_room.rpf"
 
 
+@pytest.mark.parametrize("field", ["room", "gain", "pose"])
+def test_variant_physical_disagreement_is_detected_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config_path = _write_config(workspace, "shared_conditions", num_simulations=1)
+    layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
+    original = render_pipeline.build_single_receiver_render_manifest
+
+    def corrupt(*args, **kwargs):
+        path, manifest = original(*args, **kwargs)
+        if field == "room":
+            manifest["room"]["acoustic_surfaces"]["wall_001"]["effective_absorption"][0] += 0.01
+        elif field == "gain":
+            manifest["sources"][0]["gain_db"] += 1
+        else:
+            manifest["receiver"]["position_m"][0] += 0.1
+        return path, manifest
+
+    monkeypatch.setattr(render_pipeline, "build_single_receiver_render_manifest", corrupt)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", lambda *a, **k: pytest.fail("must not dispatch"))
+    with pytest.raises(ValueError, match="Shared scene conditions differ"):
+        render_static_scenes(config_path)
+    assert not layout["render_index_path"].exists()
+    assert not layout["raven_resources_dir"].exists()
+
+
+def test_thirty_scene_rt_plan_counts_scenes_not_ninety_outputs(tmp_path: Path) -> None:
+    from acoustic_orchestrator.pipeline.matlab_runner import receiver_variants
+
+    workspace = _build_workspace(tmp_path)
+    batches = []
+    for workers in (1, 4):
+        path = _write_config(workspace, f"quota_{workers}", num_simulations=30, num_workers=workers)
+        raw = yaml.safe_load(path.read_text())
+        raw["outputs"]["run_name"] = f"quota_{workers}"
+        raw["room_sampling"]["reverberation"]["distribution"]["range_s"] = {"min": 0.2, "max": 0.8}
+        path.write_text(yaml.safe_dump(raw))
+        paths, summary = generate_static_manifests_with_summary(path)
+        scenes = [json.loads(p.read_text()) for p in paths]
+        assert len(scenes) == 30
+        assert sum(len(receiver_variants(scene)) for scene in scenes) == 90
+        assert [item["target_count"] for item in summary["reverberation_batch"]["bins"]] == [5] * 6
+        batches.append([(scene["room"], scene["reverberation_sampling"]["requested_bin"]) for scene in scenes])
+    assert batches[0] == batches[1]
+
+
 def test_generate_static_manifests_is_deterministic(tmp_path: Path) -> None:
     workspace = _build_workspace(tmp_path)
     first_config = _write_config(workspace, "run_a")
@@ -2062,11 +2109,15 @@ def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
         return sampled
 
     render_order: list[str] = []
+    render_resources: list[Path] = []
+    render_rooms: list[dict] = []
 
     def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         hrtf_id = manifest["receiver"]["hrtfs"][0]["hrtf_id"]
         render_order.append(hrtf_id)
+        render_resources.append(Path(manifest["base_rpf_file"]))
+        render_rooms.append(manifest["room"])
         render = manifest["render"]
         Path(render["output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(render["output_wav_path"]).write_text("wav", encoding="utf-8")
@@ -2085,6 +2136,9 @@ def test_invalid_canonical_raven_t30_retries_before_rendering_other_variants(
 
     assert render_order[:2] == ["binaural_hrtf", "binaural_hrtf"]
     assert render_order[2:] == ["bte_front_hartf", "bte_rear_hartf"]
+    assert render_resources[0] != render_resources[1]
+    assert all(path.is_file() for path in render_resources)
+    assert render_rooms[1] == render_rooms[2] == render_rooms[3]
     assert summary["render_jobs"] == 4
     assert len(manifest_paths) == 1
     assert len(sampled_contracts) == 2
