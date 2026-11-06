@@ -43,6 +43,7 @@ class RavenConfig(StrictConfigModel):
 
 
 class RenderConfig(StrictConfigModel):
+    backend: Literal["raven", "pyroomacoustics"] = "raven"
     sample_rate_hz: int
     generate_rir: bool = False
     generate_brir: bool = True
@@ -50,6 +51,24 @@ class RenderConfig(StrictConfigModel):
     simulation_type_is: bool = True
     num_particles: int = 60000
     is_order_ps: int = 2
+
+
+class PyroomacousticsConfig(StrictConfigModel):
+    """Image-source parameters of the Pyroomacoustics backend; no hidden defaults."""
+
+    max_order: Annotated[int, Field(strict=True, ge=0)]
+    max_order_non_shoebox: Annotated[int, Field(strict=True, ge=0)] | None = None
+    air_absorption: Annotated[bool, Field(strict=True)]
+    temperature_c: Annotated[float, Field(allow_inf_nan=False)] | None = None
+    humidity_pct: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)] | None = None
+
+    @model_validator(mode="after")
+    def validate_atmosphere(self) -> "PyroomacousticsConfig":
+        if (self.temperature_c is None) != (self.humidity_pct is None):
+            raise ValueError("temperature_c y humidity_pct deben configurarse juntos")
+        if self.max_order_non_shoebox is None:
+            self.max_order_non_shoebox = self.max_order
+        return self
 
 
 class ColoredNoiseStrategyConfig(StrictConfigModel):
@@ -335,8 +354,9 @@ class HearingDegradationConfig(StrictConfigModel):
 class AppConfig(StrictConfigModel):
     experiment: ExperimentConfig
     execution: ExecutionConfig
-    raven: RavenConfig
+    raven: RavenConfig | None = None
     render: RenderConfig
+    pyroomacoustics: PyroomacousticsConfig | None = None
     background_noise: BackgroundNoiseConfig = Field(default_factory=BackgroundNoiseConfig)
     receiver_sampling: ReceiverSamplingConfig
     receiver_outputs: ReceiverOutputsConfig

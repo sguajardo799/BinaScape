@@ -11,6 +11,7 @@ from typing import Any, Literal, NotRequired, TypedDict, cast
 from uuid import uuid4
 import wave
 
+from acoustic_orchestrator.pipeline.render_backends import DEFAULT_SAMPLE_RATE_HZ
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
 from acoustic_orchestrator.pipeline.render_validation import RenderValidation, RenderValidity, validate_render
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs
@@ -732,7 +733,7 @@ def _validate_array_outputs(
             with wave.open(paths["rendered_wav_path"], "rb") as audio:
                 if audio.getnchannels() != expected["num_microphones"]:
                     issues.append("array_wav_channel_count_mismatch")
-                if audio.getframerate() != paths.get("sample_rate_hz", 44100):
+                if audio.getframerate() != paths.get("sample_rate_hz", DEFAULT_SAMPLE_RATE_HZ):
                     issues.append("array_wav_sample_rate_mismatch")
         except (OSError, EOFError, wave.Error) as exc:
             issues.append(f"array_wav_unreadable: {exc}")

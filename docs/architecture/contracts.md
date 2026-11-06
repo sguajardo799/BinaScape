@@ -337,6 +337,73 @@ La estimación Sabine conserva diez bandas de octava, pero su media/clasificaci�
 
 HEAD analyzer alinea frecuencias explícitas y consolida variantes por escena/banda con tolerancia `abs(a-b) <= max(1e-6 s, 1e-6 * max(abs(a), abs(b)))` sobre todas las parejas válidas. Un conflicto excluye solo la banda RAVEN afectada y su par; Sabine y otras bandas permanecen disponibles. Es equivalencia numérica fija, no precisión certificada del simulador. Los promedios comparables reutilizan el mismo conjunto de pares válidos, sin interpolar ni ponderar una sala por HRTF.
 
+## Backend de render seleccionable
+
+`render.backend` admite `raven` (por defecto) y `pyroomacoustics`. La tabla declarativa
+`pipeline/render_backends.py` fija por backend las frecuencias admitidas (`{44100}` en ambos),
+el descriptor T30 esperado y la identidad exigida en el sidecar; la validación de configuración,
+de render y del índice la consultan en lugar de literales.
+
+**Identidad del plan.** `normalized_static_config` omite `render.backend: raven` y un bloque
+`pyroomacoustics` nulo, por lo que las configuraciones existentes conservan su identidad
+normalizada. Este cambio sí modifica archivos incluidos en el contrato del generador
+(`config/validator.py`, `experiment/scene_builder.py`): un run RAVEN planificado antes informa el
+conflicto explícito "Generation contract changed" al reanudar, sin reescribir ni borrar
+artefactos. Termine esos runs o use otro `run_name`.
+
+**Manifiestos.** Con `raven` los manifiestos de escena y de ejecución no cambian (sin
+`render.backend`). Con `pyroomacoustics` incluyen `render.backend: pyroomacoustics`,
+`render.backend_parameters` (`max_order`, `max_order_non_shoebox`, `air_absorption`,
+`temperature_c`, `humidity_pct`, valores efectivos) y `base_rpf_file: null`; el plan no
+fingerprinta un RPF. Como la reanudación compara el manifiesto de ejecución completo, un cambio de
+backend o de parámetros nunca reutiliza una variante.
+
+**Proceso.** El despacho único (`_run_single_render_task`) usa `render.backend` del snapshot.
+El worker `python -m acoustic_orchestrator.backends.pyroomacoustics.worker <snapshot>
+--attempt-id --variant-id --manifest-sha256 --completion-path --failure-path [--events-path]`
+lee solo el snapshot, publica `failure.json` (`invalid_input`) ante errores de carga/validación,
+escribe WAV, sidecar y constancia (mismo formato schema 1, `.tmp` + `os.replace` sin reemplazar
+una existente) y emite los eventos `initialization`, `simulation` (pasos `pyroomacoustics_rir` y
+`audio_postprocessing`), `artifact_writing`, `artifact_written` y `entrypoint_completed`. Sale 0
+solo tras publicar. El proceso hijo recibe `OMP_NUM_THREADS=1` y `PRA_NUM_THREADS=1`.
+`reconcile-static` reconoce el worker como proceso de render activo.
+
+**Sidecar Pyroomacoustics.** Contiene todos los campos que exige la validación de variantes array
+(poses legacy con Z reflejada en `summary.sources`, `receiver.circular_array`,
+`coordinate_frame: public_xyz_y_up`, semillas, ruido, `batch`) más
+`summary.render_backend: Pyroomacoustics` y un bloque `backend`: `name`, `version`,
+`simulation` (`method: ism`, órdenes, `effective_max_order`, `air_absorption`, temperatura,
+humedad, `speed_of_sound_m_s`, `ray_tracing: false`, `randomized_image_sources: false`,
+`seed_applied`), `coordinate_transform`, `room`, `positions_m` (marco backend), `materials`
+(octavas convertidas con `scattering_applied: false`), `rir` (`global_delay_samples`,
+`frac_delay_length`, `high_pass_filter`, `lengths_samples`) y `t30_pairs_s`
+(`[fuente][micrófono][banda]`). La validación rechaza una variante no RAVEN cuya identidad no
+coincide (`render_metadata_backend_identity_mismatch`); un sidecar RAVEN solo se rechaza si
+declara otro backend.
+
+**T30.** RAVEN: `method: rpf.getT30`, `estimated_from: room`. Pyroomacoustics:
+`method: schroeder_backward_integration_v1`, `estimated_from: rir`: filtro de octava
+Butterworth (orden 3 por lado) aplicado hacia atrás, borde superior a 0.95·Nyquist, integración
+de Schroeder, ajuste entre −5 y −35 dB extrapolado a 60 dB; una banda es nula si la envolvente no
+decae 35 dB antes del final de la RIR; la banda informada es la media sobre pares y es nula si
+algún par lo es. Un método ajeno al backend de la variante se rechaza. La puerta canónica y su
+remuestreo no cambian. Un orden ISM insuficiente acorta la RIR y sesga el T30 a la baja.
+
+**Transformación de coordenadas.** Marco backend Z-arriba: rotación `R = [[1,0,0],[0,0,-1],[0,1,0]]`
+(`(x, −z, y)`, det +1) seguida de la traslación por sala `t = (−min x, max z, 0)` que ancla la
+huella en el origen (la primitiva rectangular de Pyroomacoustics solo admite `[0, dims]`). Es una
+transformación rígida sin componente vertical; se registra en `backend.coordinate_transform`.
+Las coordenadas backend solo aparecen bajo `backend.*`. Los materiales usan el mapeo de frecuencia
+central del estimador Sabine; Pyroomacoustics 0.10.1 opera con bandas de 125 a 16000 Hz, de modo que
+los coeficientes de 31.5 y 63 Hz no tienen efecto propio. No se declara equivalencia acústica con
+RAVEN.
+
+**Riesgo conocido: convención angular del array.** El micrófono 0 queda en `[0, 0, +r]` respecto
+del centro con yaw +90°, mientras una fuente `fixed_position` con azimut 0° y yaw +90° queda hacia
+−Z: el anillo gira en sentido opuesto a la convención yaw/azimut. Ambos backends renderizan las
+posiciones del descriptor sin corregirlas; corregir la convención requiere un cambio de
+especificación autorizado antes de producir etiquetas DOA.
+
 ## Clarity y errores
 
 `expected_output_wav_path` y `expected_output_metadata_path` son autoritativos. Paths relativos de jobs se resuelven respecto del directorio de trabajo del proceso, no del JSONL. `backend_invocation` sirve al orquestador; no se copia al resultado por el backend. El WAV degradado conserva basename y su sidecar el stem.

@@ -46,6 +46,7 @@ codegen/
 !/configs/experiments/speech_fixed_position_e2e.yml
 !/configs/experiments/circular_array_only.yml
 !/configs/experiments/circular_array_mixed.yml
+!/configs/experiments/circular_array_pyroomacoustics.yml
 *.wav
 *.flac
 *.mp3

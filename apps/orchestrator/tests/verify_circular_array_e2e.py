@@ -88,8 +88,11 @@ def verify_render(root: Path) -> None:
         config.outputs.artifact_root = root
         config.outputs.run_name = case
         config.hearing_degradation.output_dir = root / case / "output_audio" / "degraded"
+        config.execution.num_simulations = 1
         config.execution.overwrite_existing = True
         config.execution.resume_if_possible = True
+        config.source_sampling.timing.total_duration_s = 2.0
+        config.receiver_outputs.circular_array.num_microphones = 8
         config.hearing_degradation.enabled = False
         config.hearing_degradation.input_targets = []
         distribution = config.room_sampling.reverberation.distribution

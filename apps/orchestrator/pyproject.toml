@@ -19,6 +19,14 @@ dependencies = [
 acoustic-orchestrator = "acoustic_orchestrator.cli:main"
 
 [project.optional-dependencies]
+# Optional MATLAB-free render backend (render.backend: pyroomacoustics).
+# RAVEN-only installs do not need it.
+pyroomacoustics = [
+  "pyroomacoustics>=0.10.1,<0.11",
+  "numpy>=2.0",
+  "scipy>=1.17",
+  "soundfile>=0.13",
+]
 dev = [
   "pytest>=8.0",
   "ruff>=0.5",

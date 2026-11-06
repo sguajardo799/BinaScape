@@ -1,0 +1,338 @@
+{
+  "background_noise": {
+    "allow_multiple_layers": false,
+    "enabled": false,
+    "snr_db": 0.0,
+    "strategies": []
+  },
+  "execution": {
+    "num_simulations": 100,
+    "save_render_metadata": true
+  },
+  "experiment": {
+    "experiment_id": "e2e_1_worker_s42",
+    "random_seed": 42,
+    "scene_type": "static"
+  },
+  "outputs": {
+    "artifact_root": "<REPO>/outputs",
+    "naming": {
+      "metadata_pattern": "{scene_id}__{output_type}__render.json",
+      "scene_id_prefix": "scene_static",
+      "wav_pattern": "{scene_id}__{output_type}.wav"
+    },
+    "run_name": "e2e_1_worker_s42"
+  },
+  "raven": {
+    "base_rpf_file": "<REPO>/configs/experiments/C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf"
+  },
+  "receiver_outputs": {
+    "binaural_hrtf": {
+      "enabled": true,
+      "file_pattern": "*.daff",
+      "ir_catalog_path": "<REPO>/assets/hrtf",
+      "num_channels": 2,
+      "num_hrtfs": 1,
+      "output_subdir": "binaural_hrtf",
+      "required": true
+    },
+    "bte_front_hartf": null,
+    "bte_rear_hartf": null,
+    "circular_array": null
+  },
+  "receiver_sampling": {
+    "one_receiver_per_scene": true,
+    "orientation_strategy": {
+      "pitch_deg": {
+        "fixed": 0.0
+      },
+      "roll_deg": {
+        "fixed": 0.0
+      },
+      "type": "random_yaw",
+      "yaw_deg": {
+        "max": 180.0,
+        "min": -180.0
+      }
+    },
+    "position_strategy": {
+      "fixed_height_m": {
+        "max": 1.7,
+        "min": 1.55
+      },
+      "margin_m": {
+        "x": 0.5,
+        "y": 0.0,
+        "z": 0.5
+      },
+      "type": "random_uniform_inside_room"
+    }
+  },
+  "render": {
+    "generate_brir": true,
+    "generate_rir": false,
+    "is_order_ps": 2,
+    "num_particles": 60000,
+    "sample_rate_hz": 44100,
+    "simulation_type_is": true,
+    "simulation_type_rt": true
+  },
+  "room_sampling": {
+    "geometry": {
+      "height_m": {
+        "max": 3.0,
+        "min": 2.4
+      },
+      "shape_mix": [
+        {
+          "length_m": {
+            "max": 5.0,
+            "min": 4.0
+          },
+          "probability": 0.34,
+          "type": "shoebox",
+          "width_m": {
+            "max": 4.0,
+            "min": 3.0
+          }
+        },
+        {
+          "base_a_m": {
+            "max": 5.0,
+            "min": 4.0
+          },
+          "base_b_m": {
+            "max": 4.0,
+            "min": 3.0
+          },
+          "depth_m": {
+            "max": 4.0,
+            "min": 3.0
+          },
+          "probability": 0.33,
+          "top_offset_m": {
+            "max": 0.5,
+            "min": -0.5
+          },
+          "type": "trapezoid"
+        },
+        {
+          "cutout_length_m": {
+            "max": 2.0,
+            "min": 1.0
+          },
+          "cutout_width_m": {
+            "max": 2.0,
+            "min": 1.0
+          },
+          "outer_length_m": {
+            "max": 6.0,
+            "min": 5.0
+          },
+          "outer_width_m": {
+            "max": 5.0,
+            "min": 4.0
+          },
+          "probability": 0.33,
+          "removed_corners": [
+            "north_east"
+          ],
+          "type": "l_shape"
+        }
+      ]
+    },
+    "materials": {
+      "ceiling": [
+        "wood",
+        "plaster"
+      ],
+      "floor": [
+        "wood",
+        "plaster"
+      ],
+      "walls": [
+        "bricks",
+        "concrete",
+        "glass",
+        "drywall"
+      ]
+    },
+    "reverberation": {
+      "aggregation": "arithmetic_mean",
+      "distribution": {
+        "bin_width_s": 0.1,
+        "quota_tolerance_fraction": 0.15,
+        "range_s": {
+          "max": 0.8,
+          "min": 0.2
+        },
+        "scope": "global",
+        "type": "uniform"
+      },
+      "estimator": "sabine",
+      "estimator_version": "sabine_polygon_octaves_v4",
+      "mean_bands_hz": [
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000
+      ],
+      "metric": "estimated_rt30_s",
+      "treatment": {
+        "allow_none": true,
+        "catalog_version": 1,
+        "ceiling_coverage": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "eligible_surface_types": [
+          "wall",
+          "ceiling"
+        ],
+        "max_treatments_per_surface": 1,
+        "mix_model": "area_weighted_linear",
+        "mix_model_version": 1,
+        "preserve_base_scattering": true,
+        "wall_coverage": {
+          "max": 1.0,
+          "min": 0.0
+        }
+      }
+    }
+  },
+  "scene_validation": {
+    "max_receiver_attempts": 50,
+    "max_scene_attempts": 50,
+    "min_distance_between_sources_m": 0.2,
+    "min_distance_source_to_receiver_m": 0.5,
+    "require_receiver_inside_room": true,
+    "require_sources_inside_room": true
+  },
+  "source_sampling": {
+    "default_orientation_strategy": {
+      "pitch_deg": {
+        "fixed": 0.0
+      },
+      "roll_deg": {
+        "fixed": 0.0
+      },
+      "type": "random_yaw",
+      "yaw_deg": {
+        "max": 180.0,
+        "min": -180.0
+      }
+    },
+    "gain_db": {
+      "max": 0.0,
+      "min": -6.0
+    },
+    "max_sources": 5,
+    "min_sources": 2,
+    "source_types": [
+      {
+        "audio_dir": "<REPO>/assets/events/train/speech",
+        "directivity": "<REPO>/assets/directivity/Singer_2011_FWE_TLE_norm.daff",
+        "event_type": "speech",
+        "max_count": 1,
+        "min_count": 1,
+        "orientation_strategy": null,
+        "probability": 1.0,
+        "role": "base",
+        "spatial_policy": {
+          "azimuths_deg": null,
+          "distances_m": null,
+          "elevations_deg": null,
+          "min_radius_from_receiver_m": null,
+          "targets": null,
+          "type": "random_valid"
+        }
+      },
+      {
+        "audio_dir": "<REPO>/assets/events/train/keyboard_typing",
+        "directivity": null,
+        "event_type": "keyboard_typing",
+        "max_count": 2,
+        "min_count": 0,
+        "orientation_strategy": null,
+        "probability": 0.5,
+        "role": "base",
+        "spatial_policy": {
+          "azimuths_deg": null,
+          "distances_m": null,
+          "elevations_deg": null,
+          "min_radius_from_receiver_m": null,
+          "targets": null,
+          "type": "random_valid"
+        }
+      },
+      {
+        "audio_dir": "<REPO>/assets/events/train/cough",
+        "directivity": null,
+        "event_type": "cough",
+        "max_count": 1,
+        "min_count": 0,
+        "orientation_strategy": null,
+        "probability": 0.15,
+        "role": "optional",
+        "spatial_policy": {
+          "azimuths_deg": null,
+          "distances_m": null,
+          "elevations_deg": null,
+          "min_radius_from_receiver_m": 1.5,
+          "targets": null,
+          "type": "random_valid_away_from_receiver"
+        }
+      },
+      {
+        "audio_dir": "<REPO>/assets/events/train/sneeze",
+        "directivity": null,
+        "event_type": "sneeze",
+        "max_count": 1,
+        "min_count": 0,
+        "orientation_strategy": null,
+        "probability": 0.15,
+        "role": "optional",
+        "spatial_policy": {
+          "azimuths_deg": null,
+          "distances_m": null,
+          "elevations_deg": null,
+          "min_radius_from_receiver_m": 1.5,
+          "targets": null,
+          "type": "random_valid_away_from_receiver"
+        }
+      },
+      {
+        "audio_dir": "<REPO>/assets/events/train/clock_alarm",
+        "directivity": null,
+        "event_type": "clock_alarm",
+        "max_count": 1,
+        "min_count": 0,
+        "orientation_strategy": null,
+        "probability": 0.3,
+        "role": "optional",
+        "spatial_policy": {
+          "azimuths_deg": null,
+          "distances_m": null,
+          "elevations_deg": null,
+          "min_radius_from_receiver_m": null,
+          "targets": {
+            "random_valid": 0.1,
+            "wall": 0.9
+          },
+          "type": "weighted_targets"
+        }
+      }
+    ],
+    "timing": {
+      "allow_offsets": true,
+      "start_time_s": {
+        "max": 5.5,
+        "min": 0.1
+      },
+      "total_duration_s": 10.0
+    }
+  }
+}

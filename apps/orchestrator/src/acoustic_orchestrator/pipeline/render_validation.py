@@ -12,6 +12,9 @@ from typing import Any, Literal, TypeGuard
 import wave
 
 from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.render_backends import (
+    DEFAULT_SAMPLE_RATE_HZ, RenderBackend, get_render_backend, manifest_render_backend,
+)
 
 
 ValidationProfile = Literal["normal", "recovery", "reuse"]
@@ -94,8 +97,15 @@ def _pcm_data_size(path: Path) -> int:
         return data_sizes[0]
 
 
-def validate_wav(path: Path, *, expected_channels: int, sample_rate_hz: int = 44100) -> RenderValidation:
-    """Read every PCM frame with bounded memory; PCM integer samples are finite."""
+def validate_wav(
+    path: Path, *, expected_channels: int, sample_rate_hz: int = DEFAULT_SAMPLE_RATE_HZ,
+    supported_sample_rates: frozenset[int] | None = None,
+) -> RenderValidation:
+    """Read every PCM frame with bounded memory; PCM integer samples are finite.
+
+    The rate must equal the runtime rate and belong to the backend's declared set.
+    """
+    supported = get_render_backend(None).supported_sample_rates if supported_sample_rates is None else supported_sample_rates
     result = RenderValidation()
     try:
         data_size = _pcm_data_size(path)
@@ -110,7 +120,7 @@ def validate_wav(path: Path, *, expected_channels: int, sample_rate_hz: int = 44
                 result.invalid.append("wav_pcm_format_unsupported")
             if channels != expected_channels:
                 result.invalid.append("wav_channel_count_mismatch")
-            if rate != sample_rate_hz or rate != 44100:
+            if rate != sample_rate_hz or rate not in supported:
                 result.invalid.append("wav_sample_rate_mismatch")
             frame_size = channels * width
             if data_size % frame_size or data_size != frames * frame_size:
@@ -157,7 +167,7 @@ def validate_dimensions(result: RenderValidation, render: dict[str, Any], summar
     target = render.get("target_duration_s")
     if target is None or target == []:
         return
-    rate = render.get("sample_rate_hz", 44100)
+    rate = render.get("sample_rate_hz", DEFAULT_SAMPLE_RATE_HZ)
     if not is_finite_number(target) or target <= 0 or not is_finite_number(rate) or rate <= 0:
         result.invalid.append("runtime_target_duration_invalid")
         return
@@ -250,7 +260,7 @@ def read_render_metadata(
                 if not equal:
                     result.invalid.append(f"render_metadata_{field_name}_contradictory")
     rate = payload.get("sample_rate_hz")
-    if type(rate) is not int or rate != render.get("sample_rate_hz", 44100):
+    if type(rate) is not int or rate != render.get("sample_rate_hz", DEFAULT_SAMPLE_RATE_HZ):
         result.invalid.append("render_metadata_sample_rate_hz_mismatch")
     for field_name in ("output_num_samples", "output_num_channels", "n_sources"):
         value = summary.get(field_name)
@@ -516,8 +526,32 @@ def validate_noise(result: RenderValidation, manifest: dict[str, Any]) -> None:
         result.invalid.append("background_noise_applied_inconsistent")
 
 
-def validate_t30(result: RenderValidation) -> None:
-    """Canonical acoustic gate, distinct from unreadable/corrupted artifacts."""
+def validate_backend_identity(result: RenderValidation, backend: RenderBackend) -> None:
+    """Sidecars must come from the backend selected by the runtime manifest.
+
+    RAVEN sidecars need no new field; they are only rejected if they claim
+    another backend.
+    """
+    if result.metadata is None:
+        return
+    summary = result.metadata.get("summary")
+    declared = result.metadata.get("backend")
+    name = declared.get("name") if isinstance(declared, dict) else None
+    if backend.summary_render_backend is None:
+        if declared is not None and name != backend.name:
+            result.invalid.append("render_metadata_backend_identity_mismatch")
+        return
+    observed = summary.get("render_backend") if isinstance(summary, dict) else None
+    if observed != backend.summary_render_backend or name != backend.name:
+        result.invalid.append("render_metadata_backend_identity_mismatch")
+
+
+def validate_t30(result: RenderValidation, backend: RenderBackend | None = None) -> None:
+    """Canonical acoustic gate, distinct from unreadable/corrupted artifacts.
+
+    The measurement method is the one declared by the variant's backend.
+    """
+    backend = backend or get_render_backend(None)
     if result.metadata is None:
         return
     summary = result.metadata.get("summary")
@@ -542,7 +576,7 @@ def validate_t30(result: RenderValidation) -> None:
                               for frequency, value, ok in zip(RAVEN_OCTAVE_FREQUENCIES_HZ, values, valid, strict=True) if not ok],
         }
     expected = {
-        "metric": "T30", "estimated_from": "room", "method": "rpf.getT30",
+        "metric": "T30", "estimated_from": backend.t30_estimated_from, "method": backend.t30_method,
         "band_resolution": "octave", "frequency_mapping": "center_frequency",
         "band_frequencies_hz": list(RAVEN_OCTAVE_FREQUENCIES_HZ), "valid_band_count": sum(valid),
         "status": "estimated" if all(valid) else "unavailable",
@@ -576,6 +610,11 @@ def validate_render(
     if not isinstance(render, dict) or not isinstance(receiver, dict):
         result.invalid.append("runtime_structure_invalid")
         return result
+    try:
+        backend = manifest_render_backend(manifest)
+    except ValueError:
+        result.invalid.append("runtime_render_backend_invalid")
+        return result
     output_type = paths["output_type"]
     if manifest.get("scene_id") != paths["scene_id"] or manifest.get("scene_type") != "static":
         result.invalid.append("runtime_scene_identity_mismatch")
@@ -596,7 +635,7 @@ def validate_render(
         result.invalid.append("runtime_output_wav_path_mismatch")
     if paths.get("render_metadata_path") and not _path_equal(render.get("output_metadata_path"), paths["render_metadata_path"]):
         result.invalid.append("runtime_output_metadata_path_mismatch")
-    if render.get("sample_rate_hz") != 44100 or type(render.get("sample_rate_hz")) is not int:
+    if type(render.get("sample_rate_hz")) is not int or render["sample_rate_hz"] not in backend.supported_sample_rates:
         result.invalid.append("runtime_sample_rate_invalid")
     sources = object_entries(manifest.get("sources"))
     if not sources:
@@ -631,7 +670,8 @@ def validate_render(
             result.invalid.append("runtime_receiver_ir_mismatch")
         channels = 2
     wav = validate_wav(Path(paths["rendered_wav_path"]), expected_channels=channels,
-                       sample_rate_hz=render.get("sample_rate_hz", 44100))
+                       sample_rate_hz=render.get("sample_rate_hz", backend.default_sample_rate),
+                       supported_sample_rates=backend.supported_sample_rates)
     result.missing.extend(wav.missing)
     result.invalid.extend(wav.invalid)
     result.unverifiable.extend(wav.unverifiable)
@@ -645,8 +685,9 @@ def validate_render(
     validate_sources(result, manifest)
     validate_receiver_and_seed(result, manifest)
     validate_noise(result, manifest)
+    validate_backend_identity(result, backend)
     if canonical:
-        validate_t30(result)
+        validate_t30(result, backend)
     return result
 
 

@@ -70,7 +70,7 @@ Scene and runtime manifests SHALL distinguish circular-array descriptors from ca
 - **THEN** it retains the existing normalization, variant identities, and binaural rendering path
 
 ### Requirement: Raw synchronized multichannel rendering
-MATLAB SHALL render each source through the room impulse response at each array microphone and mix sources into one N-channel WAV at the supported render sample rate. WAV channel k+1 SHALL correspond to microphone k. Rendering SHALL preserve relative propagation delays and interchannel levels without head filtering, beamforming, per-channel normalization, or per-microphone onset alignment.
+The selected render backend SHALL render each source through the room impulse response at each array microphone and mix sources into one N-channel WAV at a render sample rate supported by that backend. That backend is MATLAB/RAVEN for `render.backend: raven`, or the Pyroomacoustics worker for `render.backend: pyroomacoustics`. WAV channel k+1 SHALL correspond to microphone k. Rendering SHALL preserve relative propagation delays and interchannel levels without head filtering, beamforming, per-channel normalization, or per-microphone onset alignment. Backends SHALL NOT be required to produce numerically identical recordings for the same scene.
 
 #### Scenario: Eight-channel output
 - **WHEN** an eight-microphone array scene is rendered
@@ -79,6 +79,10 @@ MATLAB SHALL render each source through the room impulse response at each array 
 #### Scenario: Unequal source distances
 - **WHEN** a source is closer to one microphone than another
 - **THEN** the recording preserves the backend's relative arrival-time and level differences rather than independently aligning or normalizing channels
+
+#### Scenario: Same contract with either backend
+- **WHEN** the same array scene configuration is rendered once with `render.backend: raven` and once with `render.backend: pyroomacoustics`
+- **THEN** both outputs satisfy the same channel count, channel-to-microphone mapping, sample rate and duration contract, while their sample values are not required to match
 
 ### Requirement: Array output provenance and validation
 The array variant SHALL use existing output layout and naming patterns with `output_type: circular_array`. Its metadata SHALL record count, radius, center, yaw, ordered microphone/channel mapping, and public positions, distinguishing backend coordinates when included. Output indexing and resume validation SHALL check the expected N-channel shape and array provenance without requiring a receiver IR file.

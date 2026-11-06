@@ -17,9 +17,26 @@ Para trabajo local por app, se mantienen `uv sync --project apps/orchestrator --
 
 Estas instrucciones preparan un entorno; no indican que se haya instalado ni actualizado ninguna dependencia en la auditoría. Consulte las [guías locales](../README.md#guías-locales) para invocaciones y opciones específicas.
 
+## Backend Pyroomacoustics (opcional, Linux)
+
+El backend `render.backend: pyroomacoustics` es un extra opcional del orquestador, en un entorno
+local del repositorio (`.venv/`, ignorado por git):
+
+```sh
+uv sync --package acoustic-orchestrator --extra dev --extra pyroomacoustics
+uv run --package acoustic-orchestrator --extra dev --extra pyroomacoustics \
+  acoustic-orchestrator render-static configs/experiments/circular_array_pyroomacoustics.yml
+```
+
+Fija `pyroomacoustics>=0.10.1,<0.11` (verificado con 0.10.1, numpy 2.4.6, scipy 1.17.1 y CPython
+3.12 en Linux x86_64). Sin el extra, RAVEN sigue plenamente operativo y nunca se importa
+Pyroomacoustics; una configuración Pyroomacoustics falla en validación nombrando la dependencia.
+Use siempre `--extra pyroomacoustics` en `uv run`, porque la sincronización de uv elimina extras
+no solicitados. No requiere MATLAB, ITA Toolbox ni RPF; solo admite arrays circulares a 44100 Hz.
+
 ## Render y assets
 
-`render-static` necesita `matlab` en PATH, MATLAB con ITA Toolbox/RAVEN configurados y todos los WAV, materiales, directividades, HRTF/DAFF y RPF referenciados. MATLAB estático exige 44100 Hz. `prepare_raven_project.m` usa actualmente la ruta Windows local `C:\ITASoftware\Raven\RavenInput` para proyectos; no asumir portabilidad sin revisar el entorno.
+Con el backend por defecto (`raven`), `render-static` necesita `matlab` en PATH, MATLAB con ITA Toolbox/RAVEN configurados y todos los WAV, materiales, directividades, HRTF/DAFF y RPF referenciados. MATLAB estático exige 44100 Hz. `prepare_raven_project.m` usa actualmente la ruta Windows local `C:\ITASoftware\Raven\RavenInput` para proyectos; no asumir portabilidad sin revisar el entorno.
 
 Los paths YAML relativos se interpretan desde el directorio del config, y los jobs relativos de Clarity desde el directorio de trabajo del backend. Inspeccione [ejemplos](../../configs/experiments/), [catálogos auditivos](../../configs/hearing/) y [entradas MATLAB](../../apps/matlab/example/) antes de ejecutar. No son datasets incluidos ni garantizan que cada asset exista en un checkout nuevo.
 

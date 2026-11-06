@@ -24,6 +24,28 @@ Clarity usa el runner pytest del entorno del orquestador porque no declara un ex
 
 `apps/orchestrator/tests/test_degraded_output_docs_contract.py` controla marcadores de nombres/path en README, ARCHITECTURE y AGENTS; una consolidación documental debe preservarlos. Los tests del analizador HEAD no requieren MATLAB ni archivos WAV.
 
+## Linux sin MATLAB
+
+Con el extra `pyroomacoustics` instalado, las pruebas del orquestador incluyen el backend
+Pyroomacoustics (unidades puras, física ISM, worker en subproceso, determinismo, reintentos y un
+`render-static` de extremo a extremo con un PATH sin `matlab`):
+
+```sh
+uv sync --package acoustic-orchestrator --extra dev --extra pyroomacoustics
+BINASCAPE_REQUIRE_PYROOMACOUSTICS=1 uv run --package acoustic-orchestrator --extra dev --extra pyroomacoustics \
+  pytest apps/orchestrator/tests -p no:cacheprovider
+uv run --package output-analyzer pytest apps/output-analyzer/tests -p no:cacheprovider
+```
+
+Sin el extra, las pruebas que requieren Pyroomacoustics, scipy o soundfile se omiten (skip);
+con `BINASCAPE_REQUIRE_PYROOMACOUSTICS=1` su ausencia es un fallo. Estos comandos se ejecutan
+manualmente; la automatización CI/CD queda fuera de este cambio. Excluyen Clarity
+(`apps/clarity-backend/tests`, dependencias pesadas) y todas las pruebas MATLAB/RAVEN.
+
+Los goldens RAVEN (`apps/orchestrator/tests/fixtures/raven_golden/`) fijan la configuración
+normalizada, los manifiestos y el comando MATLAB previos al backend seleccionable; solo se
+regeneran a propósito con `python apps/orchestrator/tests/raven_golden.py`.
+
 ## MATLAB
 
 Desde `apps/matlab`, con MATLAB y dependencias locales:
@@ -31,6 +53,10 @@ Desde `apps/matlab`, con MATLAB y dependencias locales:
 ```matlab
 runtests('tests')
 ```
+
+Solo Windows con MATLAB, ITA Toolbox y RAVEN licenciado: `runtests('apps/matlab/tests')`,
+`apps/orchestrator/tests/verify_render_acceptance.py` y `verify_circular_array_e2e.py` (no los
+recoge pytest). Sin ese entorno se registran como BLOCKED, nunca como PASS.
 
 Hay tests de validador, geometría/materiales/poses, audio/ruido, naming, variantes, metadata y T30; varios usan mocks. Un test con mocks no certifica ejecución real RAVEN. El smoke de render usa el entorno y assets reales y crea artefactos, por lo que no forma parte de esta auditoría documental.
 

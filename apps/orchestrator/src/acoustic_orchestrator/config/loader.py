@@ -54,7 +54,8 @@ def _format_seed(template: str, seed: int, field: str) -> str:
 
 
 def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
-    config.raven.base_rpf_file = _resolve(config.raven.base_rpf_file, base_dir)
+    if config.raven is not None:
+        config.raven.base_rpf_file = _resolve(config.raven.base_rpf_file, base_dir)
 
     for output in _catalog_receiver_outputs(config):
         output.ir_catalog_path = _resolve(output.ir_catalog_path, base_dir)

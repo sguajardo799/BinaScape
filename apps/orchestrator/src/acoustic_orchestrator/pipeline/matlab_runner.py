@@ -1,12 +1,14 @@
 import json
+import os
 import re
 import subprocess
+import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Callable, NotRequired, TypedDict
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
@@ -18,6 +20,7 @@ from acoustic_orchestrator.pipeline.progress import ProgressReporter
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MATLAB_APP_DIR = (PROJECT_ROOT.parent / "matlab").resolve()
 MATLAB_ENTRYPOINT = MATLAB_APP_DIR / "run_raven_static_render.m"
+PYROOMACOUSTICS_WORKER_MODULE = "acoustic_orchestrator.backends.pyroomacoustics.worker"
 
 
 class RenderVariantPaths(TypedDict):
@@ -48,13 +51,7 @@ def render_manifest_with_matlab(
     attempt: RenderAttempt | None = None,
     progress: ProgressReporter | None = None,
 ) -> MatlabProcessResult:
-    manifest_path = manifest_path.resolve()
-    attempt = attempt or RenderAttempt(manifest_path, attempts_dir)
-    if attempt.manifest_path != manifest_path or attempt.record["command"] is not None:
-        raise ValueError("attempt must be fresh and belong to this manifest")
-    started = time.monotonic()
-    diagnostics = MatlabDiagnostics(manifest_path, diagnostics_dir, attempt_id=attempt.attempt_id,
-                                    variant_id=attempt.variant_id, input_snapshot_path=attempt.snapshot_path)
+    attempt, diagnostics = _prepare_process(manifest_path, attempts_dir, diagnostics_dir, attempt)
     context = "[]"
     if diagnostics.ready:
         context = (
@@ -72,9 +69,56 @@ def render_manifest_with_matlab(
         f"addpath(genpath('{_escape_matlab_path(MATLAB_APP_DIR)}')); "
         f"run_raven_static_render('{_escape_matlab_path(attempt.snapshot_path)}', {context}, {completion_context});"
     )
-    command = [matlab_executable, "-batch", batch_command]
+
+    def require_entrypoint() -> None:
+        if not MATLAB_ENTRYPOINT.is_file():
+            raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
+
+    return _run_render_process(attempt, diagnostics, [matlab_executable, "-batch", batch_command],
+                               progress=progress, before_launch=require_entrypoint)
+
+
+def render_manifest_with_pyroomacoustics(
+    manifest_path: Path, *, diagnostics_dir: Path | None = None, attempts_dir: Path | None = None,
+    attempt: RenderAttempt | None = None, progress: ProgressReporter | None = None,
+) -> MatlabProcessResult:
+    """Run one attempt in a separate Pyroomacoustics worker process (same contract as MATLAB)."""
+    attempt, diagnostics = _prepare_process(manifest_path, attempts_dir, diagnostics_dir, attempt)
+    command = [
+        sys.executable, "-m", PYROOMACOUSTICS_WORKER_MODULE, attempt.snapshot_path.as_posix(),
+        "--attempt-id", attempt.attempt_id, "--variant-id", attempt.variant_id,
+        "--manifest-sha256", attempt.manifest_sha256,
+        "--completion-path", attempt.completion_path.as_posix(),
+        "--failure-path", attempt.failure_path.as_posix(),
+    ]
+    if diagnostics.ready:
+        command += ["--events-path", diagnostics.events_path.as_posix()]
+    # One thread per worker: avoids oversubscription under num_workers and thread-order effects.
+    environment = {**os.environ, "OMP_NUM_THREADS": "1", "PRA_NUM_THREADS": "1"}
+    return _run_render_process(attempt, diagnostics, command, progress=progress, env=environment)
+
+
+def _prepare_process(
+    manifest_path: Path, attempts_dir: Path | None, diagnostics_dir: Path | None, attempt: RenderAttempt | None,
+) -> tuple[RenderAttempt, MatlabDiagnostics]:
+    manifest_path = manifest_path.resolve()
+    attempt = attempt or RenderAttempt(manifest_path, attempts_dir)
+    if attempt.manifest_path != manifest_path or attempt.record["command"] is not None:
+        raise ValueError("attempt must be fresh and belong to this manifest")
+    diagnostics = MatlabDiagnostics(manifest_path, diagnostics_dir, attempt_id=attempt.attempt_id,
+                                    variant_id=attempt.variant_id, input_snapshot_path=attempt.snapshot_path)
+    return attempt, diagnostics
+
+
+def _run_render_process(
+    attempt: RenderAttempt, diagnostics: MatlabDiagnostics, command: list[str], *,
+    progress: ProgressReporter | None, before_launch: Callable[[], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> MatlabProcessResult:
+    """Shared render-process core: attempt record, diagnostics, ``subprocess.run(check=True)``, status."""
+    started = time.monotonic()
     attempt.record["command"] = command
-    attempt.save()  # Functional storage must be ready before launching MATLAB.
+    attempt.save()  # Functional storage must be ready before launching the process.
     console = diagnostics.begin(command)
     if progress is not None:
         progress.emit("attempt_begin", key=attempt.variant_id, attempt_id=attempt.attempt_id,
@@ -84,12 +128,14 @@ def render_manifest_with_matlab(
     finished = False
     termination_observed = False
     try:
-        if not MATLAB_ENTRYPOINT.is_file():
-            raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
+        if before_launch is not None:
+            before_launch()
         options: dict[str, Any] = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
+        if env is not None:
+            options["env"] = env
         completed = subprocess.run(command, check=True, **options)
         if type(completed.returncode) is not int:
-            raise RuntimeError("No se observó un código de salida válido de MATLAB")
+            raise RuntimeError("No se observó un código de salida válido del proceso de render")
         exit_code = completed.returncode
         termination_observed = True
         if exit_code != 0:

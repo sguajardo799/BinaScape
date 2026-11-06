@@ -17,9 +17,11 @@ execution; it is an optional analysis application.
 
 - Python `>=3.12,<3.13`
 - `uv`
-- MATLAB on `PATH` as `matlab` for `render-static`
+- MATLAB on `PATH` as `matlab` for `render-static` with the default RAVEN backend
 - A local MATLAB/RAVEN backend at `apps/matlab`
 - ITA Toolbox and RAVEN configured in MATLAB
+- Alternatively, for `render.backend: pyroomacoustics` (circular arrays only, no MATLAB):
+  the optional `pyroomacoustics` extra (see [Render Backends](#render-backends))
 - Local assets referenced by the selected config
 - The sibling Clarity backend at `apps/clarity-backend` when submitting hearing
   degradation jobs
@@ -692,6 +694,88 @@ si no existen salidas protegidas, sin inventar política retroactiva. Para rollb
 usar `max_attempts=1`; versiones antiguas requieren YAML compatible y no deben
 reanudar cadenas nuevas pendientes que no puedan verificar. Preferir otro run y
 conservar toda evidencia: no borrar registros para forzar reanudación o rollback.
+
+## Render Backends
+
+`render.backend` selects the acoustic renderer for every variant of a run:
+
+| Value | Renderer | Supported outputs | Platform |
+|---|---|---|---|
+| `raven` (default) | MATLAB + ITA Toolbox + RAVEN, `matlab -batch` | binaural HRTF, BTE HARTF, circular array | Windows with licensed RAVEN |
+| `pyroomacoustics` | Python worker process, Image Source Method only | circular array only | any platform with the extra installed |
+
+Omitting `render.backend` keeps the RAVEN behaviour exactly: existing configurations,
+normalized plan identity, scene/runtime manifests and validation outcomes are unchanged.
+
+Install the optional backend from the repository root:
+
+```sh
+uv sync --package acoustic-orchestrator --extra dev --extra pyroomacoustics
+```
+
+The extra pins `pyroomacoustics>=0.10.1,<0.11` together with numpy, scipy and soundfile.
+RAVEN-only installs do not need it and never import it.
+
+A Pyroomacoustics configuration replaces the `raven` block with a `pyroomacoustics` block
+(see [`configs/experiments/circular_array_pyroomacoustics.yml`](../../configs/experiments/circular_array_pyroomacoustics.yml)):
+
+```yaml
+render:
+  backend: pyroomacoustics
+  sample_rate_hz: 44100
+pyroomacoustics:
+  max_order: 100                # ISM order for shoebox rooms (required, integer >= 0)
+  max_order_non_shoebox: 8      # trapezoid / L-shape (optional, defaults to max_order; keep it small)
+  air_absorption: true          # required boolean
+  # temperature_c: 20.0         # optional, only together with humidity_pct
+  # humidity_pct: 50.0          # optional, 0..100
+```
+
+Configuration validation rejects, before planning and with an error naming the field:
+
+- a `raven` block, or any explicitly set RAVEN tuning field (`render.generate_rir`,
+  `generate_brir`, `simulation_type_rt`, `simulation_type_is`, `num_particles`, `is_order_ps`);
+- an enabled `binaural_hrtf`, `bte_rear_hartf` or `bte_front_hartf` output;
+- any source type with `directivity` (no omnidirectional substitute is used);
+- `hearing_degradation.enabled: true`, `scene_type: dynamic`, and any rate other than 44100 Hz;
+- a missing or out-of-range `pyroomacoustics` package (checked from installed metadata).
+
+Under `raven`, a `pyroomacoustics` block is rejected. The `raven` block and its
+`base_rpf_file` are only required for the RAVEN backend.
+
+On Linux the whole pipeline runs without MATLAB:
+
+```sh
+uv run --package acoustic-orchestrator --extra pyroomacoustics \
+  acoustic-orchestrator render-static configs/experiments/circular_array_pyroomacoustics.yml
+```
+
+Each attempt runs `python -m acoustic_orchestrator.backends.pyroomacoustics.worker` as a
+separate process with the same attempt contract as MATLAB: snapshot in; WAV, sidecar,
+`completion.json`/`failure.json` and diagnostic events out. Retries
+(`execution.matlab_process_retry`), the circuit breaker, `reconcile-static`, resume,
+indexes and progress apply unchanged; `matlab_*` names are kept. The worker computes ISM
+impulse responses for each (source, microphone) pair, then synthesizes the recording in
+Python with the MATLAB array semantics (downmix, peak normalization, gain, convolution,
+offsets, target duration, noise/SNR, 0.999 guards) and writes 16-bit PCM WAV.
+
+Important limitations:
+
+- Pyroomacoustics and RAVEN rooms are **not** acoustically equivalent, and recordings are not
+  sample-identical. Use the measured T30 of the sidecar as the reverberation label.
+- T30 is measured from the impulse responses (`schroeder_backward_integration_v1`); the
+  canonical T30 gate stays active, so an ISM order too low for the room rejects and resamples
+  the scene. `max_order` must be large enough for the configured RT range: truncated ISM
+  responses bias T30 low (see the calibration in the change's `verification.md`).
+- Trapezoid and L-shape rooms are built by extrusion, but general-polyhedron ISM at affordable
+  orders produces responses far too short for a valid T30, so such scenes are rejected by the
+  gate. Use shoebox rooms with this backend.
+- The 31.5 Hz and 63 Hz absorption coefficients have no independent effect (the backend's
+  octave bank starts at 125 Hz); scattering is recorded but not applied by ISM.
+- The legacy circular-array angular convention is preserved unchanged (microphone 0 points
+  to public `+Z` at yaw +90°, opposite to the yaw/azimuth convention); see the contracts.
+- Switching an existing run directory between backends is reported as a plan conflict and
+  never reuses or overwrites outputs; use a new `run_name`.
 
 ## Circular Array Configuration
 

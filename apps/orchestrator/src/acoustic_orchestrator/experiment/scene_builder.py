@@ -26,11 +26,16 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
     }
     if config.source_sampling.timing.total_duration_s is not None:
         render["target_duration_s"] = config.source_sampling.timing.total_duration_s
+    # RAVEN manifests stay byte-identical; other backends record identity and
+    # effective parameters so the runtime snapshot alone determines the simulation.
+    if config.render.backend != "raven":
+        render["backend"] = config.render.backend
+        render["backend_parameters"] = config.pyroomacoustics.model_dump(mode="json")
 
     return {
         "schema_version": "3.0",
         "scene_type": config.experiment.scene_type,
-        "base_rpf_file": config.raven.base_rpf_file.as_posix(),
+        "base_rpf_file": config.raven.base_rpf_file.as_posix() if config.render.backend == "raven" else None,
         "project_name": config.experiment.experiment_id,
         "scene_id": scene_id,
         "job_id": f"render_job_static_{sequence:04d}",

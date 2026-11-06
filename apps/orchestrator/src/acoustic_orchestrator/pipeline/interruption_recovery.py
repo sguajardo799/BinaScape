@@ -59,7 +59,9 @@ def active_render_writers() -> list[dict[str, Any]]:
         pid, name, command = row["ProcessId"], str(row["Name"]).lower(), row.get("CommandLine")
         if pid == os.getpid():
             continue
-        renderer = "matlab" in name or "raven" in name
+        # Render processes: MATLAB/RAVEN by name; the Pyroomacoustics worker by its module.
+        renderer = "matlab" in name or "raven" in name or (
+            command is not None and "acoustic_orchestrator.backends.pyroomacoustics.worker" in str(command))
         possible_orchestrator = any(term in name for term in ("python", "acoustic", "uv"))
         if renderer or (possible_orchestrator and (
             command is None or any(term in str(command) for term in ("render-static", "generate-manifests"))

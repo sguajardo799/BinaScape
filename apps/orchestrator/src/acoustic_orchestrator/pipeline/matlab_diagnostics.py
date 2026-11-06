@@ -11,6 +11,10 @@ from typing import Any, BinaryIO, Callable
 from uuid import UUID, uuid4
 
 
+# Render-process simulation steps: RAVEN (MATLAB) and the Pyroomacoustics worker.
+SIMULATION_STEPS = frozenset({"raven_run", "pyroomacoustics_rir", "audio_postprocessing"})
+
+
 class MatlabActivityReader:
     """Bounded incremental diagnostic tail. Never warns or decides outcomes."""
 
@@ -47,7 +51,7 @@ class MatlabActivityReader:
                             continue
                         activity = event["stage"]
                     elif kind in {"step_started", "step_completed"}:
-                        if event.get("stage") != "simulation" or event.get("step") not in {"raven_run", "audio_postprocessing"}:
+                        if event.get("stage") != "simulation" or event.get("step") not in SIMULATION_STEPS:
                             continue
                         activity = f"simulation / {event['step']}"
                     elif kind == "entrypoint_completed":
@@ -166,7 +170,7 @@ class MatlabDiagnostics:
                     if event["type"].startswith("stage_") and event.get("stage") not in stages:
                         raise ValueError("invalid stage")
                     if event["type"].startswith("step_") and (
-                        event.get("stage") != "simulation" or event.get("step") not in {"raven_run", "audio_postprocessing"}
+                        event.get("stage") != "simulation" or event.get("step") not in SIMULATION_STEPS
                     ):
                         raise ValueError("invalid simulation step")
                     if event["type"] == "artifact_written" and not isinstance(event.get("path"), str):

@@ -135,6 +135,12 @@ def normalized_static_config(config: AppConfig) -> dict:
     """Functional identity, excluding scheduling, diagnostics and Clarity."""
     data = config.model_dump(mode="json")
     data["experiment"].pop("description", None)
+    # Backend fields are omitted at their defaults so configurations written
+    # before backends were selectable keep their exact plan identity.
+    if data["render"].get("backend") == "raven":
+        data["render"].pop("backend")
+    if data.get("pyroomacoustics") is None:
+        data.pop("pyroomacoustics", None)
     data["execution"] = {
         "num_simulations": config.execution.num_simulations,
         "save_render_metadata": config.execution.save_render_metadata,
@@ -197,7 +203,8 @@ def _scene_record(manifest: dict, index: int) -> dict:
 
 
 def _references(manifest: dict) -> set[Path]:
-    paths = {Path(manifest["base_rpf_file"])}
+    # A non-RAVEN manifest has no RAVEN project file.
+    paths = {Path(manifest["base_rpf_file"])} if manifest["base_rpf_file"] is not None else set()
     for material in manifest["room"]["material_files"].values():
         paths.add(Path(material["material_path"]))
     for ir in manifest["receiver"]["hrtfs"]:

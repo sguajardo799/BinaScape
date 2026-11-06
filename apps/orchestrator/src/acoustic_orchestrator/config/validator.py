@@ -22,6 +22,7 @@ from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeho
 from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
 from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
 from acoustic_orchestrator.source_audio import list_source_wavs
+from acoustic_orchestrator.config.backend_validation import validate_backend_config
 
 
 MIN_SOURCE_WALL_CLEARANCE_M = 0.5
@@ -375,7 +376,9 @@ def validate_config(config: AppConfig) -> None:
     if max_total_sources < config.source_sampling.min_sources:
         errors.append("La suma de source_types.max_count no alcanza source_sampling.min_sources")
 
-    _validate_existing_file(errors, "raven.base_rpf_file", config.raven.base_rpf_file)
+    validate_backend_config(errors, config)
+    if config.render.backend == "raven" and config.raven is not None:
+        _validate_existing_file(errors, "raven.base_rpf_file", config.raven.base_rpf_file)
 
     _validate_run_name(errors, config.outputs.run_name)
 

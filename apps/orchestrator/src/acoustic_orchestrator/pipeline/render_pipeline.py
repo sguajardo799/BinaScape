@@ -25,6 +25,7 @@ from acoustic_orchestrator.pipeline.matlab_runner import (
     build_render_variant_paths,
     build_single_receiver_render_manifest,
     render_manifest_with_matlab,
+    render_manifest_with_pyroomacoustics,
     write_single_receiver_render_manifest,
     receiver_variants,
 )
@@ -41,6 +42,7 @@ from acoustic_orchestrator.pipeline.runtime_audio import prepare_scene_source_as
 from acoustic_orchestrator.pipeline.matlab_runner import MatlabProcessResult
 from acoustic_orchestrator.pipeline.render_acceptance import RenderAcceptance, RenderValidationError, evaluate_render, persist_acceptance
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
+from acoustic_orchestrator.pipeline.render_backends import manifest_render_backend
 from acoustic_orchestrator.pipeline.render_history import load_render_history
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt, read_json_object, sha256_file
 from acoustic_orchestrator.pipeline.process_retries import (
@@ -1167,12 +1169,19 @@ def _run_single_render_task(
                 progress.count("reintentos")
             if progress.enabled:
                 runner_options["progress"] = progress
-        process_result = render_manifest_with_matlab(
-            task["runtime_manifest_path"], matlab_executable=matlab_executable,
-            diagnostics_dir=task["diagnostics_dir"],
-            attempts_dir=task["attempts_dir"],
-            **runner_options,
-        )
+        # Single backend dispatch point; an absent render.backend means RAVEN.
+        if _runtime_render_backend(task) == "raven":
+            process_result = render_manifest_with_matlab(
+                task["runtime_manifest_path"], matlab_executable=matlab_executable,
+                diagnostics_dir=task["diagnostics_dir"],
+                attempts_dir=task["attempts_dir"],
+                **runner_options,
+            )
+        else:
+            process_result = render_manifest_with_pyroomacoustics(
+                task["runtime_manifest_path"], diagnostics_dir=task["diagnostics_dir"],
+                attempts_dir=task["attempts_dir"], **runner_options,
+            )
         if not isinstance(process_result, MatlabProcessResult):
             raise TypeError("MATLAB runner did not return process evidence")
         acceptance = evaluate_render(process_result, task["variant_paths"],
@@ -1181,6 +1190,13 @@ def _run_single_render_task(
     except Exception as exc:
         render_error = exc
     return {"task": task, "error": render_error}
+
+
+def _runtime_render_backend(task: RenderTask) -> str:
+    """Backend of the input that will actually be rendered (snapshot when reserved)."""
+    reserved = task.get("reserved_attempt")
+    source = reserved.snapshot_path if reserved is not None else task["runtime_manifest_path"]
+    return manifest_render_backend(read_json_object(Path(source))).name
 
 
 def _upsert_attempted_render_result(
