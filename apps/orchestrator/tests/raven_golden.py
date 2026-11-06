@@ -11,6 +11,8 @@ configurations:
 - the exact MATLAB command list built by ``render_manifest_with_matlab``.
 
 Machine-specific prefixes are replaced by ``<REPO>`` and ``<TMP>``.
+The static input is pinned under ``inputs/`` so local experiment edits do not
+change this historical compatibility boundary. Expected snapshots are unchanged.
 Regenerate only on purpose: ``python tests/raven_golden.py`` (never as a side
 effect of a test run).
 """
@@ -24,7 +26,9 @@ import struct
 import subprocess
 import sys
 import wave
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+
+import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 GOLDEN_DIR = Path(__file__).resolve().parent / "fixtures" / "raven_golden"
@@ -40,6 +44,7 @@ _MATERIALS = ["bricks", "concrete", "glass", "drywall", "wood", "plaster"]
 
 def _placeholders(value: object, replacements: list[tuple[str, str]]) -> object:
     if isinstance(value, str):
+        value = value.replace("\\", "/")
         for old, new in replacements:
             value = value.replace(old, new)
         return value
@@ -50,13 +55,21 @@ def _placeholders(value: object, replacements: list[tuple[str, str]]) -> object:
     return value
 
 
+def example_input(name: str) -> tuple[Path, Path]:
+    frozen_root = GOLDEN_DIR / "inputs"
+    frozen = frozen_root / "configs" / "experiments" / f"{name}.yml"
+    if frozen.is_file():
+        return frozen, frozen_root
+    return REPOSITORY / "configs" / "experiments" / f"{name}.yml", REPOSITORY
+
+
 def normalized_example_config(name: str, *, explicit_raven_backend: bool = False, tmp_dir: Path | None = None) -> dict:
-    """Normalized static config of the shipped example file (no assets needed)."""
+    """Normalized historical example input (no assets needed)."""
     from acoustic_orchestrator.config.loader import load_config
     from acoustic_orchestrator.pipeline.static_plan import normalized_static_config
 
-    path = REPOSITORY / "configs" / "experiments" / f"{name}.yml"
-    root = REPOSITORY
+    path, root = example_input(name)
+    text = path.read_text(encoding="utf-8")
     if explicit_raven_backend:
         assert tmp_dir is not None
         # Mirror the repository layout so relative paths resolve to the same
@@ -64,12 +77,18 @@ def normalized_example_config(name: str, *, explicit_raven_backend: bool = False
         root = tmp_dir / "repo"
         copy = root / "configs" / "experiments" / f"{name}.yml"
         copy.parent.mkdir(parents=True)
-        text = path.read_text(encoding="utf-8")
         assert text.count("\nrender:\n") == 1
         copy.write_text(text.replace("\nrender:\n", "\nrender:\n  backend: raven\n"), encoding="utf-8")
         path = copy
     config = load_config(path)
-    return _placeholders(normalized_static_config(config), [(root.resolve().as_posix(), "<REPO>")])
+    normalized = normalized_static_config(config)
+    # The original snapshots were captured on POSIX, where a Windows install
+    # path is relative to the YAML directory. Canonicalize that fixture-only
+    # representation on Windows as well; do not change production path resolution.
+    base_rpf = yaml.safe_load(text).get("raven", {}).get("base_rpf_file")
+    if base_rpf and PureWindowsPath(base_rpf).is_absolute():
+        normalized["raven"]["base_rpf_file"] = root.resolve().as_posix() + "/configs/experiments/" + base_rpf
+    return _placeholders(normalized, [(root.resolve().as_posix(), "<REPO>")])
 
 
 def _write_wav(path: Path, *, duration_s: float, sample_rate_hz: int = 8000, frequency_hz: float = 440.0) -> None:
@@ -121,7 +140,8 @@ def build_example_workspace(root: Path, name: str) -> Path:
         (assets / "materials" / material / f"{material}.mat").write_text(
             _material_text(0.05 + 0.03 * number), encoding="utf-8")
 
-    text = (REPOSITORY / "configs" / "experiments" / f"{name}.yml").read_text(encoding="utf-8")
+    input_path, _ = example_input(name)
+    text = input_path.read_text(encoding="utf-8")
     text = text.replace("C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf", "../../base_room.rpf")
     text = text.replace("num_simulations: 100", "num_simulations: 2")
     text = text.replace("hearing_degradation:\n  enabled: true", "hearing_degradation:\n  enabled: false")

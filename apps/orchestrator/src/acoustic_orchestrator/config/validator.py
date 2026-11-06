@@ -21,6 +21,7 @@ from .models import (
 from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeholders, is_safe_output_subdir
 from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
 from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
+from acoustic_orchestrator.experiment.receiver_catalog import paired_receiver_catalogs
 from acoustic_orchestrator.source_audio import list_source_wavs
 from acoustic_orchestrator.config.backend_validation import validate_backend_config
 
@@ -322,6 +323,7 @@ def validate_config(config: AppConfig) -> None:
         else:
             _validate_receiver_output(errors, output_name, output)
 
+    _validate_receiver_subject_pairing(errors, enabled_outputs)
     _validate_output_naming(errors, config, enabled_outputs)
 
     for target_name in config.hearing_degradation.input_targets:
@@ -553,6 +555,21 @@ def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingPro
         raise ValueError("\n".join(issues))
 
     return profiles
+
+
+def _validate_receiver_subject_pairing(
+    errors: list[str], outputs: dict[str, ReceiverOutputConfig | CircularArrayOutputConfig],
+) -> None:
+    head_outputs = {name: output for name, output in outputs.items() if isinstance(output, ReceiverOutputConfig)}
+    if len(head_outputs) < 2 or any(output.num_hrtfs <= 0 for output in head_outputs.values()):
+        return
+    try:
+        paired_receiver_catalogs(
+            {name: (output.ir_catalog_path, output.file_pattern) for name, output in head_outputs.items()},
+            max(output.num_hrtfs for output in head_outputs.values()),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
 
 
 def _validate_receiver_output(errors: list[str], output_name: str, output: ReceiverOutputConfig) -> None:

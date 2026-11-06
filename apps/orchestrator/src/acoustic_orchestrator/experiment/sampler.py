@@ -8,6 +8,7 @@ import wave
 from typing import Any, TypeVar
 
 from acoustic_orchestrator.experiment.receiver_geometry import build_circular_array_descriptor
+from acoustic_orchestrator.experiment.receiver_catalog import list_receiver_irs, paired_receiver_catalogs
 from acoustic_orchestrator.source_audio import list_source_wavs
 
 from acoustic_orchestrator.config.models import (
@@ -600,9 +601,24 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
 
 def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
     hrtfs: list[dict] = []
-    for output_name, output in _enabled_outputs(config).items():
-        matches = sorted(output.ir_catalog_path.glob(output.file_pattern))
+    outputs = _enabled_outputs(config)
+    indexes = {}
+    selected_subjects = []
+    if len(outputs) >= 2:
+        indexes, common = paired_receiver_catalogs(
+            {name: (output.ir_catalog_path, output.file_pattern) for name, output in outputs.items()},
+            max(output.num_hrtfs for output in outputs.values()),
+        )
+        pairing_rng = random.Random()
+        pairing_rng.setstate(rng.getstate())
+        selected_subjects = pairing_rng.sample(common, max(output.num_hrtfs for output in outputs.values()))
+    for output_name, output in outputs.items():
+        matches = list_receiver_irs(output.ir_catalog_path, output.file_pattern)
+        # Preserve legacy scene RNG advancement, including later fallback attempts.
+        # Only the independently chosen files are replaced, not the random draws.
         selected_files = [rng.choice(matches)] if output.num_hrtfs == 1 else rng.sample(matches, output.num_hrtfs)
+        if indexes:
+            selected_files = [indexes[output_name][subject] for subject in selected_subjects[:output.num_hrtfs]]
         for index, selected in enumerate(selected_files, start=1):
             hrtfs.append(
                 {

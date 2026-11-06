@@ -34,6 +34,96 @@ Modelos y validadores son la evidencia de claves, tipos, rangos y relaciones ace
 
 El pool de fuentes usa WAV (extensión sin distinguir mayúsculas) e ignora sidecars. Pool vacío aborta con su ruta. Con `source_sampling.timing.total_duration_s`, lectura/recorte requieren PCM compatible con Python `wave`, incluso sin offsets; headers inválidos/no soportados no se omiten silenciosamente.
 
+## Identidad del receptor y catálogos cefálicos
+
+Con dos o más salidas cefálicas habilitadas (`binaural_hrtf`, `bte_front_hartf`,
+`bte_rear_hartf`), los catálogos deben compartir sujetos. La identidad nominal es
+el nombre sin extensión, quitando un sufijo terminal `_HRTF`, `_HARTF_front` o
+`_HARTF_rear`: `id10_HRTF.daff`, `id10_HARTF_front.daff` e
+`id10_HARTF_rear.daff` representan `id10`. Un nombre sin estos sufijos, como
+`subject01.daff`, representa `subject01`. La comparación es exacta: `id01`,
+`id1` e `ID01` son distintos. El nombre acredita una correspondencia nominal,
+no verifica la identidad biológica ni el contenido DAFF.
+
+La validación rechaza identidades vacías o duplicadas dentro de un catálogo
+participante y una intersección menor que el máximo `num_hrtfs` solicitado.
+El error identifica catálogos afectados y, para capacidad insuficiente, sujetos
+comunes disponibles y cantidad requerida. No se sustituyen respuestas por las
+de otro sujeto. Se mantienen las validaciones individuales de archivos y rutas.
+Una sola salida cefálica conserva las reglas anteriores; las salidas ausentes,
+deshabilitadas y el array circular no restringen la intersección.
+
+El orquestador selecciona sin repetición una secuencia de sujetos de la
+intersección ordenada, reproducible con la misma semilla y catálogos. Cada salida
+usa los primeros `num_hrtfs` sujetos. Con cantidades 1/1/1 las tres respuestas
+pertenecen al mismo sujeto. Con HRTF=2/front=1/rear=1 hay dos sujetos comunes:
+front y rear usan el de `binaural_hrtf__1`, mientras `binaural_hrtf__2` usa el
+segundo. No se añaden sujetos exclusivos de un catálogo para completar variantes.
+
+`hrtf_id` sigue identificando la salida, no la persona: con una respuesta se
+conservan `binaural_hrtf`, `bte_front_hartf` y `bte_rear_hartf`; con varias se
+usan ordinales `__1`, `__2`, etc. `hrtf_path` conserva el archivo de cada
+catálogo. No cambian schema_version, nombres WAV ni rutas públicas de salida.
+El emparejamiento mantiene el avance previo del generador aleatorio de escena,
+sin alterar salas, estímulos, directividades, poses, ganancias o tiempos.
+Esto no garantiza determinismo del motor RAVEN.
+
+El emparejamiento se aplica a generaciones nuevas. Reanudar un run histórico
+conserva sus respuestas persistidas aunque sus IDs de sujeto no coincidan;
+no certifica retroactivamente que ese run esté emparejado. No hay migración
+automática ni cambios de T30, BRIR o normalización de audio.
+
+### Comprobación sin RAVEN y sin editar el ejemplo
+
+Desde la raíz del repositorio, con el entorno instalado y los assets disponibles,
+el siguiente comando PowerShell genera escenas y runtimes en un run nuevo.
+Comprueba sujetos comunes y condiciones compartidas, sin crear WAV ni invocar
+MATLAB/Clarity. Usa los parámetros actuales del ejemplo (30 escenas, semilla 42
+en la configuración inspeccionada); no modifica su YAML ni runs anteriores.
+
+```powershell
+@'
+import json
+from pathlib import Path
+from uuid import uuid4
+from acoustic_orchestrator.config.loader import load_config
+from acoustic_orchestrator.config.validator import validate_config
+from acoustic_orchestrator.experiment.sampler import sample_static_scene
+from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
+from acoustic_orchestrator.experiment.receiver_catalog import receiver_subject_id
+from acoustic_orchestrator.pipeline.matlab_runner import write_single_receiver_render_manifest
+from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
+
+config = load_config(Path('configs/experiments/static_example.yml').resolve())
+config.experiment.experiment_id = config.outputs.run_name = 'pairing_check_' + uuid4().hex
+validate_config(config)
+layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+layout['run_root'].mkdir(parents=True, exist_ok=False)
+layout['scene_manifest_dir'].mkdir(parents=True)
+for i in range(config.execution.num_simulations):
+    scene = sample_static_scene(config, None, i)
+    path = layout['scene_manifest_dir'] / f'scene_static_{i + 1:04d}.json'
+    manifest = build_static_manifest(config, scene, i, path)
+    path.write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+    records = manifest['receiver']['hrtfs']
+    assert len(records) == 3  # Esta comprobación es para cantidades 1/1/1.
+    assert len({receiver_subject_id(Path(r['hrtf_path'])) for r in records}) == 1
+    for record in records:
+        assert Path(record['hrtf_path']).is_file()
+        output = get_receiver_output_config(config, record['hrtf_id'])
+        runtime_path = write_single_receiver_render_manifest(
+            manifest, record, layout['runtime_manifest_dir'], config.outputs, output)
+        runtime = json.loads(runtime_path.read_text(encoding='utf-8'))
+        assert runtime['receiver']['hrtfs'] == [record]
+        assert runtime['room'] == manifest['room']
+        assert runtime['sources'] == manifest['sources']
+        for key in ('position_m', 'orientation_deg'):
+            assert runtime['receiver'][key] == manifest['receiver'][key]
+assert not list(layout['run_root'].rglob('*.wav'))
+print(config.execution.num_simulations, 'escenas verificadas:', layout['run_root'])
+'@ | .\.venv\Scripts\python.exe -
+```
+
 ## Plan estático y reanudación no destructiva
 
 `execution.resume_if_possible=true` con `overwrite_existing=false` permite conservar

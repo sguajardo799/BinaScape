@@ -52,7 +52,29 @@ def test_example_is_tracked_not_ignored() -> None:
 
 def _cli() -> list[str]:
     script = Path(sys.executable).with_name("acoustic-orchestrator")
-    return [script.as_posix()] if script.is_file() else [sys.executable, "-m", "acoustic_orchestrator.cli"]
+    for candidate in (script, script.with_suffix(".exe")):
+        if candidate.is_file():
+            return [candidate.as_posix()]
+    # cli.py exposes main() for the console script but has no module entrypoint.
+    # Explicitly invoke it rather than accepting a successful no-op process.
+    return [sys.executable, "-c", "from acoustic_orchestrator.cli import main; main()"]
+
+
+def test_cli_detects_windows_console_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = tmp_path / "acoustic-orchestrator.exe"
+    executable.touch()
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    assert _cli() == [executable.as_posix()]
+
+
+def test_cli_fallback_executes_real_entrypoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "is_file", lambda path: False)
+        command = _cli()
+    result = subprocess.run([*command, "--help"], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "generate-manifests" in result.stdout
+    assert "render-static" in result.stdout
 
 
 def test_render_static_end_to_end_without_matlab(tmp_path: Path) -> None:

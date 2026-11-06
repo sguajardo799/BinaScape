@@ -69,6 +69,47 @@ def _good_process(path, *args, **kwargs):
     return _process(path, kwargs)
 
 
+def test_resume_preserves_historical_unpaired_receivers(tmp_path, monkeypatch):
+    _, config_path, config, layout = _config(tmp_path)
+    outputs = (
+        config.receiver_outputs.binaural_hrtf,
+        config.receiver_outputs.bte_rear_hartf,
+        config.receiver_outputs.bte_front_hartf,
+    )
+    for output in outputs:
+        for subject in ("subject02", "subject03"):
+            (output.ir_catalog_path / f"{subject}.daff").touch()
+    original_sample = render_pipeline.sample_static_scene
+
+    def sample_historical(config, rng, index, **kwargs):
+        scene = original_sample(config, rng, index, **kwargs)
+        for ordinal, record in enumerate(scene["receiver"]["hrtfs"], 1):
+            record["hrtf_path"] = record["hrtf_path"].parent / f"subject{ordinal:02d}.daff"
+        return scene
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", sample_historical)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", _good_process)
+    manifests, _ = render_pipeline.render_static_scenes(config_path)
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert len({Path(record["hrtf_path"]).stem for record in manifest["receiver"]["hrtfs"]}) == 3
+    variants = render_pipeline._build_planned_variants(config, manifests, layout["runtime_manifest_dir"])
+    protected = list(manifests)
+    for variant in variants:
+        protected.extend(Path(variant["variant_paths"][key]) for key in (
+            "runtime_manifest_path", "rendered_wav_path", "render_metadata_path",
+        ))
+    before = _snapshot(protected)
+
+    def unexpected_work(*args, **kwargs):
+        pytest.fail("Historical responses must not be resampled or rendered again")
+
+    monkeypatch.setattr(render_pipeline, "sample_static_scene", unexpected_work)
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", unexpected_work)
+    resumed_manifests, _ = render_pipeline.render_static_scenes(config_path)
+    assert resumed_manifests == manifests
+    assert _snapshot(protected) == before
+
+
 def _force_available_t30_retry(monkeypatch, *, original_audio=None, replacement_audio=None):
     original_sample = render_pipeline.sample_static_scene
     sampled = []

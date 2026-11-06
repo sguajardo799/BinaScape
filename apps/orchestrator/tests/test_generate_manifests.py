@@ -17,6 +17,7 @@ from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig
 from acoustic_orchestrator.config.validator import validate_config
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
+from acoustic_orchestrator.experiment.receiver_catalog import receiver_subject_id
 from acoustic_orchestrator.experiment.sampler import (
     SceneSamplingFailure,
     _sample_random_position,
@@ -264,7 +265,8 @@ def test_array_only_pipeline_status_and_resume(tmp_path: Path, monkeypatch: pyte
 
 def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = _build_workspace(tmp_path)
-    (workspace / "assets/hrtf/subject02.daff").write_text("dummy", encoding="utf-8")
+    for catalog in ("hrtf", "hartf/front", "hartf/rear"):
+        (workspace / f"assets/{catalog}/subject02.daff").write_text("dummy", encoding="utf-8")
     (workspace / "hearing_profiles.yaml").write_text(
         "profiles:\n  - hearing_profile_id: mild\n    ears:\n      left:\n        loss_db_by_band: {250: 10}\n      right:\n        loss_db_by_band: {250: 10}\n", encoding="utf-8"
     )
@@ -278,11 +280,16 @@ def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monke
     raw["hearing_degradation"].update(enabled=True, input_targets=["binaural_hrtf"])
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     rendered = []
+    rendered_irs = {}
 
     def render_mixed(manifest_path: Path, **kwargs) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         output_type = manifest["render"]["active_output_type"]
         rendered.append(output_type)
+        if output_type != "circular_array":
+            record, = manifest["receiver"]["hrtfs"]
+            assert set(record) == {"hrtf_id", "hrtf_path"}
+            rendered_irs[output_type] = receiver_subject_id(Path(record["hrtf_path"]))
         _write_valid_raven_metadata(manifest, [0.4]*10)
 
     monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", simulate_matlab_process(render_mixed))
@@ -291,6 +298,8 @@ def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monke
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     jobs = [json.loads(line) for line in layout["clarity_jobs_path"].read_text(encoding="utf-8").splitlines()]
     assert set(rendered) == {"binaural_hrtf__1", "binaural_hrtf__2", "bte_rear_hartf", "bte_front_hartf", "circular_array"}
+    assert rendered_irs["binaural_hrtf__1"] == rendered_irs["bte_front_hartf"] == rendered_irs["bte_rear_hartf"]
+    assert rendered_irs["binaural_hrtf__1"] != rendered_irs["binaural_hrtf__2"]
     assert len(jobs) == 2
     assert {job["output_type"] for job in jobs} == {"binaural_hrtf__1", "binaural_hrtf__2"}
     for job in jobs:
@@ -300,7 +309,8 @@ def test_mixed_array_render_creates_only_hrtf_clarity_jobs(tmp_path: Path, monke
 
 def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_path: Path) -> None:
     workspace = _build_workspace(tmp_path)
-    (workspace / "assets" / "hrtf" / "subject02.daff").write_text("dummy", encoding="utf-8")
+    for catalog in ("hrtf", "hartf/front", "hartf/rear"):
+        (workspace / f"assets/{catalog}/subject02.daff").write_text("dummy", encoding="utf-8")
     config = load_config(_write_config(workspace, "multi_hrtf"))
     config.receiver_outputs.binaural_hrtf.num_hrtfs = 2
     validate_config(config)
@@ -313,6 +323,66 @@ def test_multiple_hrtfs_from_one_output_are_distinct_and_keep_output_config(tmp_
 
     config.receiver_outputs.binaural_hrtf.num_hrtfs = 1
     assert sampler._sample_hrtfs(config, random.Random(42))[0]["hrtf_id"] == "binaural_hrtf"
+
+
+@pytest.mark.parametrize("accept_second_candidate", [True, False])
+def test_receiver_pairing_preserves_scene_after_discarded_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accept_second_candidate: bool,
+) -> None:
+    workspace = _build_workspace(tmp_path)
+    config = load_config(_write_config(workspace, "pairing_rng_compatibility", num_simulations=1))
+    config.scene_validation.max_scene_attempts = 2
+    for output in sampler._enabled_outputs(config).values():
+        for subject in ("subject02", "subject03"):
+            (output.ir_catalog_path / f"{subject}.daff").touch()
+    config.receiver_outputs.binaural_hrtf.num_hrtfs = 2
+    validate_config(config)
+    distribution = config.room_sampling.reverberation.distribution
+    bins = sampler.build_bins(distribution.range_s.min, distribution.range_s.max, distribution.bin_width_s)
+    _, sequence = sampler.build_global_plan(1, bins, config.experiment.random_seed)
+    target = sequence[0]
+    other = (target + 1) % len(bins)
+    paired = sampler._sample_hrtfs
+
+    def legacy(config, rng):
+        records = []
+        for name, output in sampler._enabled_outputs(config).items():
+            matches = sorted(output.ir_catalog_path.glob(output.file_pattern))
+            files = [rng.choice(matches)] if output.num_hrtfs == 1 else rng.sample(matches, output.num_hrtfs)
+            records.extend({
+                "hrtf_id": name if output.num_hrtfs == 1 else f"{name}__{i}", "hrtf_path": path,
+            } for i, path in enumerate(files, 1))
+        return records
+
+    scenes = []
+    rng_states = []
+    for selection in (legacy, paired):
+        estimates = iter([other, target if accept_second_candidate else other])
+        states = []
+
+        def estimate(room):
+            bin_ = bins[next(estimates)]
+            value = (bin_.lower_s + bin_.upper_s) / 2
+            return {"estimated_rt30_s": value, "rt30_by_band_s": {
+                frequency: value for frequency in sampler.RT30_GUARD_FREQUENCIES_HZ
+            }}
+
+        def record_selection(config, rng):
+            records = selection(config, rng)
+            states.append(rng.getstate())
+            return records
+
+        monkeypatch.setattr(sampler, "estimate_room_rt30_s", estimate)
+        monkeypatch.setattr(sampler, "_sample_hrtfs", record_selection)
+        scene = sampler.sample_static_scene(config, None, 0)
+        assert len(states) == 2  # First complete candidate was discarded or retained as fallback.
+        assert scene["reverberation_sampling"]["attempts"] == 2
+        assert scene["reverberation_sampling"]["fallback_used"] is not accept_second_candidate
+        scene["receiver"].pop("hrtfs")
+        scenes.append(scene)
+        rng_states.append(states)
+    assert scenes[0] == scenes[1]
+    assert rng_states[0] == rng_states[1]
 
 
 def test_rt30_sampling_records_diagnostics(
@@ -2727,8 +2797,8 @@ def _build_workspace(
     for file_path in [
         workspace / "assets" / "hrtf" / "subject01.daff",
         workspace / "assets" / "directivity" / "speech_talker.daff",
-        workspace / "assets" / "hartf" / "rear" / "rear01.daff",
-        workspace / "assets" / "hartf" / "front" / "front01.daff",
+        workspace / "assets" / "hartf" / "rear" / "subject01.daff",
+        workspace / "assets" / "hartf" / "front" / "subject01.daff",
         workspace / "base_room.rpf",
         workspace / "hearing_profiles.yaml",
     ]:
