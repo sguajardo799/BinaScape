@@ -38,7 +38,15 @@
 - [x] 5.1 Ejecutar uv run --project apps/orchestrator pytest apps/orchestrator/tests con timeout suficiente y registrar resultado/plataforma; verificar regresiones de aceptación, recuperación previa, reconciliación manual, circuito/presupuesto, aislamiento, Clarity y nuevas pruebas sin MATLAB ni experimentos reales.
 - [x] 5.2 Ejecutar openspec validate graceful-stop-resume-static-render --strict y revisar diff/cobertura de escenarios; verificar solo cambios autorizados en apps/orchestrator y artefactos del cambio, sin configuraciones/resultados reales, contratos de backend ni tareas completadas de los dos cambios anteriores.
 
+## 6. Corrección de checkpoint tras verificación
+
+- [x] 6.1 Propagar control cooperativo opcional a la planificación de transacciones acústicas desde render y preflight de recuperación observada; comprobar entrada y frontera previa al muestreo de cada participante, sin alterar llamadas sin control ni publicación retomable.
+- [x] 6.2 Añadir regresión de dos participantes con stop durante el primer muestreo, tanto si produce reemplazo como fallo terminal; verificar que no se muestrea el segundo, no hay escrituras ni despacho, se conservan bytes/mtime e intenciones y un relanzamiento normal puede continuar.
+- [x] 6.3 Ejecutar las pruebas enfocadas de transacciones acústicas, recuperación observada y parada cooperativa, validar OpenSpec en modo strict y registrar resultados sin afirmar ejecución POSIX.
+
 ## Workflow follow-up
+
+- Cierre 6.1–6.3 (2026-11-09): `uv run --project apps/orchestrator pytest apps/orchestrator/tests/test_stop_control.py apps/orchestrator/tests/test_graceful_render.py apps/orchestrator/tests/test_graceful_cli.py apps/orchestrator/tests/test_graceful_integration.py apps/orchestrator/tests/test_observed_evaluation.py apps/orchestrator/tests/test_acoustic_transactions.py -q`: **129 passed in 635.39s (0:10:35)**, Windows. Incluye seis regresiones nuevas de checkpoint, propagación a preflight observado y conservación/reanudación de dos intenciones T30. `openspec validate graceful-stop-resume-static-render --strict` y `git diff --check`: aprobados. Sin MATLAB ni resultados operativos; no se repitió la suite completa ni se ejecutó la rama POSIX del arnés. Sin archive/sync.
 
 - Evidencia 1.3: `uv run --project apps/orchestrator pytest apps/orchestrator/tests/test_stop_control.py -q`: 9 passed en Windows, incluido GenerateConsoleCtrlEvent real en consola privada e hijo aislado. Rama POSIX implementada en el arnés pero pendiente de ejecución en POSIX; no se afirma cobertura ejecutada allí.
 - Pausa original al iniciar 2.4: varias continuaciones T30 simultáneas comparten static_plan.json y la publicación existente es deliberadamente fail-closed entre escrituras. El usuario autorizó refinar el protocolo: design.md, decisión 3.1, define transacción acústica conjunta y vista read-only para preflight de estados parciales; las tareas pendientes 2.4–2.8 la desglosan. La autorización resuelve la decisión de diseño, no acredita implementación ni pruebas nuevas; se mantienen intactas las siete tareas completas.

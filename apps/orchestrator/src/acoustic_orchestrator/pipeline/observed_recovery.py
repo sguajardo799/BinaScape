@@ -91,7 +91,7 @@ class ObservedRecovery:
         _require_lock(layout, lock)
         self.validate_state(load_variant_index(layout["render_index_path"]))
         acoustic = inspect_transaction(config, layout,
-                                        deferred_observed_attempts={e["attempt_id"] for e in self.plan["entries"]})
+                                        deferred_observed_attempts={e["attempt_id"] for e in self.plan["entries"]}, stop=stop)
         view = acoustic.view(config, layout) if acoustic is not None else None
         plan = inspect_static_plan(config, layout, view=view)
         return _preflight_render_artifacts(config, [item.manifest for item in plan.manifests],

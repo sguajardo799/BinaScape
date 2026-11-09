@@ -32,6 +32,10 @@ Una solicitud de parada SHALL impedir lanzar reintentos de proceso y nuevas real
 - **WHEN** una canónica drenada recibe rechazo T30 con remuestreo aún permitido
 - **THEN** se conserva su rechazo y la continuación acústica para el próximo comando, sin aceptarla ni remuestrear durante el drenaje
 
+#### Scenario: Parada durante planificación de continuaciones T30
+- **WHEN** se solicita parar mientras el relanzamiento calcula en memoria la continuación T30 de un participante
+- **THEN** el cálculo ya iniciado puede terminar, pero se comprueba la solicitud antes de muestrear cada participante siguiente y antes de publicar; no se inicia otro muestreo ni se modifican archivos protegidos, y el próximo relanzamiento conserva las intenciones pendientes
+
 #### Scenario: Presupuesto o circuito agotado
 - **WHEN** el resultado drenado agota la cadena o abre el circuito
 - **THEN** el relanzamiento mantiene ese bloqueo y la parada no renueva límites ni reinicia rachas

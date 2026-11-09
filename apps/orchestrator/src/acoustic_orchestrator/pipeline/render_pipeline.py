@@ -1574,7 +1574,7 @@ def _prepare_static_manifests(
             if repaired_attempts is not None:
                 repaired_attempts.extend(confirmed)
         from acoustic_orchestrator.pipeline.acoustic_transactions import inspect_transaction
-        transaction = inspect_transaction(config, layout)
+        transaction = inspect_transaction(config, layout, stop=stop)
         if transaction is not None:
             # This performs a complete projected batch preflight before writing.
             # The ordinary inspection below then reloads the published targets;
