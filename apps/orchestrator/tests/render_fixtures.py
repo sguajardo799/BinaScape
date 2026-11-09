@@ -18,6 +18,26 @@ from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 FREQUENCIES = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
 
+def write_test_rpf(path: Path) -> Path:
+    """A structurally real text RPF for Python-only resource isolation tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    model = path.with_suffix(".ac")
+    model.write_bytes(b"AC3Db\n")
+    path.write_text(f"[Global]\nProjectPath_MaterialDB=unused\n[Rooms]\nModel={model.as_posix()}\n", encoding="utf-8")
+    return path
+
+
+def isolate_test_runtime(path: Path) -> Path:
+    from acoustic_orchestrator.pipeline.raven_resources import isolated_runtime
+
+    manifest = json.loads(path.read_text())
+    manifest["base_rpf_file"] = str(write_test_rpf(path.parent / "test_base.rpf"))
+    manifest.setdefault("project_name", "test")
+    private = isolated_runtime(manifest, path.parent / "raven_resources", materialize=True)
+    path.write_text(json.dumps(private, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def runtime_for_paths(paths):
     manifest = {
         "schema_version": "3.0", "scene_type": "static", "scene_id": paths["scene_id"],

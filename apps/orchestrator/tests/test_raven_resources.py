@@ -132,6 +132,67 @@ def test_ambiguous_or_unreadable_original_fails_without_writes(tmp_path: Path, c
     assert not (tmp_path / "resources").exists()
 
 
+@pytest.mark.parametrize("schema", ["1.0", "3.0"])
+@pytest.mark.parametrize("output", ["binaural_hrtf", "binaural_hrtf__2", "bte_front_hartf", "circular_array"])
+def test_runtime_writer_preserves_public_output_contract(tmp_path: Path, schema: str, output: str) -> None:
+    import json
+
+    from acoustic_orchestrator.config.models import (
+        CircularArrayOutputConfig,
+        OutputsConfig,
+        ReceiverOutputConfig,
+    )
+    from acoustic_orchestrator.pipeline.matlab_runner import (
+        write_single_receiver_render_manifest,
+    )
+    from acoustic_orchestrator.pipeline.raven_resources import verify_private_runtime
+
+    prep = preparation_fixture(tmp_path)
+    scene = logical_runtime() | {"schema_version": schema, "base_rpf_file": str(prep.original_rpf)}
+    outputs = OutputsConfig(artifact_root=tmp_path / "outputs", run_name="test", naming={
+        "scene_id_prefix": "scene_static", "wav_pattern": "{scene_id}__{output_type}.wav",
+        "metadata_pattern": "{scene_id}__{output_type}.json"})
+    if output == "circular_array":
+        receiver = {"output_type": output, "num_microphones": 4}
+        config = CircularArrayOutputConfig(enabled=True, num_microphones=4, radius_m=0.05)
+    else:
+        receiver = {"hrtf_id": output, "hrtf_path": str(tmp_path / "subject01.daff")}
+        config = ReceiverOutputConfig(enabled=True, ir_catalog_path=tmp_path, file_pattern="*.daff",
+                                      output_subdir=output, num_channels=2)
+    path = write_single_receiver_render_manifest(scene, receiver, tmp_path / "runtime", outputs, config)
+    runtime = json.loads(path.read_text())
+    verify_private_runtime(runtime)
+    assert path.name == f"scene_static_0001__{output}.json"
+    assert Path(runtime["render"]["output_wav_path"]).name == f"scene_static_0001__{output}.wav"
+    assert runtime["room"] == scene["room"]
+    assert runtime["sources"] == scene["sources"]
+    if output != "circular_array":
+        assert runtime["receiver"]["hrtfs"] == [receiver]
+
+
+def test_pra_builder_never_reads_or_materializes_raven_dependencies(tmp_path: Path) -> None:
+    from acoustic_orchestrator.config.models import (
+        CircularArrayOutputConfig,
+        OutputsConfig,
+    )
+    from acoustic_orchestrator.pipeline.matlab_runner import (
+        write_single_receiver_render_manifest,
+    )
+
+    scene = logical_runtime() | {"base_rpf_file": None}
+    scene["render"]["backend"] = "pyroomacoustics"
+    outputs = OutputsConfig(artifact_root=tmp_path / "outputs", run_name="test", naming={
+        "scene_id_prefix": "scene", "wav_pattern": "{scene_id}__{output_type}.wav",
+        "metadata_pattern": "{scene_id}__{output_type}.json"})
+    config = CircularArrayOutputConfig(enabled=True, num_microphones=4, radius_m=0.05)
+    path = write_single_receiver_render_manifest(
+        scene, {"output_type": "circular_array", "num_microphones": 4}, tmp_path / "runtime", outputs, config,
+    )
+    assert path.is_file()
+    assert not list(tmp_path.rglob("base.rpf"))
+    assert not list(tmp_path.rglob("provenance.json"))
+
+
 def test_verified_reconciliation_archives_only_its_own_writer_lock(tmp_path):
     import json
 

@@ -449,7 +449,8 @@ def _write_config(
         ),
         encoding="utf-8",
     )
-    (tmp_path / "base_room.rpf").write_text("rpf", encoding="utf-8")
+    from render_fixtures import write_test_rpf
+    write_test_rpf(tmp_path / "base_room.rpf")
     (assets_root / "hrtf").mkdir(parents=True, exist_ok=True)
     (assets_root / "hrtf" / "sample.daff").write_text("daff", encoding="utf-8")
     (assets_root / "audio").mkdir(parents=True, exist_ok=True)
