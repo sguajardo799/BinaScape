@@ -546,7 +546,8 @@ def test_snapshot_without_outcome_is_not_silently_treated_as_legacy(tmp_path):
     assert not should_resume_variant({}, paths, metadata_required=True, history=history)
 
 
-def test_failed_index_commit_cannot_become_legacy_after_restart(tmp_path, monkeypatch):
+@pytest.mark.parametrize("repairable", [False, True])
+def test_failed_index_commit_cannot_become_legacy_after_restart(tmp_path, monkeypatch, repairable):
     workspace = _build_workspace(tmp_path)
     config_path = _write_config(workspace, "restart_commit", num_simulations=1, resume_if_possible=True)
     layout = resolve_artifact_layout(load_config(config_path).outputs, "sim_test")
@@ -569,6 +570,10 @@ def test_failed_index_commit_cannot_become_legacy_after_restart(tmp_path, monkey
     evidence = {path: path.read_bytes() for path in layout["render_attempts_dir"].glob("*/*") if path.is_file()}
     outcomes = [read_json_object(path) for path in evidence if path.name == "outcome.json"]
     assert any(outcome["commit_status"] == "failed" for outcome in outcomes)
+    if not repairable:
+        for outcome in outcomes:
+            Path(outcome["completion_path"]).unlink(missing_ok=True)
+        evidence = {path: path.read_bytes() for path in layout["render_attempts_dir"].glob("*/*") if path.is_file()}
     layout["render_index_path"].unlink()
     monkeypatch.setattr(render_pipeline, "upsert_variant", upsert)
     calls = []
@@ -581,6 +586,14 @@ def test_failed_index_commit_cannot_become_legacy_after_restart(tmp_path, monkey
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["execution"].update(resume_if_possible=True, overwrite_existing=False)
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    if repairable:
+        _, summary = render_static_scenes(config_path)
+        assert summary["resumed_variants"] == 1
+        assert len(calls) == summary["matlab_invocations"] == 2  # Only the other receiver variants.
+        repaired = read_json_object(Path(outcomes[0]["attempt_outcome_path"]))
+        assert repaired["schema_version"] == 2 and repaired["exit_code"] == 1
+        assert repaired["recovery_reason"] == "post_completion"
+        return
     with pytest.raises((ValueError, RuntimeError, FileExistsError)):
         render_static_scenes(config_path)
     assert calls == []

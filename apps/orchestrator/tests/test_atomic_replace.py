@@ -68,6 +68,56 @@ def test_other_errors_propagate_immediately(monkeypatch, tmp_path, error):
     assert sleeps == []
 
 
+@pytest.mark.parametrize("publisher", ["outcome", "chain", "circuit", "journal", "summary"])
+@pytest.mark.parametrize("failures", [2, 5])
+def test_publishers_retry_closed_temporary_without_rewriting(monkeypatch, tmp_path, publisher, failures):
+    from acoustic_orchestrator.pipeline import persistence_journal, process_retries, render_pipeline
+    from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
+
+    target = tmp_path / f"{publisher}.json"
+    record = {"test": "prepared once"}
+    if publisher == "outcome":
+        handle = RenderAttempt.__new__(RenderAttempt)
+        handle.outcome_path, handle.record = target, record
+        publish = handle.save
+    elif publisher in {"chain", "circuit"}:
+        publish = lambda: process_retries._save(target, record)
+    elif publisher == "journal":
+        publish = lambda: persistence_journal.atomic_write(target, persistence_journal.json_bytes(record))
+    else:
+        publish = lambda: render_pipeline._publish_run_summary(target, record)
+    original_replace = Path.replace
+    original_open = Path.open
+    calls, writes, sleeps = [], [], []
+
+    def open_file(path, mode="r", *args, **kwargs):
+        if "w" in mode:
+            writes.append(path)
+        return original_open(path, mode, *args, **kwargs)
+
+    def replace(path, destination):
+        # Windows itself rejects replacement of a still-open temporary.
+        calls.append((path.read_bytes(), path.stat().st_mtime_ns))
+        if len(calls) <= failures:
+            raise storage_error(32)
+        return original_replace(path, destination)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+    if failures == 5:
+        with pytest.raises(PermissionError):
+            publish()
+        assert not target.exists()
+    else:
+        publish()
+        assert target.exists()
+    assert len(writes) == 1
+    assert all(call == calls[0] for call in calls)
+    assert len(calls) == min(failures + 1, 5)
+    assert sleeps == [0.05, 0.10, 0.20, 0.40][:min(failures, 4)]
+
+
 def test_index_keeps_its_own_retry_policy(monkeypatch, tmp_path):
     from acoustic_orchestrator.pipeline import output_index
 

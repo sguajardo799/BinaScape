@@ -12,13 +12,18 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 from acoustic_orchestrator.config.models import MatlabProcessRetryConfig
+from acoustic_orchestrator.pipeline.atomic_replace import atomic_replace
 from acoustic_orchestrator.pipeline.render_acceptance import RenderAcceptance
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt, inspect_completion, read_json_object, sha256_file
 from acoustic_orchestrator.pipeline.render_failure import inspect_failure
+from acoustic_orchestrator.pipeline.persistence_journal import verify_repaired_outcome
+
+if TYPE_CHECKING:
+    from acoustic_orchestrator.pipeline.persistence_recovery import PersistenceRepair
 
 
 class RetryBlockedError(RuntimeError):
@@ -35,7 +40,7 @@ def _save(path: Path, record: dict[str, Any]) -> None:
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def classify_attempt(acceptance: RenderAcceptance, *, failure: Mapping[str, Any] | None = None) -> str:
@@ -314,8 +319,9 @@ def _resolved_outcome(chain: RetryChain) -> dict[str, Any]:
     if latest.get("state") != "resolved":
         raise RetryBlockedError("previous attempt is not resolved")
     outcome = read_json_object(Path(latest["outcome_path"]))
+    verify_repaired_outcome(outcome, Path(latest["outcome_path"]))
     if (outcome.get("attempt_id") != latest["attempt_id"]
-            or type(outcome.get("schema_version")) is not int or outcome["schema_version"] != 1
+            or type(outcome.get("schema_version")) is not int or outcome["schema_version"] not in (1, 2, 3)
             or outcome.get("chain_id") != chain.record["chain_id"]
             or outcome.get("attempt_ordinal") != latest["ordinal"]
             or outcome.get("retry_policy") != chain.record["policy"]
@@ -396,7 +402,8 @@ def inspect_chain(manifest_path: Path, chains_dir: Path, *, input_sha256: str | 
 
 
 def preflight_chain(manifest_path: Path, chains_dir: Path, *, input_sha256: str,
-                    reusable: bool, overwrite_existing: bool, force_reset: bool) -> RetryChain | None:
+                    reusable: bool, overwrite_existing: bool, force_reset: bool,
+                    repair: "PersistenceRepair | None" = None, acoustic=None) -> RetryChain | None:
     """Read-only batch gate, BEFORE applying any manifest/runtime/index writes.
 
     The supplied hash comes from the expected runtime built in memory; no runtime
@@ -416,14 +423,18 @@ def preflight_chain(manifest_path: Path, chains_dir: Path, *, input_sha256: str,
         raise RetryBlockedError("ambiguous retry chain ancestry")
     for candidate in matches:
         record = candidate.record
+        finalizing = (repair is not None and repair.action in {"finalize_chain", "evaluate_observed_attempt"}
+                      and repair.chain_path == candidate.path and candidate is active[0]
+                      and record in (repair.before_chain, repair.chain)
+                      and record["input_sha256"] == input_sha256)
         if any(identifier not in by_id or by_id[identifier].record.get("superseded_by") != record["chain_id"]
                for identifier in record.get("supersedes", [])):
             raise RetryBlockedError("retry chain predecessor links disagree")
-        if record["state"] == "running":
+        if record["state"] == "running" and not finalizing:
             raise RetryBlockedError("retry chain has unobserved process termination")
         if record["attempts"]:
             latest = record["attempts"][-1]
-            if latest.get("state") != "resolved":
+            if latest.get("state") != "resolved" and not (finalizing and latest.get("state") == "running"):
                 raise RetryBlockedError("retry chain has a reserved/unobserved attempt")
             # Even force cannot reinterpret an unobserved invocation as stopped.
             outcome = read_json_object(Path(latest["outcome_path"]))
@@ -448,6 +459,18 @@ def preflight_chain(manifest_path: Path, chains_dir: Path, *, input_sha256: str,
     chain = active[0]
     same_input = chain.record["input_sha256"] == input_sha256
     state = chain.record["state"]
+    if acoustic is not None:
+        if not same_input or not acoustic.authorizes_chain(chain.path, chain.record):
+            raise RetryBlockedError("Acoustic transaction does not authorize this chain")
+        chain.verify_resolved()
+        return None
+    if repair is not None:
+        # The caller has independently verified the repair, but ancestry and
+        # unobserved-termination vetoes above still apply to the entire lineage.
+        if (not same_input or repair.chain_path != chain.path
+                or chain.record not in (repair.before_chain, repair.chain)):
+            raise RetryBlockedError("Repair does not match active same-input chain")
+        return None  # This grants state publication only, never another process.
     if state in {"ready", "scheduled"}:
         if not same_input:
             raise RetryBlockedError("cannot replace a pending acoustic realization")

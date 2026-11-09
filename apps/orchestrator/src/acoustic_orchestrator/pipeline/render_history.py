@@ -10,6 +10,7 @@ from typing import Any
 from acoustic_orchestrator.pipeline.render_attempt import inspect_completion, read_json_object, sha256_file
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs
 from acoustic_orchestrator.pipeline.render_failure import inspect_failure
+from acoustic_orchestrator.pipeline.persistence_journal import verify_repaired_outcome
 
 
 @dataclass
@@ -35,7 +36,7 @@ def load_render_history(root: Path) -> RenderHistory:
             variant_id = record.get("variant_id")
             if (not isinstance(variant_id, str) or not variant_id or record.get("attempt_id") != directory.name
                     or re.fullmatch(r"[0-9a-f]{32}", directory.name) is None
-                    or type(record.get("schema_version")) is not int or record["schema_version"] != 1):
+                    or type(record.get("schema_version")) is not int or record["schema_version"] not in (1, 2, 3)):
                 raise ValueError("invalid attempt identity or schema")
             record = {**record, "_outcome_path": directory / "outcome.json"}
             history.records.setdefault(variant_id, []).append(record)
@@ -82,6 +83,14 @@ def resume_evidence(
             if timestamp.tzinfo is None:
                 return False, None
         latest = max(records, key=lambda item: datetime.fromisoformat(item["started_at"]))
+        verify_repaired_outcome(latest, latest["_outcome_path"])
+        verify_closed_chain(latest, latest["_outcome_path"])
+        if latest.get("chain_id") is not None and existing is not None:
+            for key in ("attempt_id", "completion_path", "process_status", "exit_code", "decision", "recovery_reason"):
+                if existing.get(key) != latest.get(key):
+                    return False, None
+            if existing.get("attempt_outcome_path") != latest["_outcome_path"].resolve().as_posix():
+                return False, None
         if existing and existing.get("attempt_id") and existing["attempt_id"] != latest["attempt_id"]:
             return False, None
         if (latest.get("commit_status") != "committed" or latest.get("termination_observed") is not True
@@ -121,6 +130,40 @@ def resume_evidence(
         return allowed, latest if allowed else None
     except (OSError, ValueError, KeyError, TypeError):
         return False, None
+
+
+def verify_closed_chain(outcome: Mapping[str, Any], outcome_path: Path) -> None:
+    """Read-only closure gate shared by reuse and direct Clarity handoff.
+
+    Legacy evidence without a chain keeps its existing acceptance checks.
+    This deliberately does not import process_retries (which reads journals).
+    """
+    identifier = outcome.get("chain_id")
+    if identifier is None:
+        return
+    if not isinstance(identifier, str) or re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
+        raise ValueError("Invalid known chain identity")
+    path = outcome_path.parent.parent.parent / "process_chains" / identifier / "chain.json"
+    chain = read_json_object(path)
+    attempts = chain.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
+        raise ValueError(f"Known chain has no attempts: {path}")
+    latest = attempts[-1]
+    if (chain.get("schema_version") != 1 or chain.get("chain_id") != identifier
+            or chain.get("state") != "not_retryable" or latest.get("state") != "resolved"
+            or latest.get("attempt_id") != outcome.get("attempt_id")
+            or Path(latest["outcome_path"]).resolve() != outcome_path.resolve()
+            or latest.get("ordinal") != outcome.get("attempt_ordinal")
+            or outcome.get("retry_policy") != chain.get("policy")
+            or outcome.get("manifest_path") != chain.get("manifest_path")
+            or outcome.get("manifest_sha256") != chain.get("input_sha256")
+            or outcome.get("input_sha256") != chain.get("input_sha256")
+            or outcome.get("expected_artifacts") != chain.get("artifacts")
+            or outcome.get("retry_classification") != "accepted"
+            or latest.get("classification") != "accepted"
+            or outcome.get("retry_decision") != "not_retryable"
+            or latest.get("retry_decision") != "not_retryable"):
+        raise ValueError(f"Known chain is not coherently closed: {path}")
 
 
 def history_root(paths: Mapping[str, Any], existing: Mapping[str, Any] | None = None) -> Path:
