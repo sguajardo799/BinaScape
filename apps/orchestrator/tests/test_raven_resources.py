@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pytest
 from acoustic_orchestrator.pipeline.raven_resources import (
-    derive_resources, describe_resources,
-    materialize_resources, verify_resources,
+    derive_resources,
+    describe_resources,
+    materialize_resources,
+    verify_resources,
 )
 
 
@@ -191,6 +193,65 @@ def test_pra_builder_never_reads_or_materializes_raven_dependencies(tmp_path: Pa
     assert path.is_file()
     assert not list(tmp_path.rglob("base.rpf"))
     assert not list(tmp_path.rglob("provenance.json"))
+
+
+@pytest.mark.parametrize("observed_termination", [False, True])
+@pytest.mark.parametrize("coordinated", [False, True])
+def test_standalone_runner_refuses_overlapping_writers_and_preserves_unknown_veto(tmp_path, monkeypatch, observed_termination, coordinated):
+    import json
+    import subprocess
+
+    from acoustic_orchestrator.pipeline.matlab_runner import render_manifest_with_matlab
+    from acoustic_orchestrator.pipeline.raven_resources import isolated_runtime
+    from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
+
+    preparation = preparation_fixture(tmp_path)
+    logical = logical_runtime() | {"base_rpf_file": preparation.original_rpf.as_posix()}
+    logical["render"].update(output_wav_path=(tmp_path / "out.wav").as_posix(),
+                             output_metadata_path=(tmp_path / "out.json").as_posix())
+    runtime = isolated_runtime(logical, tmp_path / "raven_resources", materialize=True)
+    path = tmp_path / "scene_static_0001__binaural_hrtf.json"
+    path.write_text(json.dumps(runtime))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        with pytest.raises(FileExistsError):
+            render_manifest_with_matlab(path)
+        blocked = RenderAttempt(path, chain_context={"chain_id": "another-chain"})
+        blocked_result = render_manifest_with_matlab(path, attempt=blocked)
+        assert blocked_result.process_status == "launch_failed"
+        assert not blocked_result.termination_observed
+        assert isinstance(blocked_result.error, FileExistsError)
+        if not observed_termination:
+            raise RuntimeError("termination unavailable")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
+    attempt = RenderAttempt(path, chain_context={"chain_id": "test"}) if coordinated else None
+    result = render_manifest_with_matlab(path, attempt=attempt)
+    assert len(calls) == 1
+    assert result.termination_observed == observed_termination
+    lock = Path(runtime["base_rpf_file"]).parent / "writer.lock"
+    assert lock.exists() != observed_termination
+    if not observed_termination:
+        with pytest.raises(FileExistsError):
+            render_manifest_with_matlab(path)
+
+
+def test_direct_unisolated_runtime_is_rejected_before_snapshot(tmp_path, monkeypatch):
+    import json
+
+    from acoustic_orchestrator.pipeline.matlab_runner import render_manifest_with_matlab
+
+    preparation = preparation_fixture(tmp_path)
+    runtime = logical_runtime() | {"base_rpf_file": preparation.original_rpf.as_posix()}
+    path = tmp_path / "scene_static_0001__binaural_hrtf.json"
+    path.write_text(json.dumps(runtime))
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises(FileNotFoundError):
+        render_manifest_with_matlab(path)
+    assert not (tmp_path / "render_attempts").exists()
 
 
 def test_verified_reconciliation_archives_only_its_own_writer_lock(tmp_path):

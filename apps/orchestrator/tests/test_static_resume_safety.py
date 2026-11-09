@@ -69,6 +69,131 @@ def _good_process(path, *args, **kwargs):
     return _process(path, kwargs)
 
 
+@pytest.mark.parametrize("target", ["original", "private", "seed", "provenance", "generated", "writer"])
+def test_isolated_resource_conflicts_precede_all_run_writes(tmp_path, monkeypatch, target):
+    workspace, config_path, _, layout = _config(tmp_path)
+
+    def render(path, *args, **kwargs):
+        runtime = json.loads(path.read_text())
+        directory = Path(runtime["base_rpf_file"]).parent
+        (directory / "materials" / "wall_001.mat").write_bytes(b"private material")
+        return _good_process(path, *args, **kwargs)
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render)
+    render_pipeline.render_static_scenes(config_path)
+    runtime = json.loads(next(layout["runtime_manifest_dir"].glob("*.json")).read_text())
+    private = Path(runtime["base_rpf_file"])
+    if target == "original":
+        original = workspace / "base_room.rpf"
+        original.write_bytes(original.read_bytes() + b"# changed\n")
+    elif target == "private":
+        private.write_bytes(private.read_bytes() + b"# changed\n")
+    elif target == "seed":
+        (private.parent / "RavenModels" / "seed.ac").unlink()
+    elif target == "provenance":
+        (private.parent / "provenance.json").unlink()
+    elif target == "generated":
+        (private.parent / "materials" / "wall_001.mat").write_bytes(b"foreign material")
+    else:
+        (private.parent / "writer.lock").write_bytes(b"unknown-owner")
+    before = _run_snapshot(layout["run_root"])
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises((ValueError, OSError, RetryBlockedError)):
+        render_pipeline.render_static_scenes(config_path)
+    assert _run_snapshot(layout["run_root"]) == before
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_isolated_resume_preserves_all_reused_inputs_and_resource_mtimes(tmp_path, monkeypatch, partial):
+    _, config_path, _, layout = _config(tmp_path)
+    calls = []
+
+    def render(path, *args, **kwargs):
+        calls.append(json.loads(path.read_text())["render"]["active_output_type"])
+        return _good_process(path, *args, **kwargs)
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render)
+    render_pipeline.render_static_scenes(config_path)
+    pending = "bte_rear_hartf"
+    if partial:
+        for path in (layout["render_outputs_root"] / pending).iterdir():
+            path.unlink()
+    protected = []
+    for key in ("scene_manifest_dir", "runtime_manifest_dir", "raven_resources_dir", "prepared_audio_dir", "render_outputs_root"):
+        protected.extend(path for path in layout[key].rglob("*") if path.is_file())
+    before = _snapshot(protected)
+    old_attempts = {path.name for path in layout["render_attempts_dir"].iterdir()}
+    calls.clear()
+    _, summary = render_pipeline.render_static_scenes(config_path)
+    assert calls == ([pending] if partial else [])
+    assert summary["resumed_variants"] == (2 if partial else 3)
+    assert _snapshot(protected) == before
+    attempts = {path.name for path in layout["render_attempts_dir"].iterdir()}
+    assert len(attempts - old_attempts) == int(partial)
+
+
+def _historical_run(config_path, config, layout, *, pending=None, pending_runtime=False):
+    from acoustic_orchestrator.pipeline.matlab_runner import build_single_receiver_render_manifest
+    from acoustic_orchestrator.pipeline.runtime_audio import prepare_scene_source_assets
+
+    manifests = render_pipeline.generate_static_manifests(config_path)
+    variants = render_pipeline._build_planned_variants(config, manifests, layout["runtime_manifest_dir"])
+    for variant in variants:
+        scene = variant["scene_manifest"]
+        rewrites = prepare_scene_source_assets(scene, layout["prepared_audio_dir"] / scene["scene_id"])
+        path, runtime = build_single_receiver_render_manifest(
+            scene, variant["receiver_variant"], layout["runtime_manifest_dir"], config.outputs,
+            variant["receiver_output"], rewrites, isolate_raven=False,
+        )
+        is_pending = variant["variant_paths"]["output_type"] == pending
+        if is_pending and not pending_runtime:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(runtime, indent=2))
+        if not is_pending:
+            write_render_wav(runtime)
+            write_render_metadata(runtime)
+    return variants
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_historical_and_mixed_runs_keep_historical_provenance(tmp_path, monkeypatch, mixed):
+    from acoustic_orchestrator.pipeline.output_index import load_variant_index
+
+    _, config_path, config, layout = _config(tmp_path)
+    _historical_run(config_path, config, layout, pending="bte_rear_hartf" if mixed else None)
+    protected = _snapshot(path for path in layout["run_root"].rglob("*")
+                          if path.is_file() and path.parent.name != "indexes")
+    calls = []
+
+    def render(path, *args, **kwargs):
+        calls.append(json.loads(path.read_text())["render"]["active_output_type"])
+        return _good_process(path, *args, **kwargs)
+
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", render)
+    _, summary = render_pipeline.render_static_scenes(config_path)
+    assert calls == (["bte_rear_hartf"] if mixed else [])
+    assert _snapshot(protected) == protected
+    assert summary["raven_isolation"]["legacy_unverified"] == (2 if mixed else 3)
+    assert summary["raven_isolation"].get("verified_private", 0) == int(mixed)
+    records = load_variant_index(layout["render_index_path"])
+    assert records["scene_static_0001__binaural_hrtf"]["raven_isolation"] == "legacy_unverified"
+
+
+def test_pending_historical_chain_is_not_silently_migrated(tmp_path, monkeypatch):
+    _, config_path, config, layout = _config(tmp_path)
+    variants = _historical_run(config_path, config, layout, pending="bte_rear_hartf", pending_runtime=True)
+    pending = next(v for v in variants if v["variant_paths"]["output_type"] == "bte_rear_hartf")
+    runtime = Path(pending["variant_paths"]["runtime_manifest_path"])
+    chain = open_chain(runtime, layout["render_attempts_dir"].parent / "process_chains", config.execution.matlab_process_retry)
+    before = _run_snapshot(layout["run_root"])
+    monkeypatch.setattr(render_pipeline, "render_manifest_with_matlab", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises(RetryBlockedError, match="histórica"):
+        render_pipeline.render_static_scenes(config_path)
+    assert _run_snapshot(layout["run_root"]) == before
+    assert chain.record["attempts"] == []
+
+
 def test_resume_preserves_historical_unpaired_receivers(tmp_path, monkeypatch):
     _, config_path, config, layout = _config(tmp_path)
     outputs = (
