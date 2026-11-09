@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import typer
 from acoustic_orchestrator.terminal_progress import TerminalProgress
@@ -13,6 +14,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
 from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
 from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
 from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
+from acoustic_orchestrator.pipeline.stop_control import RenderStopped, StopControl, cooperative_sigint
 
 
 app = typer.Typer(help="CLI del orquestador acústico")
@@ -55,10 +57,22 @@ def render_static(
     no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr"),
 ) -> None:
     try:
-        with TerminalProgress(enabled=not no_progress) as terminal:
-            manifest_paths, summary = render_static_scenes(config, progress=terminal if not no_progress else None)
+        control = StopControl(notify=lambda message: typer.echo(message, err=True))
+        with cooperative_sigint(control) as stop, TerminalProgress(enabled=not no_progress) as terminal:
+            manifest_paths, summary = render_static_scenes(config, progress=terminal if not no_progress else None, stop=stop)
+    except RenderStopped as exc:
+        if exc.summary is not None:
+            _echo_render_summary(exc.manifest_paths, exc.summary, config)
+        typer.echo(str(exc), err=True)
+        for note in getattr(exc, "__notes__", []):
+            typer.echo(note, err=True)
+        raise typer.Exit(code=130) from exc
     except RenderStaticRunError as exc:
         _echo_render_summary(exc.manifest_paths, exc.summary, config)
+        _echo_render_error(exc)
+        raise typer.Exit(code=1) from exc
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        _echo_render_error(exc)
         raise typer.Exit(code=1) from exc
 
     _echo_render_summary(manifest_paths, summary, config)
@@ -126,6 +140,22 @@ def main() -> None:
     app()
 
 
+def _echo_render_error(error: Exception) -> None:
+    """Explain terminal failures even when no progress or summary exists."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if not isinstance(current, RenderStaticRunError):
+            typer.echo(f"ERROR render-static: {type(current).__name__}: {current}", err=True)
+        context = getattr(current, "render_context", {})
+        if context:
+            typer.echo(" ".join(f"{key}={value}" for key, value in context.items()), err=True)
+        for note in getattr(current, "__notes__", ()):
+            typer.echo(note, err=True)
+        current = current.__cause__ or current.__context__
+
+
 def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, config: Path) -> None:
     clarity_bits: list[str] = []
     if summary["clarity"] is not None:
@@ -171,7 +201,8 @@ def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, con
                     f"invocaciones={summary.get('matlab_invocations', summary['render_jobs'])} "
                     f"reintentos={summary.get('process_retries', 0)} "
                     f"variantes_tras_reintento={summary.get('variants_completed_after_retry', 0)} "
-                    f"corte={summary.get('circuit_open', False)}"
+                    f"corte={summary.get('circuit_open', False)} "
+                    f"persistencias_reparadas={summary.get('persistence_repairs', 0)}"
                 ),
                 (
                     "Muestreo "

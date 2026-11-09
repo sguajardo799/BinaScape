@@ -297,11 +297,11 @@ def verify_resource_inventory(outcome: dict[str, Any], runtime: dict[str, Any]) 
         seen.add(path)
 
 
-def persist_resource_inventory(attempt: RenderAttempt) -> None:
-    """Dispatcher-owned evidence after observed termination, never diagnostics."""
+def describe_resource_inventory(attempt: RenderAttempt) -> dict | None:
+    """Read-only inventory of currently verified private render resources."""
     runtime = read_json_object(attempt.snapshot_path)
     if runtime.get("render", {}).get("backend", "raven") != "raven":
-        return
+        return None
     preparation = verify_private_runtime(runtime)
     resources = preparation.resources
     entries = []
@@ -315,7 +315,15 @@ def persist_resource_inventory(attempt: RenderAttempt) -> None:
     record = {"schema_version": RESOURCE_VERSION, "attempt_id": attempt.attempt_id,
               "manifest_sha256": attempt.manifest_sha256,
               "provenance_path": resources.provenance_path.as_posix(),
-              "provenance_sha256": sha256_file(resources.provenance_path), "generated_files": entries}
+               "provenance_sha256": sha256_file(resources.provenance_path), "generated_files": entries}
+    return record
+
+
+def persist_resource_inventory(attempt: RenderAttempt) -> None:
+    """Dispatcher-owned evidence after observed termination, never diagnostics."""
+    record = describe_resource_inventory(attempt)
+    if record is None:
+        return
     path = attempt.directory / "raven_resources.json"
     with path.open("x", encoding="utf-8") as stream:
         json.dump(record, stream, indent=2, allow_nan=False)

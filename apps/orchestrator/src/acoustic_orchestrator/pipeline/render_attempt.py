@@ -12,6 +12,7 @@ from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
 from acoustic_orchestrator.pipeline.output_paths import resolve_render_attempts_dir
+from acoustic_orchestrator.pipeline.atomic_replace import atomic_replace
 
 
 class ExpectedArtifact(TypedDict):
@@ -139,13 +140,35 @@ class RenderAttempt:
             snapshot.write(source_bytes)
         self.save()
 
+    @classmethod
+    def from_record(cls, outcome_path: Path, record: dict[str, Any]) -> "RenderAttempt":
+        """Read-only handle to an independently verified existing attempt.
+
+        Unlike construction, this never reserves an identity or writes a snapshot.
+        Callers must validate identities and hashes before using the handle.
+        """
+        attempt = cls.__new__(cls)
+        attempt.outcome_path = outcome_path
+        attempt.directory = outcome_path.parent
+        attempt.attempt_id = record["attempt_id"]
+        attempt.manifest_path = Path(record["manifest_path"])
+        attempt.snapshot_path = Path(record["manifest_snapshot_path"])
+        attempt.completion_path = Path(record["completion_path"])
+        attempt.failure_path = Path(record["failure_path"])
+        attempt.manifest_sha256 = record["manifest_sha256"]
+        attempt.expected_artifacts = record["expected_artifacts"]
+        attempt.scene_id = record["scene_id"]
+        attempt.variant_id = record["variant_id"]
+        attempt.record = record
+        return attempt
+
     def save(self) -> None:
         """Publish functional state; unlike diagnostics, never suppress errors."""
         temporary = self.outcome_path.with_suffix(".json.tmp")
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:
             json.dump(self.record, stream, ensure_ascii=False, allow_nan=False, indent=2)
             stream.write("\n")
-        temporary.replace(self.outcome_path)
+        atomic_replace(temporary, self.outcome_path)
 
 
 def _required_string(value: Any, field: str) -> str:
@@ -169,7 +192,7 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def inspect_completion(expected: Mapping[str, Any]) -> CompletionValidation:
+def inspect_completion(expected: Mapping[str, Any], *, resolve_file=None) -> CompletionValidation:
     """Verify functional evidence against independently prepared expectations.
 
     `expected` is the orchestrator's attempt record, never the receipt itself.
@@ -177,6 +200,7 @@ def inspect_completion(expected: Mapping[str, Any]) -> CompletionValidation:
     Missing and invalid evidence remain distinct for the acceptance policy.
     """
     issues: list[str] = []
+    resolve_file = resolve_file or (lambda path: path)
     completion_path = Path(expected["completion_path"])
     try:
         completion_path.stat()
@@ -234,7 +258,7 @@ def inspect_completion(expected: Mapping[str, Any]) -> CompletionValidation:
                     issues.append(f"completion_artifact_fields_invalid: {index}")
                     continue
                 try:
-                    output_path = Path(item["path"])
+                    output_path = resolve_file(Path(item["path"]))
                     if output_path.stat().st_size != size:
                         issues.append(f"completion_artifact_size_mismatch: {kind}")
                     if sha256_file(output_path) != digest:

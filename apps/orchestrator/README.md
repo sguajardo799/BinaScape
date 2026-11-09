@@ -514,6 +514,222 @@ Cada invocación prepara evidencia funcional fuera de los diagnósticos:
   original y estado de persistencia. Una decisión solo queda confirmada cuando
   `commit_status=committed` y se ha publicado también el índice correspondiente.
 
+#### Errores terminales visibles
+
+`render-static` informa el tipo y mensaje de la causa en stderr, incluso durante
+preflight y con `--no-progress`. Conserva el resumen disponible y termina con
+código 1. Si conoce escena, variante, intento, cadena o ruta de evidencia, los
+muestra junto con los errores secundarios, por ejemplo:
+
+```text
+ERROR render-static: PermissionError: [WinError 5] Acceso denegado: outcome.json.tmp -> outcome.json
+scene_id=scene attempt_id=attempt evidence=outcome.json
+```
+
+Ese error describe un fallo de persistencia, no necesariamente un fallo MATLAB.
+No identifica por sí solo si lo provocó un antivirus, un lector u otro problema
+de permisos. `completadas` describe el estado de los archivos en el índice: si
+la publicación del outcome falló después de actualizarlo, puede superar el número
+de escenas aceptadas. No implica una aceptación funcional confirmada. Conserve
+la evidencia; no borre outcomes ni active sobrescritura global para ocultar el fallo.
+
+#### Señales y parada cooperativa del render
+
+El control cooperativo de `render-static` distingue **solicitar parada** de matar
+el proceso. `Ctrl+C` solicita dejar de iniciar trabajo y esperar la finalización
+de los renders activos; no es una promesa de salida inmediata ni tiene un plazo
+máximo. Pulsarlo otra vez mantiene la misma solicitud, sin forzar cancelación.
+Los procesos de render usan grupo separado en Windows y sesión separada en POSIX
+para no recibir incidentalmente el `Ctrl+C` del padre.
+
+Cerrar la terminal, matar procesos o apagar el equipo queda fuera de esa garantía.
+Si no se observó/persistió una terminación, la ausencia de PID, WAV o logs no la
+acredita: se mantienen las guardas y la reconciliación explícita existente. No
+borre locks ni cambie `running` a resuelto para eludirlas.
+
+La prueba de señal real usa padre/hijo Python temporales, nunca MATLAB. Se ha
+verificado en Windows; el arnés incluye rama POSIX pendiente de ejecución allí.
+
+Ejemplo en PowerShell (sustituya `mi_experimento.yml` por su configuración):
+
+```powershell
+uv run --project apps/orchestrator acoustic-orchestrator render-static .\mi_experimento.yml --no-progress
+# Pulse Ctrl+C una vez y espere el cierre de los renders activos.
+$LASTEXITCODE  # 130 si la parada se cerró correctamente; 1 si falló su persistencia/integridad.
+# Más tarde, repita el mismo comando para reanudar:
+uv run --project apps/orchestrator acoustic-orchestrator render-static .\mi_experimento.yml --no-progress
+```
+
+Los avisos de «Parada solicitada», cantidad de procesos esperados y «Render
+detenido» van a stderr incluso con `--no-progress`. El resumen parcial permanece
+en stdout y en `static_run_summary.json`, con `stopped=true` cuando la parada se
+confirma; no se fuerza el contador de pendientes a completados. Un proceso con
+código no cero conserva ese resultado y su evidencia aunque la parada termine
+con 130. Si la publicación falla, se muestran contexto, ruta y causa y se devuelve
+1, sin anunciar un cierre íntegro.
+
+Una segunda pulsación no es una orden de kill. Si un render no termina, el drenaje
+puede seguir esperando; esta opción no implementa un timeout de simulación ni
+garantiza recuperación tras forzar su salida. Tampoco garantiza progreso ante
+almacenamiento permanentemente inaccesible. No se inicia Clarity después de una
+solicitud observada en las fases de render. Si el handoff ya comenzó, se aplica la
+política de señales anterior: la parada cooperativa de render no cancela ni
+gestiona una ejecución Clarity ya enviada.
+
+**Reintento de proceso pendiente:** si un proceso termina durante el drenaje y
+permite otro intento, se guarda `scheduled` y su `not_before`, sin lanzar el retry
+durante esa llamada. Relanzar conserva cadena, ordinal consumido, entrada, semilla
+y espera restante. Un presupuesto agotado o circuito abierto continúa bloqueando.
+
+**Rechazo T30 pendiente:** el drenaje guarda una intención por intento en
+`render_attempts/{UUID}/acoustic_continuation/record.json`, sin remuestrear ni mover
+archivos. El relanzamiento normal calcula las continuaciones en memoria y valida
+el lote completo antes de publicar. Varias canónicas rechazadas comparten una
+transacción en `metadata/acoustic_transactions/{UUID}/`: un plan versionado e
+inmutable, preimágenes exactas, destinos de conservación, vínculos por intento y
+estado de publicación separado. El destino de `static_plan.json` contiene todas
+sus revisiones; el agotamiento acústico queda como fallo terminal, no como otro
+presupuesto disponible.
+
+Una caída entre movimientos, manifiestos y plan se retoma desde un prefijo
+verificado de **esa misma transacción**, usando una vista de solo lectura durante
+el preflight. Un conflicto en otra escena, archivo alterado, lock o terminación
+desconocida bloquea sin nuevas escrituras ni despachos. Después de publicar se
+recarga el estado y se repite el preflight normal antes de ejecutar pendientes.
+Las salidas aceptadas reutilizadas, sus manifiestos, audio y recursos privados
+conservan bytes y mtime; los restos del rechazo se conservan, no se aceptan como
+un render nuevo.
+
+Para retomar, repita el comando habitual con `resume_if_possible=true`, sin activar
+sobrescritura global. Si vuelve a fallar el almacenamiento, otra llamada puede
+completar los mismos registros; no se garantiza progreso mientras persista la
+causa. En rollback conserve journals, vínculos y preimágenes y use una versión
+capaz de verificarlos o un run nuevo. No borre registros, no rebaje sus versiones
+ni edite el manifiesto o `static_plan.json` manualmente para aparentar coherencia.
+
+#### Espera acotada al publicar metadatos
+
+Outcome, cadena/circuito, journal y resumen estático reintentan solo el reemplazo
+del temporal ya cerrado ante `winerror` **5, 32 o 33**: cinco intentos totales,
+con esperas de **50, 100, 200 y 400 ms** (máximo **0.75 s** de espera programada
+por reemplazo, sin incluir tiempo del filesystem). Otros errores, incluido un
+`PermissionError` sin esos códigos, se propagan inmediatamente. No se repiten
+serialización, escritura ni fsync; el índice mantiene su política independiente.
+
+Esto no es un reintento de proceso: no consume otra invocación, no repite MATLAB
+ni aumenta `persistencias_reparadas` si se publica dentro de la misma llamada.
+Al agotar el límite se conserva la excepción original, sus rutas y notas y se
+añade `Metadata replacement exhausted 5 attempts (0.75 s scheduled wait)`.
+La CLI muestra esa causa incluso con `--no-progress`; el límite no garantiza
+recuperación ante una denegación persistente ni identifica quién bloqueó el archivo.
+
+#### Registro de reparación de persistencia
+
+Una reparación conserva `render_attempts/{attempt_id}/persistence_repair/`:
+
+- `outcome.before.json` y `chain.before.json`: preimágenes de bytes exactos.
+- `index.before.json`: registro anterior de esa variante, o `record: null` si faltaba.
+- `record.json` (versión 1): identidad, fecha de reparación, error de persistencia
+  original, hashes de preimágenes y estados de destino para outcome, cadena e índice.
+
+Para una aceptación ya confirmada cuyo cierre de cadena quedó pendiente, el journal
+usa **versión 2**, acción **`finalize_chain`**, motivo `accepted_chain_not_finalized`
+y una cuarta preimagen exacta, `circuit.before.json`. Exige una única resolución
+`accepted`, `process_failed=false` del mismo UUID en el circuito cerrado. No vuelve
+a resolver ni escribir el circuito: preserva su prefijo histórico y permite que
+el lote añada después resoluciones legítimas. Si la excepción original no quedó
+registrada, `original_error` es `null`; no se reconstruye desde un `.tmp`.
+
+El tercer caso es un **resultado observado cuya evaluación quedó pendiente**:
+`termination_observed=true`, código de salida coherente y `decision=pending` /
+`commit_status=pending`, aunque la cadena siga `running`. No es una aceptación
+confirmada ni una terminación desconocida. La acción **`evaluate_observed_attempt`**
+usa journal y outcome **versión 3** y reevalúa con las mismas reglas normales:
+
+| Evidencia reevaluada | Continuación |
+|---|---|
+| Render válido, código cero | Aceptar y reutilizar el mismo UUID |
+| Código no cero con constancia íntegra y validación completa | `continue_with_warning`, preservando código/error originales |
+| Fallo de proceso reintentable sin finalización acreditada | Conservar el rechazo; otro UUID solo con presupuesto y archivo de restos autorizados |
+| Rechazo T30 | Registrar continuación acústica, sin eludir límites ni aceptarlo |
+| Fallo determinista o evidencia contradictoria | Conservar el rechazo o bloqueo correspondiente; no lanzar para eludirlo |
+
+Esta evaluación captura cuatro preimágenes y una fecha `evaluated_at` separada
+del fin original del proceso. Si no había inventario privado enlazado, captura y
+audita los recursos actualmente verificables, sin fabricar una excepción histórica.
+Un plan inmutable en `metadata/observed_recoveries/{UUID}/plan.json` vincula los
+intentos y el prefijo del circuito. Las resoluciones ausentes se añaden una sola
+vez en orden **administrativo de recuperación**, no como reconstrucción del orden
+histórico perdido. Las existentes se verifican y no se repiten. Un corte alcanzado
+queda enclavado; solo se permite terminar los cierres ya previstos por ese plan,
+nunca habilitar nuevos despachos por esa excepción.
+
+El registro se publica como `pending` antes de cambiar estados activos y pasa a
+`complete` solo después de verificar las publicaciones previstas. En versión 3
+también debe confirmarse el plan del lote antes de habilitar reutilización. Si se interrumpe,
+la misma reparación puede completarse sin otro UUID ni proceso; no se aceptan
+temporales, estados ajenos o una edición manual de `failed` a `committed`.
+La reutilización y Clarity exigen el registro completo y coherente.
+
+**Compatibilidad:** las reparaciones anteriores conservan outcome versión 2;
+solo la nueva evaluación retomada publica outcome versión 3. Los lectores
+actualizados admiten outcomes y journals versión 1/2/3 válidos sin migrarlos.
+Un lector limitado a versión 2 rechaza la evaluación nueva, incluso si el índice
+muestra archivos completos; versiones y acciones desconocidas bloquean. Las constancias
+y las cadenas mantienen su versión; no se migran intentos no reparados. Para
+volver a una versión anterior, conserve toda la evidencia y use un run nuevo o
+una versión capaz de verificar la reparación; no rebaje manualmente el esquema,
+no borre journals/preimágenes ni cambie una cadena `running` a resuelta a mano.
+No opere el mismo run concurrentemente con lectores de distintas generaciones.
+
+#### Retomar después de un fallo de publicación
+
+Con `execution.resume_if_possible=true` (y sin necesidad de activar
+`overwrite_existing`), repita el mismo comando después de resolver el bloqueo
+de almacenamiento, por ejemplo:
+
+```powershell
+uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
+```
+
+Antes de lanzar pendientes, el preflight comprueba el lote completo y revalida los
+intentos cuyo único fallo fue publicar la aceptación, cerrar su cadena aceptada
+o completar la evaluación de un proceso ya observado.
+Un outcome versión 1 `committed` con cadena/intento `running` solo autoriza
+`finalize_chain` si su clasificación está ausente o es `accepted`/`not_retryable`
+coherente y el circuito ya acredita esa aceptación. No se reserva otro ordinal,
+incluso si el intento consumió el presupuesto completo. Exige terminación observada,
+código de salida coherente, constancia íntegra del mismo UUID, entradas compatibles,
+recursos privados verificables y validación funcional completa (incluido T30
+canónico). No acepta un WAV por existir ni repite un render válido. Un proceso no
+cero conserva su error y advertencia `post_completion` si cumple esa recuperación.
+
+La salida añade `persistencias_reparadas` (`persistence_repairs` en el resumen
+Python/JSON): cuenta reparaciones confirmadas por UUID en **esta llamada**. Solo
+una aceptación realmente reutilizada cuenta también como variante reanudada;
+cerrar un rechazo no la convierte en reutilización. Reevaluar no añade una
+invocación, fallo de proceso nuevo ni recuperación `post_completion` nueva. Un
+retry posterior realmente ejecutado sí conserva su contabilidad normal. Una
+llamada posterior sin reparaciones nuevas muestra cero.
+
+Si persiste la denegación, se explica el nuevo error y no se lanzan pendientes;
+otra llamada puede completar la misma reparación. Configuración incompatible,
+evidencia contradictoria, audio inválido, locks, circuito abierto o terminación no
+observada siguen bloqueando. Con `resume_if_possible=false` no se repara de forma
+automática. No se reinician presupuestos ni se eliminan locks.
+
+`reconcile-static` es distinto: autoriza manualmente otro intento cuando **no se
+observó la terminación**, con sus confirmaciones e inventario. No sirve para
+aceptar un render completo cuyo commit falló, ni es necesario para la reparación
+automática aquí descrita.
+
+La etiqueta `running` no acredita por sí sola terminación desconocida ni un cierre
+reparable: solo la evidencia funcional persistida permite distinguirlos. WAVs,
+temporales, mensajes de éxito o ausencia de PID no autorizan la finalización.
+Tras agotar la espera de reemplazo, conserve la evidencia y resuelva el acceso al
+almacenamiento antes de relanzar normalmente; la siguiente llamada revalida todas
+las guardas y puede bloquear de nuevo. No se garantiza recuperar cualquier run.
+
 MATLAB publica la constancia atómicamente después de cerrar todas las salidas.
 La comprobación de hashes **no sustituye** la validación completa del WAV PCM,
 frecuencia/canales/duración, estructura del sidecar, fuentes y procedencia,

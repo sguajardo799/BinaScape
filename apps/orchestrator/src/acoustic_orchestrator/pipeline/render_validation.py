@@ -590,12 +590,14 @@ def validate_t30(result: RenderValidation, backend: RenderBackend | None = None)
 def validate_render(
     paths: Mapping[str, Any], *, metadata_required: bool, profile: ValidationProfile = "normal",
     canonical: bool = False, manifest_path: Path | None = None,
+    resolve_file=None,
 ) -> RenderValidation:
     """Evaluate disk artifacts against the runtime input, never a process log."""
     required = requires_metadata(metadata_required=metadata_required, canonical=canonical, profile=profile)
+    resolve_file = resolve_file or (lambda path: path)
     result = RenderValidation()
     try:
-        manifest = read_json_object(manifest_path or Path(paths["runtime_manifest_path"]))
+        manifest = read_json_object(resolve_file(manifest_path or Path(paths["runtime_manifest_path"])))
     except FileNotFoundError:
         result.missing.append("runtime_manifest_missing")
         return result
@@ -669,7 +671,7 @@ def validate_render(
         if len(chosen) != 1 or (paths.get("receiver_ir_path") and not _path_equal(chosen[0].get("hrtf_path"), paths["receiver_ir_path"])):
             result.invalid.append("runtime_receiver_ir_mismatch")
         channels = 2
-    wav = validate_wav(Path(paths["rendered_wav_path"]), expected_channels=channels,
+    wav = validate_wav(resolve_file(Path(paths["rendered_wav_path"])), expected_channels=channels,
                        sample_rate_hz=render.get("sample_rate_hz", backend.default_sample_rate),
                        supported_sample_rates=backend.supported_sample_rates)
     result.missing.extend(wav.missing)
@@ -678,7 +680,7 @@ def validate_render(
     result.wav_info = wav.wav_info
     metadata_path = paths.get("render_metadata_path")
     if metadata_path:
-        read_render_metadata(result, Path(metadata_path), manifest, required=required)
+        read_render_metadata(result, resolve_file(Path(metadata_path)), manifest, required=required)
     elif required:
         result.missing.append("render_metadata_missing")
     validate_dimensions(result, render, None)

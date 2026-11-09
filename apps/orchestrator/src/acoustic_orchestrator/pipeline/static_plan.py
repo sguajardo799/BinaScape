@@ -34,6 +34,7 @@ from acoustic_orchestrator.experiment.manifest_writer import write_manifest
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.output_paths import ArtifactLayout, resolve_artifact_layout
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
+from acoustic_orchestrator.pipeline.artifact_view import ArtifactView
 from acoustic_orchestrator.source_audio import list_source_wavs
 
 
@@ -70,6 +71,7 @@ class StaticPlan:
     config: AppConfig
     catalog: dict
     scene_manifest_dir: Path
+    projected: bool = False
 
 
 @dataclass(frozen=True)
@@ -347,6 +349,7 @@ class _SceneInputs:
     recorded_present: bool
     regeneration_reason: str | None
     noise: dict
+    view: ArtifactView | None = None
 
 
 @dataclass
@@ -368,11 +371,12 @@ def _evaluate_scene(
 ) -> _SceneResult:
     """Inspect, replay or sample one scene without touching shared state."""
     path, index = item.path, item.index
+    view = item.view or ArtifactView()
     result = _SceneResult("conflictos")
     try:
         result.snapshot = _snapshot(path)
         result.observed = True
-        exists = path.exists()
+        exists = view.exists(path)
         if item.failed_record is not None:
             if exists:
                 raise ValueError("Failed scene has an unresolved manifest publication")
@@ -388,7 +392,7 @@ def _evaluate_scene(
                 # still never silently migrated during a protected resume.
                 exists = False
             else:
-                manifest = _loads(path.read_text(encoding="utf-8"))
+                manifest = _loads(view.read_text(path))
                 validate_static_manifest(manifest, config, index)
                 if item.recorded is not None:
                     if item.recorded.get("functional_hash") != _hash(functional_manifest(manifest)):
@@ -486,6 +490,7 @@ def inspect_static_plan(
     config: AppConfig, layout: ArtifactLayout | None = None, *,
     sample_scene: Callable[..., dict] | None = None,
     progress: ProgressReporter | None = None,
+    view: ArtifactView | None = None,
 ) -> StaticPlan:
     """Inspect the entire batch without writing; aggregate protected conflicts.
 
@@ -499,6 +504,7 @@ def inspect_static_plan(
     ``sample_scene`` is used for generation and exact persisted-attempt replay.
     """
     progress = progress or ProgressReporter()
+    read_view = view or ArtifactView()
     progress.begin("Inspeccionando catalogos")
     layout = layout or resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     sample_scene = sample_scene or sampler.sample_static_scene
@@ -520,9 +526,9 @@ def inspect_static_plan(
     fresh_requested = config.execution.overwrite_existing and not config.execution.resume_if_possible
     regeneration_reason: str | None = "explicit_fresh_run" if fresh_requested else None
     history: list[dict] = []
-    if plan_path.exists():
+    if read_view.exists(plan_path):
         try:
-            previous = _loads(plan_path.read_text(encoding="utf-8"))
+            previous = _loads(read_view.read_text(plan_path))
             if type(previous.get("schema_version")) is not int or previous["schema_version"] != PLAN_VERSION:
                 raise ValueError("Unsupported static plan version")
             if any(not isinstance(previous.get(key), dict) for key in ("contract", "scenes", "selected_dependencies")):
@@ -541,9 +547,9 @@ def inspect_static_plan(
         except (ValueError, OSError) as exc:
             conflicts.append(f"{plan_path}: {exc}")
             conflict_causes.append(exc.__cause__ or exc)
-    if failures_path.exists():
+    if read_view.exists(failures_path):
         try:
-            history = [_loads(line) for line in failures_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            history = [_loads(line) for line in read_view.read_text(failures_path).splitlines() if line.strip()]
             if any(not _integer(row.get("scene_index")) for row in history):
                 raise ValueError("Invalid sampling failure scene index")
         except (ValueError, OSError) as exc:
@@ -579,6 +585,7 @@ def inspect_static_plan(
             recorded_present=scene_id in previous_scenes,
             regeneration_reason=regeneration_reason,
             noise=noise_plan[index],
+            view=view,
         ))
 
     def merge(item: _SceneInputs, result: _SceneResult) -> None:
@@ -666,9 +673,9 @@ def inspect_static_plan(
             if failure not in history:
                 history.append(failure)
     return StaticPlan(manifests, failures, history, preconditions, metadata, plan_path, failures_path,
-                      previous != metadata, not failures_path.exists() or
-                      failures_path.read_text(encoding="utf-8") != _failure_text(history), config, catalog,
-                      layout["scene_manifest_dir"])
+                       previous != metadata, not read_view.exists(failures_path) or
+                       read_view.read_text(failures_path) != _failure_text(history), config, catalog,
+                       layout["scene_manifest_dir"], view is not None)
 
 
 def revalidate_static_plan(plan: StaticPlan) -> None:
@@ -745,6 +752,8 @@ def apply_static_plan(plan: StaticPlan, *, lock: StaticWriterLock, progress: Pro
     Publication is individually atomic for metadata, not a multi-file transaction;
     interruption leaves deterministic scene holes for the next inspection.
     """
+    if plan.projected:
+        raise StaticPlanConflict(["A projected plan is inspection-only; reload after transaction publication"])
     progress = progress or ProgressReporter()
     progress.begin("Verificando plan antes de publicar")
     expected_lock = plan.plan_path.parent / "static_writer.lock"
@@ -790,10 +799,20 @@ def record_static_manifest_revision(
         raise StaticPlanConflict([f"{manifest_path}: Unexpected scene path"])
     if _loads(manifest_path.read_text(encoding="utf-8")) != manifest:
         raise StaticPlanConflict([f"{manifest_path}: Revision must match published scene"])
+    metadata = project_static_manifest_revision(config, metadata, manifest, reason=reason)
+    _atomic_text(plan_path, json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False))
+
+
+def project_static_manifest_revision(config: AppConfig, metadata: dict, manifest: dict, *,
+                                     reason: str = "raven_t30_resampling") -> dict:
+    """Compute a revision without publishing either the scene or shared plan."""
+    metadata = deepcopy(metadata)
+    index = manifest["reverberation_sampling"]["scene_index"]
+    validate_static_manifest(manifest, config, index)
     old = metadata["scenes"].get(manifest["scene_id"])
     record = _scene_record(manifest, index)
     if old == record:
-        return
+        return metadata
     if old is not None:
         metadata.setdefault("scene_revision_history", []).append(
             {"scene_id": manifest["scene_id"], "reason": reason, "previous": old, "replacement": record})
@@ -805,7 +824,7 @@ def record_static_manifest_revision(
         if old_fingerprint and any(old_fingerprint.get(key) != fingerprint[key] for key in ("sha256", "size_bytes")):
             raise StaticPlanConflict([f"{dependency}: Selected dependency changed during resampling"])
         metadata["selected_dependencies"].setdefault(dependency.as_posix(), fingerprint)
-    _atomic_text(plan_path, json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False))
+    return metadata
 
 
 def record_static_scene_failure(

@@ -42,6 +42,16 @@ def test_programmatic_default_does_not_install_signal_handler():
     assert signal.getsignal(signal.SIGINT) is before
 
 
+def test_already_stopped_api_does_not_read_config_or_write(tmp_path):
+    from acoustic_orchestrator.pipeline.render_pipeline import render_static_scenes
+
+    control = StopControl()
+    control.request()
+    with pytest.raises(RenderStopped):
+        render_static_scenes(tmp_path / "missing.yml", stop=control)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_process_options_are_platform_specific():
     from acoustic_orchestrator.pipeline.stop_control import render_process_options
 

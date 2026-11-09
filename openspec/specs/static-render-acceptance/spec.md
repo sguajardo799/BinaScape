@@ -147,7 +147,7 @@ El orquestador SHALL aceptar el render de un intento con código no cero observa
 - **THEN** no se declara finalización ni recuperación funcional de ese intento, se mantienen `exit_code=null` y `termination_observed=false` y su render permanece rechazado
 
 ### Requirement: Validación uniforme en ejecución y reutilización
-Ejecución nueva, reanudación y entrega a Clarity SHALL aplicar la misma validación de artefactos pertinente al manifiesto vigente. Un rechazo o fallo no recuperado conocido SHALL NOT convertirse en completado por reiniciar. Reanudar SHALL NOT inventar una invocación ni un éxito de proceso y SHALL preservar la advertencia de un intento recuperado.
+Ejecución nueva, reanudación y entrega a Clarity SHALL aplicar la misma validación de artefactos pertinente al manifiesto vigente. Un rechazo o fallo no recuperado conocido SHALL NOT convertirse en completado por reiniciar, salvo la confirmación posterior auditable de aceptación no persistida definida en esta capacidad. Reanudar SHALL NOT inventar una invocación ni un éxito de proceso y SHALL preservar la advertencia de un intento recuperado.
 
 #### Scenario: Reinicio después de recuperación
 - **WHEN** se reanuda una variante recuperada previamente y sus artefactos siguen válidos
@@ -164,6 +164,10 @@ Ejecución nueva, reanudación y entrega a Clarity SHALL aplicar la misma valida
 #### Scenario: Archivo alterado antes del handoff
 - **WHEN** un WAV o sidecar cambia después de haber sido indexado como válido
 - **THEN** la revalidación bloquea su entrega a Clarity si ya no satisface el contrato, manteniendo la elegibilidad exclusiva de HRTF
+
+#### Scenario: Reinicio después de fallo exclusivamente de publicación
+- **WHEN** el historial conserva un fallo de persistencia que satisface la confirmación posterior auditable
+- **THEN** solo esa reparación confirmada levanta el veto del historial; reiniciar o borrar el índice no lo levanta por sí mismo
 
 ### Requirement: Persistencia visible y aislamiento de intentos
 El orquestador SHALL persistir la decisión, motivos, identidad del intento y vínculo a constancia y resultado del proceso antes de continuar tras recuperación. SHALL mostrar la recuperación en el resumen y CLI sin presentarla como éxito limpio. Cada intento SHALL conservar su evidencia sin mezclarse con otros ni perderse al descartar salidas por T30.
@@ -205,3 +209,126 @@ El orquestador SHALL persistir la decisión funcional de cada intento antes de p
 #### Scenario: Entrega a Clarity después de una intervención
 - **WHEN** existen archivos de un intento reconciliado pero ningún intento posterior aceptado que acredite las salidas actuales
 - **THEN** la reconciliación no habilita su entrega a Clarity ni convierte esos archivos en evidencia de un render aceptado
+
+### Requirement: Versionado seguro de outcomes reparados
+El orquestador SHALL publicar outcomes reparados con `schema_version=2` y exigir su registro de reparación válido antes de aceptarlos. SHALL seguir leyendo outcomes versión 1 y mantener versión 1 en intentos no reparados y constancias. Los lectores que solo admiten versión 1 SHALL rechazar outcomes reparados, sin degradarlos a resultados históricos reutilizables.
+
+#### Scenario: Rollback durante reparación
+- **WHEN** un lector anterior inspecciona un outcome reparado versión 2, parcial o confirmado
+- **THEN** lo rechaza por esquema no soportado y no acepta el render mediante su registro del índice
+
+#### Scenario: Lectura de lote mixto
+- **WHEN** un lote combina outcomes sin reparar versión 1 con outcomes reparados versión 2
+- **THEN** el lector actualizado valida ambas versiones con las guardas pertinentes y no exige una migración de los intentos versión 1
+
+### Requirement: Confirmación posterior de aceptación no persistida
+El orquestador SHALL permitir reparar una aceptación no persistida solo con terminación observada, código entero, constancia válida del mismo intento, entradas compatibles y validación funcional completa satisfactoria. SHALL exigir que el único impedimento sea la publicación del estado. Esta reparación SHALL NOT crear una invocación ni inferir éxito por existencia de archivos.
+
+#### Scenario: Error de reemplazo de outcome después de render válido
+- **WHEN** un intento con código cero observado y constancia íntegra conserva un fallo de persistencia y supera otra vez todas las comprobaciones, incluyendo T30 canónico y recursos RAVEN cuando apliquen
+- **THEN** se permite confirmar posteriormente la aceptación del mismo UUID sin cambiar su resultado de proceso ni repetir el render
+
+#### Scenario: Proceso no cero con aceptación recuperable
+- **WHEN** el proceso observado terminó con código no cero, la publicación falló y se satisfacen las condiciones vigentes de recuperación `post_completion`
+- **THEN** la reparación conserva código, error de proceso y advertencia `post_completion`, sin convertirlos en éxito limpio
+
+#### Scenario: Evidencia insuficiente o contradictoria
+- **WHEN** falta constancia o terminación observada, existe informe funcional contradictorio, cambia una huella protegida o falla la validación acústica
+- **THEN** no se repara ni acepta el intento, no se reescriben salidas protegidas y se informa el motivo
+
+### Requirement: Auditoría durable de reparación de persistencia
+Antes de cambiar estados funcionales, el orquestador SHALL conservar preimágenes y un registro versionado de reparación vinculado al intento, cadena y huellas verificadas. SHALL preservar el error de persistencia original y el resultado del proceso. SHALL habilitar reutilización y entrega a Clarity solo tras confirmar la publicación coherente de outcome, índice y cadena.
+
+#### Scenario: Índice publicado pero outcome no confirmado
+- **WHEN** el índice muestra archivos completos y el outcome registra aceptación no persistida
+- **THEN** el índice por sí solo no acredita aceptación; la reparación auditable debe completar los estados antes de reutilizar o entregar a Clarity
+
+#### Scenario: Nueva interrupción durante la reparación
+- **WHEN** la reparación se interrumpe después de publicar su registro y solo parte de los estados
+- **THEN** la siguiente llamada puede completar únicamente esa misma reparación si las huellas y estados son compatibles; hasta entonces no se acepta el intento
+
+#### Scenario: Reparación ya completada
+- **WHEN** se repite la llamada después de una reparación coherente sin cambios en las entradas ni salidas
+- **THEN** se reutiliza el intento sin otra reparación, UUID, invocación ni alteración de las preimágenes
+
+### Requirement: Cierre coherente de cadenas conocidas antes de reutilizar
+Para una variante con cadena conocida, el orquestador SHALL exigir una resolución persistida coherente de cadena, outcome e índice antes de reutilizarla o entregarla a Clarity. Un outcome `committed` o un índice completo SHALL NOT bastar mientras falte el cierre. Las salidas históricas sin cadena SHALL conservar las comprobaciones vigentes, sin inventarles una cadena.
+
+#### Scenario: Aceptación confirmada pero cadena pendiente
+- **WHEN** el outcome tiene terminación observada y aceptación confirmada, pero la cadena del mismo intento permanece `running`
+- **THEN** no se permite su reutilización ni entrega directa a Clarity hasta completar la finalización auditable o informar su bloqueo
+
+#### Scenario: Cadena cerrada normalmente
+- **WHEN** el outcome aceptado, la cadena resuelta y el índice son coherentes y las validaciones aplicables siguen siendo satisfactorias
+- **THEN** la variante puede reutilizarse sin crear una reparación innecesaria
+
+#### Scenario: Resultado histórico sin cadena
+- **WHEN** se considera una salida histórica sin cadena ni evidencia de un intento pendiente conocido
+- **THEN** se aplica la política legacy vigente sin exigirle un cierre de cadena retroactivo
+
+### Requirement: Auditoría explícita de finalización de cadena
+La finalización reparada SHALL conservar preimágenes exactas y un registro versionado que identifique su acción y vincule intento, cadena, estados y evidencia verificada. SHALL preservar los hechos del proceso, entradas y presupuesto. Un fallo de almacenamiento no registrado previamente SHALL NOT inventarse como error histórico; se registrará el estado incompleto observado.
+
+#### Scenario: No existe persistence_error en el outcome
+- **WHEN** la aceptación quedó confirmada y el fallo posterior impidió guardar la clasificación o el cierre de la cadena sin registrar la excepción
+- **THEN** la reparación conserva el outcome previo y documenta la finalización incompleta, sin exigir ni fabricar `persistence_error` o `storage_failure`
+
+#### Scenario: Proceso no cero previamente recuperado
+- **WHEN** una aceptación `continue_with_warning` conserva código no cero observado y vuelve a superar el contrato `post_completion`
+- **THEN** completar su cadena conserva código, error y advertencia de proceso y no los sustituye por un éxito limpio
+
+#### Scenario: Nueva interrupción durante el cierre
+- **WHEN** el journal está publicado pero solo parte de los estados de finalización se guardó
+- **THEN** no se habilita reutilización ni Clarity; la siguiente llamada completa solo las transiciones del mismo registro si la evidencia sigue siendo válida
+
+### Requirement: Lectura segura de formatos de finalización
+Los lectores actualizados SHALL admitir journals de reparación versión 1 válidos y la nueva acción de finalización en journals versión 2, con outcomes reparados versión 2. SHALL rechazar versiones o acciones desconocidas y registros incompletos o contradictorios. La nueva acción SHALL NOT reescribir journals anteriores completos ni cambiar el esquema de constancias o cadenas.
+
+#### Scenario: Lote con reparaciones de ambas generaciones
+- **WHEN** coexisten reparaciones de aceptación versión 1 y finalizaciones de cadena versión 2 completas y coherentes
+- **THEN** el lector actualizado valida ambas sin migrar ni invalidar las reparaciones anteriores
+
+#### Scenario: Rollback a un lector incompatible
+- **WHEN** un lector que solo entiende outcomes versión 1 o journals de reparación versión 1 encuentra la nueva finalización, parcial o completa
+- **THEN** rechaza el resultado por esquema no soportado en lugar de aceptarlo solo porque el índice muestra archivos completos
+
+#### Scenario: Edición manual del estado
+- **WHEN** se marca una cadena como resuelta sin un outcome coherente ni un registro de finalización válido cuando corresponde
+- **THEN** el cambio de etiqueta por sí solo no autoriza reutilización ni entrega a Clarity
+
+### Requirement: Auditoría de evaluación retomada
+La evaluación retomada SHALL conservar preimágenes exactas, identidad, evidencia verificada y plan versionado antes de modificar estados activos. SHALL preservar código, error y tiempos observados, diferenciando cuándo se evaluó del momento en que terminó el proceso. Una reparación parcial SHALL NOT habilitar reutilización ni Clarity.
+
+#### Scenario: Resultado observado con validación inicial pendiente
+- **WHEN** el outcome conserva validación inicial no verificada aunque ya tenga código y fecha de fin
+- **THEN** se conserva ese estado original como preimagen y se publica una evaluación nueva, sin fabricar un error histórico de almacenamiento ni sustituir el fallo del proceso
+
+#### Scenario: Interrupción durante reparación
+- **WHEN** se interrumpe cualquiera de las publicaciones de outcome, índice, circuito o cadena
+- **THEN** se retoma el mismo registro y solo sus transiciones previstas, sin contar otra evaluación ni habilitar una reparación incompleta
+
+### Requirement: Resolución auditable sin doble contabilidad
+Una evaluación retomada SHALL verificar cualquier resolución existente del UUID y preservarla si coincide. Si falta, SHALL añadirla una sola vez en el orden de recuperación registrado, conservando el prefijo histórico y sin presentarla como resolución histórica reconstruida. Contradicciones o duplicados SHALL bloquear; ni circuito ni presupuesto SHALL reiniciarse.
+
+#### Scenario: Circuito sin el intento observado
+- **WHEN** un resultado observado pendiente supera preflight y aún no figura en el circuito
+- **THEN** se audita y aplica su resolución como nueva resolución administrativa en recuperación, sin inventar una posición anterior ni eliminar resoluciones posteriores de otros UUID
+
+#### Scenario: Resolución ya publicada antes de otra caída
+- **WHEN** el circuito ya tiene exactamente la resolución prevista por el registro de recuperación
+- **THEN** solo se completan las publicaciones restantes, sin incrementar rachas, reiniciarlas de nuevo ni duplicar el UUID
+
+#### Scenario: Corte durante recuperación de varios resultados
+- **WHEN** una resolución administrativa abre el circuito mientras se cierran resultados ya observados
+- **THEN** se termina de registrar esos resultados sin habilitar despachos y el corte permanece enclavado aunque llegue después una aceptación
+
+### Requirement: Compatibilidad explícita de evaluaciones retomadas
+Los lectores actualizados SHALL distinguir reparaciones anteriores de aceptación, finalización de cadena y evaluación retomada, admitiendo sus formatos válidos sin migrarlos. Los formatos nuevos SHALL ser rechazables por lectores incompatibles y las acciones desconocidas SHALL bloquear. El rollback SHALL conservar auditoría y no rebajar versiones ni editar running manualmente.
+
+#### Scenario: Lote con tres generaciones
+- **WHEN** coexisten journals válidos de aceptación, finalize_chain y evaluación retomada
+- **THEN** se validan con sus reglas respectivas y no se reescriben registros completos anteriores
+
+#### Scenario: Lector anterior frente a evaluación nueva
+- **WHEN** un lector que solo admite outcomes hasta versión 2 o journals hasta versión 2 encuentra una evaluación retomada
+- **THEN** la rechaza por esquema no soportado, aunque el índice parezca completo

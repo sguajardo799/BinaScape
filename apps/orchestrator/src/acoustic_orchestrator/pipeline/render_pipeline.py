@@ -45,6 +45,8 @@ from acoustic_orchestrator.pipeline.render_acceptance import RenderAcceptance, R
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
 from acoustic_orchestrator.pipeline.render_backends import manifest_render_backend
 from acoustic_orchestrator.pipeline.render_history import load_render_history
+from acoustic_orchestrator.pipeline.persistence_recovery import PersistenceRepair, inspect_persistence_repair
+from acoustic_orchestrator.pipeline.stop_control import RenderStopped, StopControl
 from acoustic_orchestrator.pipeline.raven_resources import (
     persist_resource_inventory, is_private_runtime, verify_private_runtime, verify_resource_inventory,
     archive_reconciled_writer,
@@ -65,6 +67,7 @@ class RenderStaticRunError(RuntimeError):
         self.manifest_paths = manifest_paths
         self.summary = summary
         self.__cause__ = cause
+        self.context = getattr(cause, "render_context", {})
 
 
 class RenderSummary(TypedDict):
@@ -88,6 +91,9 @@ class RenderSummary(TypedDict):
     variants_completed_after_retry: NotRequired[int]
     circuit_open: NotRequired[bool]
     circuit_reason: NotRequired[str | None]
+    persistence_repairs: NotRequired[int]
+    stopped: NotRequired[bool]
+    stop_reason: NotRequired[str]
 
 
 class SamplingSummary(TypedDict):
@@ -114,20 +120,48 @@ def generate_static_manifests_with_summary(
 
 def render_static_scenes(
     config_path: str | Path, matlab_executable: str = "matlab", *, progress: ProgressCallback | None = None,
+    stop: "StopControl | None" = None,
 ) -> tuple[list[Path], RenderSummary]:
+    stop = stop or StopControl()
+    stop.checkpoint()
     config = load_config(config_path)
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     with static_writer_lock(layout) as lock:
-        return _render_static_scenes_locked(config_path, matlab_executable, lock=lock, progress=ProgressReporter(progress))
+        return _render_static_scenes_locked(config_path, matlab_executable, lock=lock,
+                                           progress=ProgressReporter(progress), stop=stop)
 
 
 def _render_static_scenes_locked(
     config_path: str | Path, matlab_executable: str, *, lock: StaticWriterLock,
     progress: ProgressReporter | None = None,
+    stop: "StopControl | None" = None,
 ) -> tuple[list[Path], RenderSummary]:
+    stop = stop or StopControl()
     progress = progress or ProgressReporter()
-    config, manifest_paths, sampling_summary = _prepare_static_manifests(config_path, lock=lock, for_render=True, progress=progress)
+    repaired_attempts: list[str] = []
+    try:
+        config, manifest_paths, sampling_summary = _prepare_static_manifests(
+            config_path, lock=lock, for_render=True, progress=progress, repaired_attempts=repaired_attempts,
+            stop=stop,
+        )
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        if not repaired_attempts or isinstance(exc, RenderStopped):
+            raise
+        # A reevaluated rejection can be fully durable yet correctly block the
+        # dispatch preflight. Report its repair, not a fictitious invocation.
+        exc.add_note(f"Persistencias confirmadas en esta llamada: {len(set(repaired_attempts))}")
+        try:
+            config = load_config(config_path)
+            layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+            inspected = inspect_static_plan(config, layout)
+            summary = _build_render_summary(load_variant_index(layout["render_index_path"]), 0, layout["render_index_path"],
+                sampling_summary=_sampling_summary_for_plan(config, inspected), clarity_summary=None,
+                attempt_records=[], persistence_repairs=len(set(repaired_attempts)))
+        except Exception as secondary:
+            exc.add_note(f"No se pudo publicar el resumen de reparaciones: {secondary}")
+            raise exc from secondary
+        raise RenderStaticRunError(manifest_paths=[], summary=summary, cause=exc) from exc
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     runtime_manifest_dir = layout["runtime_manifest_dir"]
     index_path = layout["render_index_path"]
@@ -135,7 +169,8 @@ def _render_static_scenes_locked(
     resume_history = load_render_history(layout["render_attempts_dir"])
     variant_records = dict(existing_records)
     metadata_required = config.execution.save_render_metadata
-    coordinator = _RenderCoordinator(config, layout["render_attempts_dir"], index_path, variant_records, progress=progress)
+    coordinator = _RenderCoordinator(config, layout["render_attempts_dir"], index_path, variant_records,
+                                     progress=progress, stop=stop)
     # Publish the complete plan before the first render while still enforcing
     # canonical-first execution below.
     for planned_variant in _build_planned_variants(config, manifest_paths, runtime_manifest_dir):
@@ -169,9 +204,13 @@ def _render_static_scenes_locked(
     render_tasks: list[RenderTask] = [task for scene in finished for task in scene.remaining_tasks]
     reused_remaining = [variant_id for scene in finished for variant_id in scene.reused_remaining]
 
-    progress.finish("interrumpido" if first_render_error is not None else "")
+    progress.finish("detenido" if stop.requested else "interrumpido" if first_render_error is not None else "")
     manifest_paths = accepted_manifest_paths
     _refresh_reverberation_batch(config, manifest_paths, sampling_summary)
+    if stop.requested and first_render_error is None:
+        raise _stopped_render_result(manifest_paths, _build_render_summary(
+            variant_records, render_jobs, index_path, sampling_summary=sampling_summary, clarity_summary=None,
+            attempt_records=attempt_records, persistence_repairs=len(set(repaired_attempts)), stopped=True), attempt_records)
     if first_render_error is not None:
         raise RenderStaticRunError(
             manifest_paths=manifest_paths,
@@ -182,6 +221,7 @@ def _render_static_scenes_locked(
                 sampling_summary=sampling_summary,
                 clarity_summary=None,
                 attempt_records=attempt_records,
+                persistence_repairs=len(set(repaired_attempts)),
             ),
             cause=first_render_error,
         ) from first_render_error
@@ -201,7 +241,11 @@ def _render_static_scenes_locked(
         attempt_records=attempt_records,
         coordinator=coordinator,
     )
-    progress.finish("interrumpido" if first_render_error is not None else "")
+    progress.finish("detenido" if stop.requested else "interrumpido" if first_render_error is not None else "")
+    if stop.requested and first_render_error is None:
+        raise _stopped_render_result(manifest_paths, _build_render_summary(
+            variant_records, render_jobs, index_path, sampling_summary=sampling_summary, clarity_summary=None,
+            attempt_records=attempt_records, persistence_repairs=len(set(repaired_attempts)), stopped=True), attempt_records)
     if first_render_error is not None:
         raise RenderStaticRunError(
             manifest_paths=manifest_paths,
@@ -212,11 +256,14 @@ def _render_static_scenes_locked(
                 sampling_summary=sampling_summary,
                 clarity_summary=None,
                 attempt_records=attempt_records,
+                persistence_repairs=len(set(repaired_attempts)),
             ),
             cause=first_render_error,
         ) from first_render_error
 
     clarity_summary = None
+    stop.checkpoint()
+    stop.release_signals()
     if config.hearing_degradation.enabled:
         clarity_summary = prepare_clarity_handoff(config, progress=progress)
     else:
@@ -230,6 +277,7 @@ def _render_static_scenes_locked(
         sampling_summary=sampling_summary,
         clarity_summary=clarity_summary,
         attempt_records=attempt_records,
+        persistence_repairs=len(set(repaired_attempts)),
     )
 
 
@@ -322,9 +370,12 @@ class _CanonicalStage:
 
     @property
     def can_dispatch(self) -> bool:
-        return self.first_render_error is None and not self.coordinator.circuit.is_open
+        return (self.first_render_error is None and not self.coordinator.circuit.is_open
+                and not self.coordinator.stop.requested)
 
     def fail(self, error: Exception) -> str:
+        if isinstance(error, RenderStopped):
+            return "halted"
         if self.first_render_error is None:
             self.first_render_error = error
         return "error"
@@ -347,6 +398,8 @@ class _CanonicalStage:
     def advance(self, scene: _CanonicalScene) -> str:
         """Prepare rounds until the canonical needs MATLAB ("dispatch") or the scene ends."""
         while True:
+            if self.coordinator.stop.requested:
+                return "halted"
             outcome = self._begin_round(scene)
             if outcome != "resumed":
                 return outcome
@@ -357,13 +410,16 @@ class _CanonicalStage:
     def complete(self, scene: _CanonicalScene, result: RenderResult, *, allow_resample: bool = True) -> str:
         """Apply a resolved canonical MATLAB result: "again", "done", "halted" or "error"."""
         if result["error"] is not None:
+            if self.coordinator.stopped_result_is_durable(result):
+                return "halted"
+            _attach_render_error_context(result["error"], result["task"])
             acceptance = result.get("acceptance")
             if acceptance is not None and acceptance.process.attempt.record.get("commit_status") == "committed":
                 self.progress.resolve(scene.scene_id, "fallidas")
             return self.fail(result["error"])
         canonical_record = self.variant_records[scene.canonical_task["variant_paths"]["variant_id"]]
         return self._finish_round(scene, result["acceptance"].validation, canonical_record,
-                                  resumed=False, allow_resample=allow_resample)
+                                  resumed=False, allow_resample=allow_resample and not self.coordinator.stop.requested)
 
     def _begin_round(self, scene: _CanonicalScene) -> str:
         config = self.config
@@ -485,6 +541,12 @@ class _CanonicalStage:
             return "done"
         if not allow_resample:
             # The batch is stopping: keep the rejected evidence, start nothing new.
+            if self.coordinator.stop.requested:
+                from acoustic_orchestrator.pipeline.acoustic_transactions import record_intent
+                diagnostic = {**t30_diagnostic, "scene_index": scene.scene_index, "scene_id": scene.scene_id,
+                              "output_type": canonical_paths["output_type"], "render_status": canonical_record["status"],
+                              "sampling_attempt": scene.scene_manifest["reverberation_sampling"]["attempts"]}
+                record_intent(self.layout, scene, diagnostic, lock=self.lock)
             return "halted"
 
         t30_diagnostic.update(
@@ -563,6 +625,8 @@ class _CanonicalStage:
 
 def _render_canonical_sequentially(stage: _CanonicalStage, manifest_paths: list[Path]) -> None:
     for position, manifest_path in enumerate(manifest_paths):
+        if not stage.can_dispatch:
+            break
         scene = stage.start_scene(position, manifest_path)
         while stage.advance(scene) == "dispatch":
             stage.render_jobs += 1
@@ -574,6 +638,25 @@ def _render_canonical_sequentially(stage: _CanonicalStage, manifest_paths: list[
                 break
         if stage.first_render_error is not None:
             break
+
+
+def _stopped_render_result(manifest_paths, summary, records) -> RenderStopped:
+    error = RenderStopped(manifest_paths=manifest_paths, summary=summary)
+    for record in records:
+        if record.get("process_status") == "failed":
+            error.add_note(f"Proceso {record['attempt_id']} terminó con código {record.get('exit_code')}; "
+                           f"resultado registrado. Evidencia: {record.get('attempt_outcome_path', '')}")
+    return error
+
+
+def _wait_for_render_results(futures, stop: StopControl):
+    """Observe a cooperative stop while waiting, without canceling work."""
+    while True:
+        stop.observe(sum(not future.done() for future in futures))
+        completed, pending = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+        stop.observe(len(pending))
+        if completed:
+            return completed, pending
 
 
 def _render_canonical_in_parallel(stage: _CanonicalStage, manifest_paths: list[Path], workers: int) -> None:
@@ -595,6 +678,7 @@ def _render_canonical_in_parallel(stage: _CanonicalStage, manifest_paths: list[P
         try:
             coordinator.prepare(scene.canonical_task)
         except Exception as exc:
+            _attach_render_error_context(exc, scene.canonical_task)
             if prior_error is not None:
                 prior_error.add_note(f"No se pudo preparar el siguiente intento: {exc}")
             stage.fail(prior_error or exc)
@@ -624,7 +708,7 @@ def _render_canonical_in_parallel(stage: _CanonicalStage, manifest_paths: list[P
                     submit(executor, scene, None)
             if not futures:
                 break
-            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            completed, _ = _wait_for_render_results(futures, coordinator.stop)
             for future in completed:
                 scene = futures.pop(future)
                 try:
@@ -649,7 +733,7 @@ def _render_canonical_in_parallel(stage: _CanonicalStage, manifest_paths: list[P
                     outcome = stage.fail(exc)
                 if outcome == "again":
                     rounds.append(scene)
-    if coordinator.circuit.is_open and stage.first_render_error is None:
+    if coordinator.circuit.is_open and stage.first_render_error is None and not coordinator.stop.requested:
         stage.fail(RetryBlockedError(f"Corte de procesos MATLAB: {coordinator.circuit.path}"))
 
 
@@ -657,12 +741,13 @@ class _RenderCoordinator:
     """Single owner of functional commits, retry budgets and batch dispatch."""
 
     def __init__(self, config: AppConfig, attempts_dir: Path, index_path: Path, records: dict,
-                 *, progress: ProgressReporter | None = None) -> None:
+                 *, progress: ProgressReporter | None = None, stop: StopControl | None = None) -> None:
         self.config = config
         self.attempts_dir = attempts_dir
         self.index_path = index_path
         self.records = records
         self.progress = progress or ProgressReporter()
+        self.stop = stop or StopControl()
         self.chains: dict[str, RetryChain] = {}
         self.circuit = BatchCircuit(
             index_path.parent / "matlab_process_circuit.json",
@@ -671,6 +756,9 @@ class _RenderCoordinator:
         )
 
     def prepare(self, task: RenderTask) -> None:
+        # Authorization boundary: once entered, finish this reservation/launch
+        # even if a signal arrives midway. Never abandon a consumed ordinal.
+        self.stop.checkpoint()
         if self.progress.stage == "Otras variantes":
             self.progress.start(task["variant_paths"]["variant_id"])
         if self.circuit.is_open:
@@ -714,7 +802,10 @@ class _RenderCoordinator:
                 archive_reconciled_writer(read_json_object(Path(chain.record["attempts"][-1]["outcome_path"])))
             task["reserved_attempt"] = chain.reserve_attempt(
                 runtime, self.attempts_dir, circuit_open=self.circuit.is_open,
+                sleep=self.stop.wait_delay,
             )
+        except RenderStopped:
+            raise
         except Exception as exc:
             if previous_error is not None:
                 previous_error.add_note(f"No se pudo archivar/reservar el siguiente intento: {exc}")
@@ -779,10 +870,28 @@ class _RenderCoordinator:
                 result["error"].add_note(f"Cadena MATLAB: {chain.path}; decisión: {decision}")
         except Exception as exc:
             if result["error"] is not None:
-                result["error"].add_note(f"No se pudo persistir/programar el reintento: {exc}")
+                result["error"].add_note(f"No se pudo persistir/programar el reintento: {type(exc).__name__}: {exc}")
+                for note in getattr(exc, "__notes__", []):
+                    result["error"].add_note(note)
             else:
                 result["error"] = exc
         return False
+
+    def stopped_result_is_durable(self, result: RenderResult) -> bool:
+        """A persisted process failure is not an administrative stop failure."""
+        if not self.stop.requested:
+            return False
+        if isinstance(result.get("error"), RenderStopped):
+            return True  # No invocation was authorized at this checkpoint.
+        acceptance = result.get("acceptance")
+        if acceptance is None:
+            return False
+        attempt = acceptance.process.attempt
+        key = result["task"]["runtime_manifest_path"].as_posix() + ":" + attempt.manifest_sha256
+        chain = self.chains.get(key)
+        return (attempt.record.get("commit_status") == "committed" and not attempt.record.get("persistence_error")
+                and attempt.record.get("retry_classification") not in {None, "storage_failure", "integrity_conflict"}
+                and chain is not None and chain.record["state"] != "running" and not chain._storage_failed)
 
     def execute(self, task: RenderTask, *, matlab_executable: str, metadata_required: bool,
                 canonical: bool = False, attempt_records: list[dict[str, Any]] | None = None) -> RenderResult:
@@ -790,15 +899,27 @@ class _RenderCoordinator:
         while True:
             try:
                 self.prepare(task)
+            except RenderStopped as exc:
+                return {"task": task, "error": exc}
             except Exception as exc:
+                _attach_render_error_context(exc, task)
                 if prior_error is not None:
                     prior_error.add_note(f"No se pudo preparar el siguiente intento: {exc}")
                 return {"task": task, "error": prior_error or exc}
-            result = _run_single_render_task(
-                task, matlab_executable=matlab_executable, metadata_required=metadata_required, canonical=canonical,
-                progress=self.progress,
-            )
-            if not self.resolve(result, metadata_required=metadata_required, attempt_records=attempt_records):
+            if self.stop.observe_while_waiting:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_run_single_render_task, task, matlab_executable=matlab_executable,
+                                             metadata_required=metadata_required, canonical=canonical, progress=self.progress)
+                    _wait_for_render_results([future], self.stop)
+                    result = future.result()
+            else:
+                result = _run_single_render_task(task, matlab_executable=matlab_executable,
+                                                metadata_required=metadata_required, canonical=canonical,
+                                                progress=self.progress)
+            retry = self.resolve(result, metadata_required=metadata_required, attempt_records=attempt_records)
+            if not retry or self.stop.requested:
+                if result["error"] is not None:
+                    _attach_render_error_context(result["error"], task)
                 return result
             prior_error = result["error"]
 
@@ -996,10 +1117,12 @@ def _refresh_reverberation_batch(
 
 
 def _publish_run_summary(path: Path, record: dict[str, Any]) -> None:
+    from acoustic_orchestrator.pipeline.atomic_replace import atomic_replace
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False), encoding="utf-8")
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def _build_reverberation_batch_metadata(
@@ -1100,11 +1223,13 @@ def _run_render_tasks_sequentially(
     coordinator: _RenderCoordinator,
 ) -> Exception | None:
     for task in render_tasks:
+        if coordinator.stop.requested:
+            break
         result = coordinator.execute(
             task, matlab_executable=matlab_executable, metadata_required=metadata_required,
             attempt_records=attempt_records,
         )
-        if result["error"] is not None:
+        if result["error"] is not None and not coordinator.stopped_result_is_durable(result):
             return result["error"]
     return None
 
@@ -1129,7 +1254,8 @@ def _run_render_tasks_in_parallel(
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         futures: dict[Future[RenderResult], RenderTask] = {}
         while pending or futures:
-            while pending and len(futures) < effective_workers and not coordinator.circuit.is_open and first_render_error is None:
+            while (pending and len(futures) < effective_workers and not coordinator.circuit.is_open
+                   and first_render_error is None and not coordinator.stop.requested):
                 task = pending.pop(0)
                 try:
                     coordinator.prepare(task)
@@ -1140,11 +1266,12 @@ def _run_render_tasks_in_parallel(
                     )
                     futures[future] = task
                 except Exception as exc:
-                    first_render_error = exc
+                    _attach_render_error_context(exc, task)
+                    first_render_error = None if isinstance(exc, RenderStopped) else exc
                     break
             if not futures:
                 break
-            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+            completed, _ = _wait_for_render_results(futures, coordinator.stop)
             # Resolve all observed completions before dispatching more work.
             for future in completed:
                 task = futures.pop(future)
@@ -1160,11 +1287,13 @@ def _run_render_tasks_in_parallel(
                         result["error"].add_note(f"No se pudo resolver el intento: {exc}")
                     else:
                         result["error"] = exc
-                if retry and first_render_error is None and not coordinator.circuit.is_open:
+                if retry and first_render_error is None and not coordinator.circuit.is_open and not coordinator.stop.requested:
                     pending.insert(0, task)
-                elif result["error"] is not None and first_render_error is None:
+                elif (result["error"] is not None and first_render_error is None
+                      and not coordinator.stopped_result_is_durable(result)):
+                    _attach_render_error_context(result["error"], task)
                     first_render_error = result["error"]
-        if coordinator.circuit.is_open and first_render_error is None:
+        if coordinator.circuit.is_open and first_render_error is None and not coordinator.stop.requested:
             first_render_error = RetryBlockedError(f"Corte de procesos MATLAB: {coordinator.circuit.path}")
     return first_render_error
 
@@ -1235,6 +1364,7 @@ def _upsert_attempted_render_result(
             persist_acceptance(acceptance, lambda: upsert_variant(index_path, variant_records, record))
         except Exception as storage_error:
             result["error"] = storage_error
+            _attach_render_error_context(storage_error, result["task"])
         if attempt_records is not None:
             attempt_records.append(dict(acceptance.process.attempt.record))
         if acceptance.recovered and result["error"] is None:
@@ -1252,6 +1382,18 @@ def _upsert_attempted_render_result(
             attempt_records.append({"process_status": "failed", "decision": "abort"})
 
 
+def _attach_render_error_context(error: Exception, task: RenderTask) -> None:
+    """Keep provenance on the original exception, including errors before launch."""
+    paths = task["variant_paths"]
+    context = {name: str(paths[name]) for name in ("scene_id", "variant_id") if name in paths}
+    attempt = task.get("reserved_attempt")
+    if attempt is not None:
+        context.update(attempt_id=attempt.attempt_id, evidence=attempt.outcome_path.as_posix())
+        if attempt.record.get("chain_id"):
+            context["chain_id"] = attempt.record["chain_id"]
+    error.render_context = context
+
+
 def _build_planned_variants(config: AppConfig, manifest_paths: list[Path], runtime_manifest_dir: Path) -> list[PlannedVariant]:
     planned_variants: list[PlannedVariant] = []
 
@@ -1262,26 +1404,43 @@ def _build_planned_variants(config: AppConfig, manifest_paths: list[Path], runti
     return planned_variants
 
 
-def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) -> None:
+def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict], *,
+                                allow_repairs: bool = False, stop: StopControl | None = None,
+                                acoustic=None, view=None, observed_recovery=None) -> list[PersistenceRepair]:
     """Inspect every protected variant before publishing any mutable run state."""
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
     records = load_variant_index(layout["render_index_path"])
     history = load_render_history(layout["render_attempts_dir"])
     chains_dir = layout["render_attempts_dir"].parent / "process_chains"
+    repairs: list[PersistenceRepair] = []
     force = not config.execution.resume_if_possible and config.execution.overwrite_existing
     circuit_path = layout["render_index_path"].parent / "matlab_process_circuit.json"
-    if circuit_path.exists() and read_json_object(circuit_path).get("open") and not force:
+    if (circuit_path.exists() and read_json_object(circuit_path).get("open") and not force
+            and not (observed_recovery is not None and observed_recovery.validates_open_circuit())):
         raise RetryBlockedError(f"Corte de procesos MATLAB persistido: {circuit_path}")
+    running_chains = set()
     for path in chains_dir.glob("*/chain.json"):
         chain_record = read_json_object(path)
         if chain_record.get("state") == "running":
-            raise RetryBlockedError(f"Terminación del proceso no observada: {path}")
+            running_chains.add(path)
     for scene in scene_manifests:
+        if stop is not None:
+            stop.checkpoint()
         rewrites = prepare_scene_source_assets(
             scene, layout["prepared_audio_dir"] / scene["scene_id"], create=False,
         )
         for number, variant in enumerate(_build_planned_variants_from_manifest(config, scene, layout["runtime_manifest_dir"])):
+            if stop is not None:
+                stop.checkpoint()
             paths = variant["variant_paths"]
+            if acoustic is not None and acoustic.has_scene(scene["scene_id"]):
+                runtime, expected = build_single_receiver_render_manifest(
+                    scene, variant["receiver_variant"], layout["runtime_manifest_dir"],
+                    config.outputs, variant["receiver_output"], rewrites,
+                    preserve_legacy=config.execution.resume_if_possible)
+                validate_shared_scene(scene, expected, rewrites)
+                acoustic.validate_variant(config, layout, paths, expected, canonical=number == 0, view=view)
+                continue  # This exact participant was fully checked above, not ignored.
             previous_runtime = Path(paths["runtime_manifest_path"])
             if previous_runtime.exists():
                 observed = read_json_object(previous_runtime)
@@ -1315,6 +1474,17 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
             validate_shared_scene(scene, expected, rewrites)
             runtime_matches = runtime.is_file() and equivalent_render_inputs(expected, read_json_object(runtime))
             has_outputs = Path(paths["rendered_wav_path"]).exists() or Path(paths["render_metadata_path"]).exists()
+            repair = observed_recovery.for_variant(paths["variant_id"], records) if observed_recovery is not None else None
+            if repair is None and allow_repairs and config.execution.resume_if_possible and runtime.is_file():
+                repair = inspect_persistence_repair(
+                    paths, expected, records, chains_dir,
+                    metadata_required=True if number == 0 else config.execution.save_render_metadata,
+                    canonical=number == 0,
+                )
+            if repair is not None:
+                if not all(Path(path).is_file() for path in rewrites.values()):
+                    raise RetryBlockedError(f"Fuentes preparadas ausentes para reparación: {runtime}")
+                repairs.append(repair)
             reusable = (
                 config.execution.resume_if_possible
                 and all(Path(path).is_file() for path in rewrites.values())
@@ -1337,7 +1507,7 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
                 json.dumps(expected, indent=2).encode("utf-8")).hexdigest()
             scheduled_chain = preflight_chain(
                 runtime, chains_dir, input_sha256=digest, reusable=reusable,
-                overwrite_existing=config.execution.overwrite_existing, force_reset=force,
+                overwrite_existing=config.execution.overwrite_existing, force_reset=force, repair=repair,
             )
             if config.execution.overwrite_existing:
                 continue
@@ -1350,29 +1520,93 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
                 )
                 if not acoustic_transition:
                     raise FileExistsError(f"Conflicto de runtime protegido: {runtime}")
-            if has_outputs and not reusable and scheduled_chain is None:
+            if has_outputs and not reusable and scheduled_chain is None and repair is None:
                 raise FileExistsError(f"Conflicto de salida protegida no reutilizable: {paths['variant_id']}")
+    if observed_recovery is not None and not {entry["attempt_id"] for entry in observed_recovery.plan["entries"]} <= {repair.outcome["attempt_id"] for repair in repairs}:
+        raise RetryBlockedError("Observed recovery contains an unmapped batch participant")
+    authorized = {repair.chain_path for repair in repairs if repair.action in {"finalize_chain", "evaluate_observed_attempt"}}
+    if running_chains - authorized:
+        path = sorted(running_chains - authorized)[0]
+        raise RetryBlockedError(f"Terminación del proceso no observada o cierre no acreditado: {path}")
+    return repairs
+
+
+def _sampling_summary_for_plan(config: AppConfig, plan) -> SamplingSummary:
+    distribution = config.room_sampling.reverberation.distribution
+    bins = build_bins(distribution.range_s.min, distribution.range_s.max, distribution.bin_width_s)
+    quotas, _ = build_global_plan(config.execution.num_simulations, bins, config.experiment.random_seed)
+    observed, fallback, rejections = [0] * len(bins), 0, Counter()
+    for item in plan.manifests:
+        sampling = item.manifest["reverberation_sampling"]
+        observed[sampling["obtained_bin"]["index"]] += 1
+        fallback += int(sampling["fallback_used"])
+        rejections.update(sampling.get("rejections_by_reason", {}))
+    for failure in plan.failures:
+        rejections.update(failure.get("rejections_by_reason", {}))
+    batch = _build_reverberation_batch_metadata(config, bins, quotas, observed, fallback, len(plan.failures), dict(rejections))
+    return {"requested_scenes": config.execution.num_simulations, "generated_scenes": len(plan.manifests),
+            "failed_scenes": len(plan.failures), "failed_scene_indices": [f["scene_index"] for f in plan.failures],
+            "status": batch["status"], "failures_path": plan.failures_path.resolve().as_posix(), "reverberation_batch": batch}
 
 
 def _prepare_static_manifests(
     config_path: str | Path, *, lock: StaticWriterLock | None = None, for_render: bool = False,
     progress: ProgressReporter | None = None,
+    repaired_attempts: list[str] | None = None,
+    stop: StopControl | None = None,
 ) -> tuple[AppConfig, list[Path], SamplingSummary]:
     progress = progress or ProgressReporter()
+    if stop is not None:
+        stop.checkpoint()
     config = load_config(config_path)
     validate_config(config)
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
 
     if lock is None:
         with static_writer_lock(layout) as acquired:
-            return _prepare_static_manifests(config_path, lock=acquired, for_render=for_render, progress=progress)
+            return _prepare_static_manifests(config_path, lock=acquired, for_render=for_render, progress=progress,
+                                             repaired_attempts=repaired_attempts, stop=stop)
+    if for_render and config.execution.resume_if_possible:
+        from acoustic_orchestrator.pipeline.observed_recovery import inspect_observed_recovery
+        observed = inspect_observed_recovery(layout)
+        if observed is not None:
+            confirmed = observed.publish(config, layout, lock=lock, stop=stop)
+            if repaired_attempts is not None:
+                repaired_attempts.extend(confirmed)
+        from acoustic_orchestrator.pipeline.acoustic_transactions import inspect_transaction
+        transaction = inspect_transaction(config, layout)
+        if transaction is not None:
+            # This performs a complete projected batch preflight before writing.
+            # The ordinary inspection below then reloads the published targets;
+            # a projection is never passed to apply_static_plan or dispatch.
+            transaction.publish(config, layout, lock=lock, stop=stop)
     plan = inspect_static_plan(config, layout, sample_scene=sample_static_scene, progress=progress)
+    if stop is not None:
+        stop.checkpoint()
     planned_manifests = [(item.manifest, item.path) for item in plan.manifests]
     sampling_failures = plan.failures
     failures_path = layout["sampling_failures_path"].resolve()
     progress.begin("Verificando compatibilidad de artefactos")
     if for_render:
-        _preflight_render_artifacts(config, [manifest for manifest, _ in planned_manifests])
+        manifests = [manifest for manifest, _ in planned_manifests]
+        repairs = _preflight_render_artifacts(config, manifests, allow_repairs=True, stop=stop)
+        from acoustic_orchestrator.pipeline.observed_recovery import inspect_observed_recovery
+        observed = inspect_observed_recovery(layout, repairs, config=config) if config.execution.resume_if_possible else None
+        if observed is not None:
+            confirmed = observed.publish(config, layout, lock=lock, stop=stop)
+            if repaired_attempts is not None:
+                repaired_attempts.extend(confirmed)
+            # Re-read all state; newly evaluated T30 outcomes may now have an
+            # acoustic continuation, and older repairs need fresh preimages.
+            return _prepare_static_manifests(config_path, lock=lock, for_render=for_render, progress=progress,
+                                             repaired_attempts=repaired_attempts, stop=stop)
+        for repair in repairs:
+            if stop is not None:
+                stop.checkpoint()
+            if repair.publish(layout["render_index_path"]) and repaired_attempts is not None:
+                repaired_attempts.append(repair.outcome["attempt_id"])
+        if repairs:
+            _preflight_render_artifacts(config, manifests, stop=stop)
 
     reverberation = config.room_sampling.reverberation
     distribution = reverberation.distribution
@@ -1401,6 +1635,8 @@ def _prepare_static_manifests(
         if item.needs_write:
             item.manifest["reverberation_batch"] = reverberation_batch
     progress.finish()
+    if stop is not None:
+        stop.checkpoint()
     manifest_paths = apply_static_plan(plan, lock=lock, progress=progress)
     failed_scene_indices = [failure["scene_index"] for failure in sampling_failures]
     generated_scenes = len(manifest_paths)
@@ -1438,6 +1674,8 @@ def _build_render_summary(
     sampling_summary: SamplingSummary,
     clarity_summary: ClaritySummary | None,
     attempt_records: list[dict[str, Any]] | None = None,
+    persistence_repairs: int = 0,
+    stopped: bool = False,
 ) -> RenderSummary:
     index_summary = summarize_variant_index(variant_records)
     attempts = attempt_records or []
@@ -1465,6 +1703,7 @@ def _build_render_summary(
         "resumed_recovered_variants": sum(record.get("resumed", False) and record.get("recovery_reason") == "post_completion"
                                            for record in variant_records.values()),
         "matlab_invocations": len(attempts),
+        "persistence_repairs": persistence_repairs,
         "process_retries": sum(record.get("attempt_ordinal", 1) > 1 for record in attempts),
         "variants_completed_after_retry": len({record["variant_id"] for record in attempts
             if record.get("attempt_ordinal", 1) > 1 and record.get("decision") in {"continue", "continue_with_warning"}
@@ -1475,6 +1714,8 @@ def _build_render_summary(
                                          for record in variant_records.values()
                                          if record.get("raven_isolation") is not None)),
     }
+    if stopped:
+        summary.update(stopped=True, stop_reason="operator_request")
     path = index_path.parent / "static_run_summary.json"
     previous: dict[str, Any] = read_json_object(path) if path.exists() else {"schema_version": 1}
     previous.update(render=summary, completed_variants=summary["completed_variants"])
