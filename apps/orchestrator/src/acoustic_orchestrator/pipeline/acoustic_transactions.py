@@ -23,6 +23,7 @@ from acoustic_orchestrator.pipeline.static_plan import (
     project_static_manifest_revision, static_catalog,
 )
 from acoustic_orchestrator.pipeline.artifact_view import ArtifactView
+from acoustic_orchestrator.pipeline.stop_control import StopControl
 from acoustic_orchestrator.pipeline.render_attempt import inspect_completion
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
 from acoustic_orchestrator.pipeline.raven_resources import is_private_runtime, verify_resource_inventory
@@ -400,8 +401,10 @@ def _apply_operation(operation: dict) -> None:
 
 
 def inspect_transaction(config, layout: dict, *, sample_scene=None,
-                         deferred_observed_attempts=frozenset()) -> AcousticTransaction | None:
+                         deferred_observed_attempts=frozenset(), stop: StopControl | None = None) -> AcousticTransaction | None:
     """Prepare one common target in memory, or load the same durable plan."""
+    if stop is not None:
+        stop.checkpoint()
     root = layout["run_root"].resolve()
     directory = root / "metadata" / "acoustic_transactions"
     active = []
@@ -455,6 +458,8 @@ def inspect_transaction(config, layout: dict, *, sample_scene=None,
     participants, operations, guards = [], [], []
     sample_scene = sample_scene or sample_static_scene
     for intent_path, intent in intents:
+        if stop is not None:
+            stop.checkpoint()
         scene_path = Path(intent["manifest_path"])
         if not scene_path.resolve().is_relative_to(root) or scene_path.read_bytes() != _decoded(intent["manifest_before"]):
             raise RetryBlockedError(f"Acoustic scene changed: {scene_path}")

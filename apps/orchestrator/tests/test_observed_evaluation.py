@@ -60,6 +60,33 @@ def observed_pending(tmp_path, monkeypatch, *, kind="accepted", code=1, scenes=1
     return config, layout, paths, outcome_path
 
 
+def test_observed_preflight_passes_stop_to_acoustic_planning(tmp_path, monkeypatch):
+    from acoustic_orchestrator.config.loader import load_config
+    from acoustic_orchestrator.pipeline import acoustic_transactions, observed_recovery
+    from acoustic_orchestrator.pipeline.static_plan import static_writer_lock
+    from acoustic_orchestrator.pipeline.stop_control import RenderStopped, StopControl
+
+    config_path, layout, paths, _ = observed_pending(tmp_path, monkeypatch)
+    batch = observed_recovery.inspect_observed_recovery(layout, [inspect(layout, paths)])
+    control = StopControl()
+    original = acoustic_transactions.inspect_transaction
+    calls = []
+
+    def inspect_acoustic(*args, **kwargs):
+        assert kwargs["stop"] is control
+        calls.append(True)
+        control.request()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(acoustic_transactions, "inspect_transaction", inspect_acoustic)
+    with static_writer_lock(layout) as lock:
+        before = snapshot(layout["run_root"])
+        with pytest.raises(RenderStopped):
+            batch.preflight(load_config(config_path), layout, lock=lock, stop=control)
+        assert before == snapshot(layout["run_root"])
+    assert calls == [True]
+
+
 def inspect(layout, paths):
     return inspect_persistence_repair(paths, read_json_object(Path(paths["runtime_manifest_path"])),
                                       load_variant_index(layout["render_index_path"]),

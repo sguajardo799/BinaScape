@@ -70,6 +70,8 @@ Para rechazo T30, guardar una intención explícita por intento en `acoustic_con
 
 En el relanzamiento, descubrir intenciones y transacciones pendientes sin escribir. Permitir una única transacción acústica activa por run, en `metadata/acoustic_transactions/{transaction_id}/`, con plan inmutable versionado y estado de publicación separado. Ordenar participantes por índice de escena y UUID; una escena solo puede tener una continuación activa inequívoca. Nuevas intenciones no se incorporan a un plan ya publicado: terminarlo antes de planificar otro, siempre después del preflight de todo el lote.
 
+La planificación acepta control cooperativo opcional, propagado también desde el preflight de recuperación observada. Comprobarlo al entrar y antes de calcular cada participante, además de la frontera de publicación existente. Una solicitud durante un muestreo permite terminar esa unidad, incluso si agota su presupuesto, pero impide empezar la siguiente; descartar el plan solo en memoria y conservar intactas las intenciones y archivos protegidos. Las llamadas sin control mantienen el comportamiento actual.
+
 El plan común captura:
 - Identidades y hashes de las intenciones originales, configuración/contrato de generación y dependencias seleccionadas.
 - Preimágenes exactas del plan compartido, manifiestos participantes y registros de índice afectados; inventarios de artefactos/runtime/audio preparado con rutas originales, destinos de conservación, tamaños y hashes. Los destinos se fijan antes de mover archivos, nunca se regeneran al retomar.

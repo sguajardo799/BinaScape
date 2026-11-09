@@ -79,6 +79,63 @@ def test_two_drained_rejections_record_intents_and_plan_one_common_target_read_o
     assert all(op["destination"].startswith(transaction.path.parent.as_posix()) for op in transaction.plan["operations"] if op["kind"] == "move")
 
 
+def test_already_stopped_transaction_inspection_does_not_read_or_sample():
+    control = StopControl()
+    control.request()
+    with pytest.raises(RenderStopped):
+        acoustic.inspect_transaction(None, None, stop=control)
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("entry", ["planner", "render"])
+def test_stop_during_first_participant_prevents_next_sample_and_preserves_intents(tmp_path, monkeypatch, terminal, entry):
+    from acoustic_orchestrator.experiment.sampler import SceneSamplingFailure
+
+    config_path, layout = deferred(tmp_path, monkeypatch)
+    config = load_config(config_path)
+    before = snapshot(layout["run_root"])
+    intents = list(layout["render_attempts_dir"].glob("*/acoustic_continuation/record.json"))
+    assert len(intents) == 2
+    control = StopControl()
+    original = acoustic.sample_static_scene
+    calls = []
+
+    def sample(config, unused, index, **kwargs):
+        assert not control.requested, "a new participant sampled after stop"
+        calls.append(index)
+        try:
+            if terminal:
+                raise SceneSamplingFailure({"scene_index": index, "stage": "sampling",
+                                            "scene_attempts": config.scene_validation.max_scene_attempts,
+                                            "rejections_by_reason": {"raven_t30_invalid": 1}})
+            # Supply a deterministic valid sample to exercise the non-error
+            # return boundary independently of this fixture's exhausted budget.
+            return original(config, unused, index, start_scene_attempt=1)
+        finally:
+            control.request()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(acoustic, "sample_static_scene", sample)
+        patch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run",
+                      lambda *a, **kw: pytest.fail("no dispatch during stopped planning"))
+        patch.setattr(acoustic, "atomic_write", lambda *a, **kw: pytest.fail("no transaction publication"))
+        with pytest.raises(RenderStopped):
+            if entry == "planner":
+                acoustic.inspect_transaction(config, layout, stop=control)
+            else:
+                render_pipeline.render_static_scenes(config_path, stop=control)
+    assert calls == [0]
+    assert before == snapshot(layout["run_root"])
+    assert all(not path.with_name("transaction.json").exists() for path in intents)
+
+    # No durable plan was started: a normal relaunch still discovers both
+    # intents and can publish its ordinary (possibly terminal) sampling result.
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", successful_process)
+    render_pipeline.render_static_scenes(config_path)
+    assert acoustic.inspect_transaction(config, layout) is None
+    assert all(read_json_object(path.with_name("transaction.json"))["state"] == "complete" for path in intents)
+
+
 def test_terminal_sampling_failure_is_in_shared_plan_and_failure_journal(tmp_path, monkeypatch):
     config, layout = deferred(tmp_path, monkeypatch)
     from acoustic_orchestrator.experiment.sampler import SceneSamplingFailure
