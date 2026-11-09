@@ -15,6 +15,7 @@ from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
 from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
+from acoustic_orchestrator.pipeline.stop_control import render_process_options
 from acoustic_orchestrator.pipeline.raven_resources import (
     isolated_runtime, verify_private_runtime, is_private_runtime, standalone_writer,
 )
@@ -166,6 +167,7 @@ def _run_render_process(
         if before_launch is not None:
             before_launch()
         options: dict[str, Any] = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
+        options.update(render_process_options())
         if env is not None:
             options["env"] = env
         completed = subprocess.run(command, check=True, **options)
