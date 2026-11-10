@@ -5,7 +5,7 @@ import json
 import pytest
 
 from output_analyzer.loader import load_run
-from output_analyzer.report import build_analysis, _write_plan
+from output_analyzer.report import build_analysis, _write_plan, _write_scene_histogram
 
 
 def test_build_analysis_exports_auditable_populations_and_embeds_svg(sample_run):
@@ -239,6 +239,10 @@ def test_every_exported_svg_has_visible_legend_and_metric_population(sample_run)
         if path.name == "sampling_receiver_attempt.svg":
             assert "No data / Not available" in text
             assert legend.find("svg:rect", namespace) is None
+        if path.name.startswith("rt30_scene_mean_"):
+            assert "Central frequencies (Hz): 125, 250" in text
+            assert "Bin edges: data_derived." in text
+    assert sum(path.name.startswith("rt30_scene_mean_") for path in artifacts.values()) == 3
 
 
 def test_plan_without_poses_has_no_actor_legend_symbols(tmp_path):
@@ -336,3 +340,173 @@ def test_scene_rt30_no_pairs_never_imputes_zero(sample_run):
     assert "n=0" in first and "excluidas=2" in first
     assert "Promedio Sabine: No disponible" in first
     assert "Promedio RAVEN: No disponible" in first
+
+
+SVG_NS = {"svg": "http://www.w3.org/2000/svg"}
+
+
+def _scene_mean_metrics(artifacts):
+    metrics = json.loads(artifacts["metrics_json"].read_text(encoding="utf-8"))
+    return {row["key"]: row for row in metrics if row["key"].startswith("rt30_scene_mean_")}
+
+
+def _svg_root(path):
+    import xml.etree.ElementTree as ET
+
+    return ET.parse(path).getroot()
+
+
+def _class_elements(root, css_class):
+    return [el for el in root.iter() if el.get("class") == css_class]
+
+
+def test_scene_mean_histograms_draw_exported_bins(sample_run):
+    data = load_run(sample_run)
+    artifacts = build_analysis(data)
+    histograms = {
+        key: row for key, row in _scene_mean_metrics(artifacts).items()
+        if row["chart_type"] == "scene_histogram"
+    }
+    assert {row["method"] for row in histograms.values()} == {"sabine", "raven"}
+    for key, metric in histograms.items():
+        path = artifacts[key]
+        assert path.name == f"{key}.svg" and path.parent.name == "images"
+        bars = _class_elements(_svg_root(path), "scene-bin")
+        assert [int(bar.get("data-count")) for bar in bars] == metric["bin_counts"]
+        assert [float(bar.get("data-lower")) for bar in bars] == metric["bin_edges_s"][:-1]
+        assert [float(bar.get("data-upper")) for bar in bars] == metric["bin_edges_s"][1:]
+
+
+def _histogram_metric(**overrides):
+    metric = dict(
+        key="rt30_scene_mean_raven_bands_500p0", method="raven", chart_type="scene_histogram",
+        title="RAVEN consolidated T30 — complete mean RT30 per scene",
+        population="unique scenes", unit="s", n_valid=10, n_excluded=0,
+        selected_frequencies_hz=[500.0], edge_source="sampling_batch",
+        interval_closure="[lower, upper), final interval [lower, upper]",
+        bin_edges_s=[0.2, 0.5, 0.9], bin_counts=[3, 4], underflow_count=2, overflow_count=1,
+        target_counts=[3, 3], reference_unavailable_reason=None, count_axis_max=4,
+    )
+    metric.update(overrides)
+    return metric
+
+
+def _legend_text(root):
+    return " ".join(root.find("svg:g[@class='chart-legend']", SVG_NS).itertext())
+
+
+def test_scene_histogram_labels_out_of_range_without_folding_edges(tmp_path):
+    path = tmp_path / "hist.svg"
+    _write_scene_histogram(path, _histogram_metric())
+    root = _svg_root(path)
+    assert [int(b.get("data-count")) for b in _class_elements(root, "scene-bin")] == [3, 4]
+    assert [int(b.get("data-count")) for b in _class_elements(root, "scene-underflow")] == [2]
+    assert [int(b.get("data-count")) for b in _class_elements(root, "scene-overflow")] == [1]
+    text = " ".join(root.itertext())
+    assert "< 0.2 s: 2" in text and "> 0.9 s: 1" in text
+    assert "below 0.2 s = 2; above 0.9 s = 1" in _legend_text(root)
+
+
+def test_scene_histogram_hides_zero_out_of_range_bars(tmp_path):
+    path = tmp_path / "hist.svg"
+    _write_scene_histogram(path, _histogram_metric(underflow_count=0, overflow_count=0))
+    root = _svg_root(path)
+    assert not _class_elements(root, "scene-underflow")
+    assert not _class_elements(root, "scene-overflow")
+
+
+def test_scene_histogram_target_marks_present_and_absent(tmp_path):
+    present = tmp_path / "present.svg"
+    _write_scene_histogram(present, _histogram_metric())
+    root = _svg_root(present)
+    assert [int(m.get("data-count")) for m in _class_elements(root, "scene-target")] == [3, 3]
+    assert "Sampling target counts per bin" in _legend_text(root)
+    absent = tmp_path / "absent.svg"
+    reason = "Sampling batch scope unavailable or ambiguous"
+    _write_scene_histogram(absent, _histogram_metric(target_counts=None, reference_unavailable_reason=reason))
+    root = _svg_root(absent)
+    assert not _class_elements(root, "scene-target")
+    assert reason in _legend_text(root)
+
+
+def test_scene_histogram_empty_population_renders_not_available(sample_run):
+    data = load_run(sample_run)
+    for row in data.rt30_scene_means:
+        row.update(raven_mean_s=None, raven_exclusion_reason="missing band", difference_mean_s=None)
+    artifacts = build_analysis(data)
+    raven = next(
+        key for key, row in _scene_mean_metrics(artifacts).items()
+        if row.get("method") == "raven"
+    )
+    root = _svg_root(artifacts[raven])
+    assert "No data / Not available" in " ".join(root.itertext())
+    assert not _class_elements(root, "scene-bin")
+    scatter = next(
+        key for key, row in _scene_mean_metrics(artifacts).items()
+        if row["chart_type"] == "scene_scatter"
+    )
+    root = _svg_root(artifacts[scatter])
+    assert "No data / Not available" in " ".join(root.itertext())
+    assert not _class_elements(root, "scene-point")
+    assert artifacts["report"].exists()
+
+
+def test_scene_mean_scatter_draws_paired_points_and_identity(sample_run):
+    data = load_run(sample_run)
+    artifacts = build_analysis(data)
+    scatter = [
+        row for row in _scene_mean_metrics(artifacts).values()
+        if row["chart_type"] == "scene_scatter"
+    ]
+    assert len(scatter) == 1
+    metric = scatter[0]
+    path = artifacts[metric["key"]]
+    assert path.name == f"{metric['key']}.svg" and path.parent.name == "images"
+    root = _svg_root(path)
+    points = _class_elements(root, "scene-point")
+    assert len(points) == metric["n_valid"] > 0
+    assert sorted((float(p.get("data-sabine")), float(p.get("data-raven"))) for p in points) == sorted(
+        (o["sabine_s"], o["raven_s"]) for o in metric["observations"]
+    )
+    identity = _class_elements(root, "identity-line")
+    assert len(identity) == 1
+    values = [v for o in metric["observations"] for v in (o["sabine_s"], o["raven_s"])]
+    low, high = float(identity[0].get("data-from")), float(identity[0].get("data-to"))
+    assert low <= min(values) and high >= max(values)
+
+
+def test_report_embeds_scene_mean_section_inside_acoustics(sample_run):
+    import re
+
+    data = load_run(sample_run)
+    artifacts = build_analysis(data)
+    report = artifacts["report"].read_text(encoding="utf-8")
+    acoustics = re.search(r"<section><h2>Acoustics and sources</h2>.*?</section>", report, re.S).group(0)
+    assert "<h3>RT30 scene means</h3>" in acoustics
+    for key, metric in _scene_mean_metrics(artifacts).items():
+        svg = artifacts[key].read_text(encoding="utf-8")
+        assert svg in acoustics
+        caption = f"{metric['population']}; unit: {metric['unit']}; n={metric['n_valid']}; excluded={metric['n_excluded']}."
+        assert caption in acoustics
+    assert "RT30 aligned comparison by central frequency" in acoustics
+
+
+def test_scene_mean_chart_rendering_keeps_exports_and_status(sample_run):
+    import copy
+
+    from output_analyzer.loader import summary_for
+    from output_analyzer.scene_distributions import scene_metrics
+
+    data = load_run(sample_run)
+    expected_means = copy.deepcopy(data.rt30_scene_means)
+    expected_metrics = json.loads(json.dumps(scene_metrics(copy.deepcopy(data))))
+    expected_status = summary_for(data)["status"]
+    artifacts = build_analysis(data)
+    assert json.loads(artifacts["rt30_scene_means_json"].read_text(encoding="utf-8")) == expected_means
+    exported = [
+        row for row in json.loads(artifacts["metrics_json"].read_text(encoding="utf-8"))
+        if row["key"].startswith("rt30_scene_mean_")
+    ]
+    assert exported == expected_metrics
+    summary = json.loads(artifacts["summary"].read_text(encoding="utf-8"))
+    assert summary["status"] == expected_status
