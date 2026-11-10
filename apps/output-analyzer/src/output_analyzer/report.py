@@ -409,7 +409,13 @@ def _write_charts(
         path = images_dir / f"plan_{index:05d}.svg"
         if _write_plan(path, scene, sources):
             charts[f"plan_{geometry}_{index:05d}"] = path
-    metrics.extend(scene_metrics(data))
+    for metric in scene_metrics(data):
+        metrics.append(metric)
+        writer = SCENE_CHART_WRITERS.get(metric.get("chart_type"))
+        if writer is not None:
+            path = images_dir / f"{metric['key']}.svg"
+            writer(path, metric)
+            charts[metric["key"]] = path
     return charts, metrics
 
 
@@ -909,7 +915,7 @@ def _write_report(
 <body><header><h1>Output Analysis Report</h1><p>{html.escape(str(data.run_dir))}</p><p>Status: {html.escape(str(status))}</p></header><main>
 <section id="general-parameters"><h2>General parameters</h2><p>Supported scene/render schema: 3.0 only. Metadata only; no audio measurements.</p>{counts}{parameters}{grid("general")}</section>
 <section><h2>Positions by geometry</h2><p>One exact public-frame X/Z floor plan per unique scene. Y is vertical. No HRTF duplication.</p>{"".join(spatial)}</section>
-<section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{_records_table(rt_by_band)}<details><summary>Per-scene means on matched bands</summary>{_records_table(summary.get("rt30_matched_means", []))}</details><details><summary>All comparison candidates and exclusions</summary>{_records_table(data.rt30_comparisons)}</details><details><summary>All aligned RT30 pairs</summary>{_records_table(data.rt30_pairs)}</details><details><summary>Consolidated RAVEN means, variant counts and dispersion</summary>{_records_table(data.rt30_consolidated)}</details><details><summary>Individual method values: variant/frequency audit</summary>{_records_table(data.rt30_records)}</details></section>
+<section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 scene means</h3><p>Complete mean RT30 per unique scene over its selected central frequencies, from metadata (seconds); not a WAV measurement. A scene is excluded from a method when any selected band is missing, invalid or conflicted. Sabine and RAVEN share bin edges and count scale; dashed marks are sampling target counts when available.</p>{grid("scene_means")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{_records_table(rt_by_band)}<details><summary>Per-scene means on matched bands</summary>{_records_table(summary.get("rt30_matched_means", []))}</details><details><summary>All comparison candidates and exclusions</summary>{_records_table(data.rt30_comparisons)}</details><details><summary>All aligned RT30 pairs</summary>{_records_table(data.rt30_pairs)}</details><details><summary>Consolidated RAVEN means, variant counts and dispersion</summary>{_records_table(data.rt30_consolidated)}</details><details><summary>Individual method values: variant/frequency audit</summary>{_records_table(data.rt30_records)}</details></section>
 <section><h2>Coverage and metadata quality</h2><p>Expected coverage unavailable unless an authoritative expectation is present in the coverage records. Missing optional failure indexes do not mean zero failures. Incident categories overlap; do not sum them as distinct affected entities.</p>{_html_table(["Category", "Count"], list(summary.get("incident_counts", {}).items()))}<details><summary>Population definitions and valid/excluded counts</summary><pre>{html.escape(json.dumps(summary.get("populations", {}), ensure_ascii=False, indent=2))}</pre></details>{grid("quality")}{quality}</section>
 <section><h2>Data exports</h2><p>All figures are embedded; this HTML works offline by itself. Original SVGs are also in images/. scenes and sources contain unique scene/source observations. render_scenes contains unique render variants; joined_render_sources.jsonl and .csv contain source–variant rows. degraded_metadata contains unique degraded records. Each population also has JSON, JSONL and CSV exports. general_parameters.json, metrics.json, rt30_pairs, rt30_records, materials, sampling_records, sampling_batches, coverage, incidents and summary.json preserve values, denominators and provenance for audit. Null means Not available, never an imputed zero.</p></section>
 </main>{CAROUSEL_SCRIPT}</body></html>"""
@@ -996,6 +1002,187 @@ def _write_bar_chart(
         + _label(20, top + plot_h / 2, ylabel, "middle", rotate=-90),
     )
     path.write_text(svg, encoding="utf-8", newline="\n")
+
+
+SCENE_METHOD_COLORS = {"sabine": PALETTE[0], "raven": PALETTE[1]}
+SCENE_METHOD_NAMES = {"sabine": "Sabine estimate", "raven": "RAVEN consolidated T30"}
+
+
+def _scene_context_legend(metric: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    frequencies = ", ".join(f"{f:g}" for f in metric.get("selected_frequencies_hz") or [])
+    return [
+        (None, None, "Central frequencies (Hz): " + (frequencies or "Not available")),
+        (None, None, f"Bin edges: {metric.get('edge_source')}."),
+    ]
+
+
+def _scene_population_legend(metric: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    entries = [(
+        None, None,
+        f"Population: {metric['population']}; n={metric['n_valid']}; "
+        f"excluded={metric['n_excluded']}; unit: {metric['unit']}.",
+    )]
+    if not metric["n_valid"]:
+        entries.append((None, None, "No data / Not available — no observed series."))
+    return entries
+
+
+def _write_scene_histogram(path: Path, metric: dict[str, Any]) -> None:
+    """Draw exported scene-mean bins as-is; never re-bin the observations."""
+    title = metric["title"]
+    edges = metric.get("bin_edges_s") or []
+    counts = metric.get("bin_counts") or []
+    targets = metric.get("target_counts")
+    under = metric.get("underflow_count") or 0
+    over = metric.get("overflow_count") or 0
+    color = SCENE_METHOD_COLORS.get(metric.get("method"), PALETTE[0])
+    if not metric["n_valid"] or len(edges) < 2 or len(counts) != len(edges) - 1:
+        _write_empty_svg(path, title, "No data / Not available")
+    else:
+        width, height = 760, 420
+        left, right, top, bottom = 70, 30, 46, 70
+        gutter = 64
+        plot_w = width - left - right
+        plot_h = height - top - bottom
+        x0 = left + (gutter if under else 0)
+        x1 = left + plot_w - (gutter if over else 0)
+        low, high = edges[0], edges[-1]
+        scale = metric.get("count_axis_max") or max([1, under, over, *counts, *(targets or [])])
+
+        def x_at(value: float) -> float:
+            return x0 + (x1 - x0) * (value - low) / (high - low)
+
+        def y_at(count: float) -> float:
+            return top + plot_h - plot_h * count / scale
+
+        parts = []
+        for index, count in enumerate(counts):
+            lower, upper = edges[index], edges[index + 1]
+            bx = x_at(lower) + 1
+            bw = max(1.0, x_at(upper) - x_at(lower) - 2)
+            parts.append(
+                f'<rect class="scene-bin" data-lower="{lower!r}" data-upper="{upper!r}" '
+                f'data-count="{count}" x="{bx:.1f}" y="{y_at(count):.1f}" '
+                f'width="{bw:.1f}" height="{top + plot_h - y_at(count):.1f}" fill="{color}"/>'
+            )
+            parts.append(_label(bx + bw / 2, y_at(count) - 4, str(count), "middle", size=10))
+            if targets is not None:
+                ty = y_at(targets[index])
+                parts.append(
+                    f'<line class="scene-target" data-count="{targets[index]}" x1="{bx:.1f}" '
+                    f'y1="{ty:.1f}" x2="{bx + bw:.1f}" y2="{ty:.1f}" stroke="#111827" '
+                    'stroke-width="2" stroke-dasharray="5 3"/>'
+                )
+        for css_class, count, bx, text in (
+            ("scene-underflow", under, left + 6, f"< {low:g} s: {under}"),
+            ("scene-overflow", over, x1 + 6, f"> {high:g} s: {over}"),
+        ):
+            if count:
+                bw = gutter - 12
+                parts.append(
+                    f'<rect class="{css_class}" data-count="{count}" x="{bx:.1f}" '
+                    f'y="{y_at(count):.1f}" width="{bw:.1f}" '
+                    f'height="{top + plot_h - y_at(count):.1f}" fill="#9ca3af"/>'
+                )
+                parts.append(_label(bx + bw / 2, y_at(count) - 4, text, "middle", size=10))
+        ticks = []
+        for edge in edges:
+            x = x_at(edge)
+            ticks.append(
+                f'<line x1="{x:.1f}" y1="{top + plot_h:.1f}" x2="{x:.1f}" '
+                f'y2="{top + plot_h + 5:.1f}" stroke="#374151" stroke-width="1"/>'
+            )
+            ticks.append(_label(x, top + plot_h + 20, _format_tick(edge), "middle", size=10))
+        svg = _svg_shell(
+            width, height, title,
+            "".join(parts)
+            + _axes(left, top, plot_w, plot_h)
+            + "".join(ticks)
+            + _numeric_y_ticks(left, top, plot_h, 0, scale)
+            + _label(left + plot_w / 2, height - 20, "complete mean RT30 per scene (s)", "middle")
+            + _label(18, top + plot_h / 2, "scenes", "middle", rotate=-90),
+        )
+        path.write_text(svg, encoding="utf-8", newline="\n")
+    name = SCENE_METHOD_NAMES.get(metric.get("method"), str(metric.get("method")))
+    legend = _scene_population_legend(metric)
+    legend.append((
+        "rect", color,
+        f"{name}: bars count scenes whose complete mean falls in each interval "
+        f"{metric.get('interval_closure', '')}.",
+    ))
+    if targets is not None:
+        legend.append(("line", "#111827", "Sampling target counts per bin (dashed marks)."))
+    else:
+        legend.append((
+            None, None,
+            "Sampling target counts unavailable: "
+            + str(metric.get("reference_unavailable_reason") or "Not available"),
+        ))
+    if len(edges) >= 2:
+        legend.append((
+            "rect", "#9ca3af",
+            f"Outside bin range: below {edges[0]:g} s = {under}; above {edges[-1]:g} s = {over}.",
+        ))
+    legend.extend(_scene_context_legend(metric))
+    _append_legend(path, legend)
+
+
+def _write_scene_scatter(path: Path, metric: dict[str, Any]) -> None:
+    """Sabine versus RAVEN complete scene means on one shared axis range."""
+    title = metric["title"]
+    points = metric.get("observations") or []
+    if not points:
+        _write_empty_svg(path, title, "No data / Not available")
+    else:
+        size, left, top, bottom = 420, 70, 46, 70
+        width, height = left + size + 30, top + size + bottom
+        values = [v for p in points for v in (p["sabine_s"], p["raven_s"])]
+        low, high = min(values), max(values)
+        padding = max((high - low) * 0.05, abs(high) * 0.05, 0.01)
+        low, high = low - padding, high + padding
+
+        def x_at(value: float) -> float:
+            return left + size * (value - low) / (high - low)
+
+        def y_at(value: float) -> float:
+            return top + size - size * (value - low) / (high - low)
+
+        parts = [
+            f'<line class="identity-line" data-from="{low!r}" data-to="{high!r}" '
+            f'x1="{x_at(low):.1f}" y1="{y_at(low):.1f}" x2="{x_at(high):.1f}" '
+            f'y2="{y_at(high):.1f}" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6 4"/>'
+        ]
+        for p in points:
+            parts.append(
+                f'<circle class="scene-point" data-sabine="{p["sabine_s"]!r}" '
+                f'data-raven="{p["raven_s"]!r}" cx="{x_at(p["sabine_s"]):.1f}" '
+                f'cy="{y_at(p["raven_s"]):.1f}" r="2.5" fill="{PALETTE[4]}" fill-opacity="0.6"/>'
+            )
+        svg = _svg_shell(
+            width, height, title,
+            "".join(parts)
+            + _axes(left, top, size, size)
+            + _numeric_x_ticks(left, top, size, size, low, high)
+            + _numeric_y_ticks(left, top, size, low, high)
+            + _label(left + size / 2, height - 20, "Sabine estimate mean (s)", "middle")
+            + _label(18, top + size / 2, "RAVEN consolidated T30 mean (s)", "middle", rotate=-90),
+        )
+        path.write_text(svg, encoding="utf-8", newline="\n")
+    legend = _scene_population_legend(metric)
+    legend.append((
+        "circle", PALETTE[4],
+        "One point per scene with complete Sabine and RAVEN means; "
+        "scenes missing either mean are excluded.",
+    ))
+    legend.append(("line", "#6b7280", "Identity y = x: RAVEN equals Sabine."))
+    legend.extend(_scene_context_legend(metric))
+    _append_legend(path, legend)
+
+
+SCENE_CHART_WRITERS = {
+    "scene_histogram": _write_scene_histogram,
+    "scene_scatter": _write_scene_scatter,
+}
 
 
 def _html_table(headers: list[str], rows: list[Any]) -> str:
