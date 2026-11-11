@@ -425,6 +425,41 @@ channel adaptation, and clipping-guard information.
   seed mechanism for complete BRIR reproducibility. Metadata documents that
   limitation explicitly.
 
+## Workspace privado de RAVEN por render
+
+`itaRavenProject.setMaterial` escribe cada material como `<slot>.mat` en la base
+de materiales del proyecto, y `setModelToFaces` escribe la geometría como
+`room_<N>_faces`. Por defecto ambas rutas son globales
+(`RavenDatabase\MaterialDatabase` y `RavenModels`), y los nombres de slot y la
+cantidad de caras se repiten entre escenas. Con `execution.num_workers > 1`,
+renders concurrentes de escenas distintas se sobrescribían materiales y
+geometría, lo que invalidaba audio y T30 (incidentes `rt30_conflict` en el
+analyzer).
+
+Cada render usa ahora un workspace privado derivado de su `project_name`:
+
+```text
+C:\ITASoftware\Raven\RavenInput\binascape_ws\<project_name>\
+  MaterialDatabase\   <- setPathMaterials del proyecto
+  RavenModels\        <- room_<N>_faces de salas poligonales (schema 2.0/3.0)
+```
+
+- `core/configure_raven_workspace.m` crea el workspace (descartando restos de un
+  intento anterior) y apunta la base de materiales a él.
+- `core/build_room_from_config.m` apunta el modelo al workspace antes de
+  `setModelToFaces` y falla con `BinaScape:Matlab:RavenModelOutsideWorkspace` si
+  la geometría termina fuera de él.
+- `core/cleanup_raven_workspace.m` elimina el workspace al terminar el render,
+  con éxito o con error. Un fallo de limpieza solo emite
+  `BinaScape:Matlab:RavenWorkspaceCleanupFailed`.
+- El metadata registra las rutas usadas en `summary.raven_workspace`
+  (`material_database_path`, `model_path`).
+
+Limitación: el modelo de la sala shoebox legacy (`setModelToShoebox`) sigue en
+la carpeta global; su nombre depende solo de las dimensiones, por lo que salas
+iguales escriben el mismo contenido. Sus materiales sí usan el workspace.
+Corridas renderizadas en paralelo antes de este cambio deben re-renderizarse.
+
 ## Trazabilidad de las fuentes en el metadata
 
 El render estático conserva dos campos de texto del manifiesto en cada entrada
