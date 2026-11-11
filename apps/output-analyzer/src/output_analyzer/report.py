@@ -22,6 +22,20 @@ from .loader import (
 
 PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2", "#be123c"]
 
+# Metrics kept in metrics.json but never drawn: redundant or unreadable as charts.
+HIDDEN_METRICS = frozenset(
+    {
+        "hist_room_length",
+        "hist_room_width",
+        "rt30_sabine_estimate",
+        "rt30_raven_rpf_gett30",
+        "sampling_attempts",
+        "sampling_requested_bin",
+        "surface_area",
+        "hist_employed_hrtf",
+    }
+)
+
 
 def build_analysis(
     data: AnalysisData, output_dir: str | Path | None = None
@@ -74,7 +88,7 @@ def build_analysis(
     parameters = analysis_dir / "general_parameters.json"
     write_json(parameters, data.general_parameters)
     artifacts["general_parameters_json"] = parameters
-    charts, metrics = _write_charts(data, images_dir)
+    charts, metrics, presentation = _write_charts(data, images_dir)
     for extension, writer in [
         ("json", write_json),
         ("jsonl", write_jsonl),
@@ -94,16 +108,28 @@ def build_analysis(
         for row in metrics
     ]
     write_json(artifacts["summary"], summary)
-    _write_report(artifacts["report"], data, summary, charts, metrics)
+    _write_report(artifacts["report"], data, summary, charts, metrics, presentation)
     artifacts.update(charts)
     return artifacts
 
 
+def _presentation_state(key: str, values: list[Any]) -> str:
+    """Decide how a metric appears in the report; metrics.json is unaffected."""
+    if key in HIDDEN_METRICS:
+        return "hidden"
+    if not values:
+        return "empty"
+    if len({str(value) for value in values}) == 1:
+        return "constant"
+    return "chart"
+
+
 def _write_charts(
     data: AnalysisData, images_dir: Path
-) -> tuple[dict[str, Path], list[dict[str, Any]]]:
+) -> tuple[dict[str, Path], list[dict[str, Any]], list[dict[str, Any]]]:
     charts: dict[str, Path] = {}
     metrics: list[dict[str, Any]] = []
+    presentation: list[dict[str, Any]] = []
 
     def metric(
         key: str,
@@ -156,6 +182,23 @@ def _write_charts(
             row["counts"] = _counts(values)
         metrics.append(row)
         path = images_dir / f"{key}.svg"
+        state = _presentation_state(key, values)
+        presentation.append(
+            {
+                "key": key,
+                "title": title,
+                "unit": unit,
+                "section": section,
+                "n_valid": row["n_valid"],
+                "n_excluded": row["n_excluded"],
+                "state": state,
+                "value": values[0] if state == "constant" else None,
+            }
+        )
+        if state != "chart":
+            # Never leave a chart from a previous run in a reused output directory.
+            path.unlink(missing_ok=True)
+            return
         title_with_n = title
         if categorical:
             _write_bar_chart(path, _counts(values), title_with_n, population)
@@ -168,9 +211,7 @@ def _write_charts(
                 f"Population: {population}; n={row['n_valid']}; excluded={row['n_excluded']}; unit: {unit}.",
             )
         ]
-        if not values:
-            legend.append((None, None, "No data / Not available — no observed series."))
-        elif categorical:
+        if categorical:
             legend.append(
                 (
                     None,
@@ -416,7 +457,7 @@ def _write_charts(
             path = images_dir / f"{metric['key']}.svg"
             writer(path, metric)
             charts[metric["key"]] = path
-    return charts, metrics
+    return charts, metrics, presentation
 
 
 def _write_plan(
@@ -610,25 +651,56 @@ def _presentation_value(value: Any) -> Any:
     return value
 
 
-def _records_table(records: list[dict[str, Any]]) -> str:
-    records = _presentation_value(records)
-    if not records:
-        return "<p>Not available — n=0 valid observations.</p>"
-    fields = list(dict.fromkeys(key for record in records for key in record))
-    rows = [
-        [
-            json.dumps(record.get(key), ensure_ascii=False)
-            if isinstance(record.get(key), (dict, list))
-            else record.get(key)
-            for key in fields
-        ]
-        for record in records
-    ]
-    return (
-        f'<p>n={len(records)} normalized observations. Missing cells: Not available. See incidents for exclusions.</p><div class="scroll">'
-        + _html_table(fields, rows)
-        + "</div>"
-    )
+INCIDENT_ROW_LIMIT = 50
+
+# Observed-value distributions in general_parameters: {value: count}.
+DISTRIBUTION_PARAMETERS = frozenset(
+    {"observed_schema_versions", "backend", "sample_rate_hz", "project_name"}
+)
+
+EXPORT_UNITS = [
+    ("scenes", "Unique scene (scene_id), independent of HRTF count"),
+    ("sources", "Unique scene/source identity"),
+    ("render_scenes", "Unique scene/HRTF render variant (not unique scenes)"),
+    ("joined_render_sources", "Source–variant row (not unique sources)"),
+    ("degraded_metadata", "Unique degraded record"),
+    ("rt30_records", "Individual method/frequency value with scene/variant provenance"),
+    ("rt30_consolidated", "One RAVEN scene/frequency estimate with dispersion and variants"),
+    ("rt30_comparisons", "Every candidate scene/frequency comparison, including exclusions"),
+    ("rt30_pairs", "Consolidated scene/frequency pair: Sabine, RAVEN and difference (s)"),
+    ("rt30_scene_means", "Unique scene: complete selected-band means per method"),
+    ("materials", "Scene surface material and area"),
+    ("sampling_records", "Scene sampling metadata and attempts"),
+    ("sampling_failures", "Parsed rows of the optional sampling failure index"),
+    ("sampling_batches", "Unique sampling batch"),
+    ("coverage", "Scene/HRTF coverage and authoritative expectations"),
+    ("incidents", "Category/entity/field/path/detail of an affected observation"),
+    ("metrics", "Chart metric with unit, population, counts and contributing values"),
+]
+
+
+def _readable_parameter(key: str, value: Any) -> str:
+    if isinstance(value, dict):
+        if key in DISTRIBUTION_PARAMETERS:
+            return ", ".join(f"{item} (n={count})" for item, count in value.items()) or "Not available"
+        return "; ".join(f"{item}: {_readable_parameter(item, inner)}" for item, inner in value.items())
+    if isinstance(value, list):
+        return ", ".join(_readable_parameter(key, item) for item in value) or "Not available"
+    return "Not available" if value is None else str(value)
+
+
+def _incident_table(incidents: list[dict[str, Any]]) -> str:
+    shown = incidents[:INCIDENT_ROW_LIMIT]
+    text = f'<h3>Incidents</h3><div class="incidents"><p>Showing {len(shown)} of {len(incidents)} incidents. Full causal details, identities and paths: incidents.jsonl.</p>'
+    if shown:
+        text += _html_table(
+            ["Category", "Entity", "Field", "Detail"],
+            [
+                (row.get("category"), row.get("entity"), row.get("field"), row.get("detail"))
+                for row in shown
+            ],
+        )
+    return text + "</div>"
 
 
 CAROUSEL_SCRIPT = """<script>
@@ -689,46 +761,36 @@ def _scene_rt30(data: AnalysisData, scene_id: str, matched: dict[str, Any]) -> s
     comparisons = {row["frequency_hz"]: row for row in candidates}
     included = set(matched.get("frequencies_hz", []))
     frequencies = sorted(set(sabine) | set(raven) | set(comparisons))
-    issues = [
-        row
-        for row in data.incidents
-        if row.get("entity") == f"scene:{scene_id}"
-        or any(
-            row.get("path") == item.get("metadata_path")
-            for item in raw
-            if item.get("metadata_path")
-        )
-    ]
     incidents_by_id = {row.get("incident_id"): row for row in data.incidents}
 
     def seconds(value: Any) -> str:
-        return f"{value:.9g}" if _float_or_none(value) is not None else "No disponible"
+        return f"{value:.9g}" if _float_or_none(value) is not None else "Not available"
 
     def cell(row: dict[str, Any] | None) -> str:
         if row is None:
-            return "No disponible — banda ausente"
+            return "Not available — band absent"
         if _float_or_none(row.get("value_s")) is not None:
             return seconds(row["value_s"])
         cause = incidents_by_id.get(row.get("cause_id"), {})
         reason = (
-            "conflicto entre variantes"
+            "variant conflict"
             if cause.get("category") == "rt30_conflict"
-            else "banda ausente, inválida o ambigua"
+            else "band absent, invalid or ambiguous"
         )
-        return "No disponible — " + reason
+        return "Not available — " + reason
 
     rows = []
     for frequency in frequencies:
         candidate = comparisons.get(frequency, {})
         membership = (
-            "Incluida"
+            "Included"
             if frequency in included
             else (
-                "Excluida — "
-                + str(candidate.get("exclusion_reason") or "sin par válido")
+                "Excluded — "
+                + str(candidate.get("exclusion_reason") or "no valid pair")
             )
             if frequency in comparisons
-            else "Adicional — fuera del promedio comparable"
+            else "Additional — outside comparable mean"
         )
         rows.append(
             [
@@ -743,32 +805,47 @@ def _scene_rt30(data: AnalysisData, scene_id: str, matched: dict[str, Any]) -> s
     band_text = (
         ", ".join(f"{frequency:g}" for frequency in sorted(included)) + " Hz"
         if included
-        else "No disponible"
+        else "Not available"
     )
-    result = f'<section class="scene-rt30" data-scene-rt30="{html.escape(scene_id, quote=True)}"><h5>RT30 por banda — {html.escape(scene_id)}</h5><p>Metadatos en segundos; no son mediciones del WAV. RAVEN: una consolidación por escena/frecuencia, sin duplicar HRTF.</p>'
+    result = f'<section class="scene-rt30" data-scene-rt30="{html.escape(scene_id, quote=True)}"><h5>RT30 by band — {html.escape(scene_id)}</h5><p>Metadata in seconds; not WAV measurements. RAVEN: one consolidation per scene/frequency, without HRTF duplication.</p>'
     result += (
         _html_table(
             [
-                "Frecuencia central (Hz)",
-                "RT30 estimado — Sabine (s)",
-                "T30 informado — RAVEN consolidado (s)",
-                "Promedio comparable",
+                "Central frequency (Hz)",
+                "RT30 estimate — Sabine (s)",
+                "Reported T30 — RAVEN consolidated (s)",
+                "Comparable mean",
             ],
             rows,
         )
         if rows
-        else "<p>No disponible — no hay frecuencias explícitas para esta sala.</p>"
+        else "<p>Not available — no explicit frequencies for this room.</p>"
     )
-    result += f'<p class="scene-rt30-means">Promedio Sabine: {seconds(matched.get("sabine_mean_s"))}; Promedio RAVEN: {seconds(matched.get("raven_mean_s"))}. Unidad: s. Ambos promedios aritméticos usan las mismas bandas: {html.escape(band_text)}; n={n_valid}; excluidas={n_excluded if n_excluded is not None else "No disponible (conjunto esperado ausente)"}. Las bandas adicionales no participan.</p>'
-    result += (
-        "<details><summary>RT30: variantes, dispersión, causas y procedencia originales</summary>"
-        + _records_table(consolidated)
-        + _records_table(candidates)
-        + _records_table(raw)
-        + _records_table(issues)
-        + "</details></section>"
+    result += f'<p class="scene-rt30-means">Sabine mean: {seconds(matched.get("sabine_mean_s"))}; RAVEN mean: {seconds(matched.get("raven_mean_s"))}. Unit: s. Both arithmetic means use the same bands: {html.escape(band_text)}; n={n_valid}; excluded={n_excluded if n_excluded is not None else "Not available (expected set absent)"}. Additional bands do not contribute.</p>'
+    return result + "</section>"
+
+
+def _pose_table(scene: dict[str, Any], sources: list[dict[str, Any]]) -> str:
+    rows = [
+        (
+            "Receiver",
+            scene.get("scene_id"),
+            *(scene.get(f"receiver_{axis}_m") for axis in "xyz"),
+        )
+    ]
+    rows += [
+        (
+            "Source",
+            source.get("source_id"),
+            *(source.get(f"source_{axis}_m") for axis in "xyz"),
+        )
+        for source in sources
+    ]
+    return (
+        '<div class="card-poses"><p>Public-frame positions (m); Y is vertical. Full pose provenance and margins: scenes and sources exports.</p>'
+        + _html_table(["Role", "Identity", "X (m)", "Y (m)", "Z (m)"], rows)
+        + "</div>"
     )
-    return result
 
 
 def _spatial_carousel(
@@ -797,29 +874,25 @@ def _spatial_carousel(
         sources = [
             row for row in data.sources if row.get("scene_id") == scene.get("scene_id")
         ]
-        variants = [
-            {
-                field: row.get(field)
-                for field in ("hrtf_id", "variant_id", "metadata_path")
-            }
-            for row in data.render_scenes
-            if row.get("scene_id") == scene.get("scene_id")
-        ]
+        # Unique identities in first-seen order; arrays without HRTF fall back to the variant.
+        identities = list(
+            dict.fromkeys(
+                str(row.get("hrtf_id") or row.get("variant_id"))
+                for row in data.render_scenes
+                if row.get("scene_id") == scene.get("scene_id")
+            )
+        )
         options.append(f'<option value="{position}">{escaped}</option>')
         hidden = " hidden" if position else ""
         card = f'<article class="carousel-card" data-slide data-scene-id="{escaped}" role="group" aria-roledescription="slide" aria-label="{position + 1} of {len(plans)}: {escaped}"{hidden}>'
         card += (
-            f"<h4>Scene {escaped}</h4><p>Run: {html.escape(str(data.run_dir))}</p><p>Associated HRTF/render variants (context only):</p>"
-            + _records_table(variants)
+            f'<h4>Scene {escaped}</h4><p class="card-hrtfs">HRTF/render variants: '
+            + html.escape(", ".join(identities) or "Not available")
+            + "</p>"
         )
         card += path.read_text(encoding="utf-8")
         card += _scene_rt30(data, scene_id, matched_means.get(scene_id, {}))
-        card += (
-            "<details><summary>Pose provenance and declared margins</summary>"
-            + _records_table([scene])
-            + _records_table(sources)
-            + "</details></article>"
-        )
+        card += _pose_table(scene, sources) + "</article>"
         cards.append(card)
     next_disabled = " disabled" if len(plans) <= 1 else ""
     select_disabled = " disabled" if len(plans) <= 1 else ""
@@ -839,11 +912,12 @@ def _write_report(
     summary: dict[str, Any],
     charts: dict[str, Path],
     metrics: list[dict[str, Any]],
+    presentation: list[dict[str, Any]] | None = None,
 ) -> None:
     def grid(section: str) -> str:
         figures = []
         for metric in metrics:
-            if metric["section"] == section:
+            if metric["section"] == section and metric["key"] in charts:
                 caption = f"{metric['population']}; unit: {metric['unit']}; n={metric['n_valid']}; excluded={metric['n_excluded']}. {metric['exclusion_rule']}"
                 figures.append(
                     "<figure>"
@@ -852,7 +926,29 @@ def _write_report(
                     + html.escape(caption)
                     + "</figcaption></figure>"
                 )
-        return '<div class="grid">' + "".join(figures) + "</div>"
+        return '<div class="grid">' + "".join(figures) + "</div>" + notes(section)
+
+    def notes(section: str) -> str:
+        rows = [row for row in presentation or [] if row["section"] == section]
+        constant = [
+            f'<li class="constant-metric">{html.escape(row["title"])}: '
+            f'{html.escape(_format_value(row["value"]))} {html.escape(row["unit"])}; '
+            f'n={row["n_valid"]}; excluded={row["n_excluded"]}</li>'
+            for row in rows
+            if row["state"] == "constant"
+        ]
+        empty = [
+            f'<li class="empty-metric">{html.escape(row["title"])}: Not available; '
+            f'n=0; excluded={row["n_excluded"]}</li>'
+            for row in rows
+            if row["state"] == "empty"
+        ]
+        text = ""
+        if constant:
+            text += "<p>Single observed value (no chart drawn):</p><ul>" + "".join(constant) + "</ul>"
+        if empty:
+            text += "<p>Not available — no valid observations (no chart drawn):</p><ul>" + "".join(empty) + "</ul>"
+        return text
 
     matched_means = {
         row["scene_id"]: row for row in summary.get("rt30_matched_means", [])
@@ -875,7 +971,7 @@ def _write_report(
         )
     status = summary.get("status", "partial")
     if not data.scenes and not data.render_scenes and not data.degraded_records:
-        status = "No analyzable data — sin datos analizables"
+        status = "No analyzable data"
     count_keys = [
         "unique_scene_count",
         "scenes_with_render_count",
@@ -892,32 +988,61 @@ def _write_report(
     parameters = _html_table(
         ["Parameter", "Observed values and frequencies / available configuration"],
         [
-            (key, json.dumps(value, ensure_ascii=False))
+            (key, _readable_parameter(key, value))
             for key, value in _presentation_value(data.general_parameters).items()
         ],
     )
-    quality = ""
-    for title, records in [
-        ("Scene × HRTF coverage and index reconciliation", data.coverage),
-        ("Materials by surface, wall_id and area", data.materials),
-        ("Sampling records", data.sampling_records),
-        ("Sampling failures (optional index)", data.sampling_failures),
-        ("Unique sampling batches", data.sampling_batches),
-        ("Hearing profiles, status and declared asymmetry", data.degraded_records),
-        ("Render variants and declared background noise", data.render_scenes),
-        ("Incidents (auditable identities and paths)", data.incidents),
-    ]:
-        quality += (
-            f"<details><summary>{title}</summary>{_records_table(records)}</details>"
+    hrtf_counts = next(
+        (row.get("counts", {}) for row in metrics if row["key"] == "hist_employed_hrtf"),
+        {},
+    )
+    hrtf = (
+        '<h3>HRTF coverage</h3><div class="hrtf-coverage">'
+        + (
+            _html_table(
+                ["HRTF identity", "Render variants"],
+                sorted(hrtf_counts.items(), key=lambda item: (-item[1], item[0])),
+            )
+            if hrtf_counts
+            else "<p>Not available — no employed HRTF identities.</p>"
         )
+        + "</div>"
+    )
+    rt_table = (
+        _html_table(
+            [
+                "Central frequency (Hz)",
+                "Pairs",
+                "Mean Sabine (s)",
+                "Mean RAVEN (s)",
+                "Mean RAVEN − Sabine (s)",
+            ],
+            [
+                (
+                    f"{row['frequency_hz']:g}",
+                    row["n_pairs"],
+                    row["mean_sabine_s"],
+                    row["mean_raven_s"],
+                    row["mean_raven_minus_sabine_s"],
+                )
+                for row in rt_by_band
+            ],
+        )
+        if rt_by_band
+        else "<p>Not available — n=0 valid pairs.</p>"
+    )
+    quality = _incident_table(data.incidents)
+    exports = _html_table(
+        ["File stem", "Observation unit"], [(stem, unit) for stem, unit in EXPORT_UNITS]
+    )
     body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Output Analysis Report</title>
 <style>body{{font:14px/1.5 Arial,sans-serif;color:#1f2937;background:#f8fafc;margin:0}}header,main{{padding:24px;max-width:1200px;margin:auto}}h2{{border-bottom:1px solid #cbd5e1}}section{{margin-bottom:32px}}table{{border-collapse:collapse;width:100%;background:white}}td,th{{border:1px solid #cbd5e1;text-align:left;padding:8px;vertical-align:top;overflow-wrap:anywhere}}th{{background:#e2e8f0}}.scroll{{overflow:auto;max-height:560px}}.grid{{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}}figure{{margin:0;background:white;padding:10px}}svg{{max-width:100%;height:auto}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}figcaption{{color:#475569}}details{{margin:12px 0;padding:10px;background:white;border:1px solid #e2e8f0}}summary{{cursor:pointer;font-weight:bold}}[hidden]{{display:none!important}}.carousel{{border:1px solid #cbd5e1;padding:16px;margin-bottom:24px}}.carousel-controls{{display:flex;flex-wrap:wrap;gap:10px;align-items:center}}button,select{{font:inherit;padding:8px;max-width:100%}}:focus-visible{{outline:3px solid #2563eb;outline-offset:3px}}.carousel-card{{overflow-wrap:anywhere}}.carousel-card svg{{display:block;margin:auto}}</style></head>
 <body><header><h1>Output Analysis Report</h1><p>{html.escape(str(data.run_dir))}</p><p>Status: {html.escape(str(status))}</p></header><main>
-<section id="general-parameters"><h2>General parameters</h2><p>Supported scene/render schema: 3.0 only. Metadata only; no audio measurements.</p>{counts}{parameters}{grid("general")}</section>
+<section id="general-parameters"><h2>General parameters</h2><p>Supported scene/render schema: 3.0 only. Metadata only; no audio measurements.</p>{counts}{parameters}{grid("general")}{hrtf}</section>
 <section><h2>Positions by geometry</h2><p>One exact public-frame X/Z floor plan per unique scene. Y is vertical. No HRTF duplication.</p>{"".join(spatial)}</section>
-<section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 scene means</h3><p>Complete mean RT30 per unique scene over its selected central frequencies, from metadata (seconds); not a WAV measurement. A scene is excluded from a method when any selected band is missing, invalid or conflicted. Sabine and RAVEN share bin edges and count scale; dashed marks are sampling target counts when available.</p>{grid("scene_means")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{_records_table(rt_by_band)}<details><summary>Per-scene means on matched bands</summary>{_records_table(summary.get("rt30_matched_means", []))}</details><details><summary>All comparison candidates and exclusions</summary>{_records_table(data.rt30_comparisons)}</details><details><summary>All aligned RT30 pairs</summary>{_records_table(data.rt30_pairs)}</details><details><summary>Consolidated RAVEN means, variant counts and dispersion</summary>{_records_table(data.rt30_consolidated)}</details><details><summary>Individual method values: variant/frequency audit</summary>{_records_table(data.rt30_records)}</details></section>
-<section><h2>Coverage and metadata quality</h2><p>Expected coverage unavailable unless an authoritative expectation is present in the coverage records. Missing optional failure indexes do not mean zero failures. Incident categories overlap; do not sum them as distinct affected entities.</p>{_html_table(["Category", "Count"], list(summary.get("incident_counts", {}).items()))}<details><summary>Population definitions and valid/excluded counts</summary><pre>{html.escape(json.dumps(summary.get("populations", {}), ensure_ascii=False, indent=2))}</pre></details>{grid("quality")}{quality}</section>
-<section><h2>Data exports</h2><p>All figures are embedded; this HTML works offline by itself. Original SVGs are also in images/. scenes and sources contain unique scene/source observations. render_scenes contains unique render variants; joined_render_sources.jsonl and .csv contain source–variant rows. degraded_metadata contains unique degraded records. Each population also has JSON, JSONL and CSV exports. general_parameters.json, metrics.json, rt30_pairs, rt30_records, materials, sampling_records, sampling_batches, coverage, incidents and summary.json preserve values, denominators and provenance for audit. Null means Not available, never an imputed zero.</p></section>
+<section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 scene means</h3><p>Complete mean RT30 per unique scene over its selected central frequencies, from metadata (seconds); not a WAV measurement. A scene is excluded from a method when any selected band is missing, invalid or conflicted. Sabine and RAVEN share bin edges and count scale; dashed marks are sampling target counts when available.</p>{grid("scene_means")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{rt_table}<p>Record-level RT30 audit data (per-scene matched means, candidates and exclusions, aligned pairs, consolidated RAVEN values and individual variant/frequency values) is in the rt30_scene_means, rt30_comparisons, rt30_pairs, rt30_consolidated and rt30_records exports and summary.json; see Data exports.</p></section>
+<section><h2>Coverage and metadata quality</h2><p>Expected coverage unavailable unless an authoritative expectation is present in the coverage records. Missing optional failure indexes do not mean zero failures. Incident categories overlap; do not sum them as distinct affected entities.</p>{_html_table(["Category", "Count"], list(summary.get("incident_counts", {}).items()))}<details><summary>Population definitions and valid/excluded counts</summary><pre>{html.escape(json.dumps(summary.get("populations", {}), ensure_ascii=False, indent=2))}</pre></details>{grid("quality")}<p>Coverage, materials, sampling records/failures/batches, degraded records and render variants are available as record-level exports; see Data exports.</p>{quality}</section>
+<section id="data-exports"><h2>Data exports</h2><p>All figures are embedded; this HTML works offline by itself. Original SVGs are also in images/. Every population below has JSON, JSONL and CSV exports next to this report (for example joined_render_sources.jsonl and .csv contain source–variant rows). general_parameters.json, metrics.json and summary.json preserve values, denominators and provenance for audit, including metrics not drawn in this report. Null means Not available, never an imputed zero.</p>{exports}</section>
 </main>{CAROUSEL_SCRIPT}</body></html>"""
     report_path.write_text(body, encoding="utf-8", newline="\n")
 
