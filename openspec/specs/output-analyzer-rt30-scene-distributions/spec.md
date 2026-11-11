@@ -50,7 +50,7 @@ Every scene-mean SVG SHALL contain a visible legend group with the metric's popu
 - **THEN** its legend text contains "Population:", "excluded=", "unit:", the central frequencies in Hz, and the edge source
 
 ### Requirement: Scene-mean section in the HTML report
-`report.html` SHALL include a "RT30 scene means" subsection within "Acoustics and sources" that embeds every scene-mean histogram and scatter SVG, each with a caption stating population, unit, n, excluded count and exclusion rule. Existing report sections SHALL keep their current content.
+`report.html` SHALL include a "RT30 scene means" subsection within "Acoustics and sources" that embeds every scene-mean histogram and scatter SVG, each with a caption stating population, unit, n, excluded count and exclusion rule. Other report sections SHALL follow the `output-analyzer-report` capability.
 
 #### Scenario: Report embeds scene-mean charts
 - **WHEN** the analyzer completes on a run with complete scene means
@@ -58,7 +58,7 @@ Every scene-mean SVG SHALL contain a visible legend group with the metric's popu
 
 #### Scenario: Existing sections unaffected
 - **WHEN** the report is generated after this change
-- **THEN** the general, acoustics, positions-by-geometry, coverage and data-export sections still render the same charts and tables as before
+- **THEN** the general, acoustics, positions-by-geometry, coverage and data-export sections render the charts and tables defined by `output-analyzer-report`, and the "RT30 scene means" subsection keeps every scene-mean chart
 
 ### Requirement: Empty scene-mean populations render explicitly
 When a scene-mean metric has no valid observations, the analyzer SHALL still write its SVG with a "No data / Not available" message and complete the report without error.
