@@ -487,7 +487,7 @@ def _write_plan(
         actors.append(
             (f"{source.get('source_id')} · {event}", source, "source", colors[event])
         )
-    positioned = []
+    positioned, oriented = [], []
     for label, record, prefix, color in actors:
         x, z = (
             _float_or_none(record.get(prefix + "_x_m")),
@@ -495,6 +495,14 @@ def _write_plan(
         )
         if x is not None and z is not None:
             positioned.append((label, x, z, prefix, color))
+            yaw = _float_or_none(record.get(prefix + "_yaw_deg"))
+            if yaw is not None:
+                key = (
+                    "receiver"
+                    if prefix == "receiver"
+                    else f"source:{record.get('source_id')}"
+                )
+                oriented.append((key, x, z, yaw, color))
     bounds = points + [(x, z) for _, x, z, _, _ in positioned]
     xmin, xmax = min(x for x, _ in bounds), max(x for x, _ in bounds)
     zmin, zmax = min(z for _, z in bounds), max(z for _, z in bounds)
@@ -516,6 +524,11 @@ def _write_plan(
     for x, z in points:
         px, py = project(x, z)
         parts.append(f'<circle cx="{px}" cy="{py}" r="1" data-x="{x}" data-z="{z}"/>')
+    if oriented:
+        parts.append('<g class="orientation-arrows">')
+        for key, x, z, yaw, color in oriented:
+            parts.append(_orientation_arrow(*project(x, z), yaw, key, color))
+        parts.append("</g>")
     for label, x, z, prefix, color in positioned:
         px, py = project(x, z)
         title = html.escape(f"{label}: X={x:g}, Z={z:g} m")
@@ -586,6 +599,24 @@ def _write_plan(
                 f"Source positions: No data / Not available; n=0; excluded={len(sources)}; unit: source pose.",
             )
         )
+    if oriented:
+        legend.append(
+            (
+                None,
+                None,
+                "Orientation arrows: horizontal projection of yaw (yaw 0 = +X, positive yaw toward -Z); "
+                f"pitch and roll not shown; fixed length. n={len(oriented)}, excluded={len(positioned) - len(oriented)}.",
+            )
+        )
+    else:
+        legend.append(
+            (
+                None,
+                None,
+                "Orientation: Not available; no positioned receiver or source has a valid yaw; "
+                f"n=0, excluded={len(positioned)}.",
+            )
+        )
     legend.append(
         (
             None,
@@ -595,6 +626,34 @@ def _write_plan(
     )
     _append_legend(path, legend)
     return True
+
+
+ORIENTATION_ARROW_PX = 28.0
+
+
+def _orientation_arrow(
+    px: float, py: float, yaw: float, key: str, color: str
+) -> str:
+    """Fixed-length arrow along the yaw's X/Z projection: plan (cos y, -sin y)."""
+    radians = math.radians(yaw)
+    # Plan +Z is screen up, so plan -sin(y) in Z becomes +sin(y) in screen y.
+    ux, uy = math.cos(radians), math.sin(radians)
+    if abs(ux) < 1e-12:
+        ux = 0.0
+    if abs(uy) < 1e-12:
+        uy = 0.0
+    x2, y2 = px + ux * ORIENTATION_ARROW_PX, py + uy * ORIENTATION_ARROW_PX
+    head, wing = 8.0, 4.0
+    bx, by = x2 - ux * head, y2 - uy * head
+    left = (bx - uy * wing, by + ux * wing)
+    right = (bx + uy * wing, by - ux * wing)
+    escaped = html.escape(key, quote=True)
+    return (
+        f'<line x1="{px}" y1="{py}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="1.5" '
+        f'stroke-opacity="0.85" data-orientation="{escaped}" data-yaw="{yaw:g}"/>'
+        f'<polygon points="{x2:.4f},{y2:.4f} {left[0]:.4f},{left[1]:.4f} {right[0]:.4f},{right[1]:.4f}" '
+        f'fill="{color}" fill-opacity="0.85"><title>{escaped}: yaw {yaw:g} deg</title></polygon>'
+    )
 
 
 def _append_legend(

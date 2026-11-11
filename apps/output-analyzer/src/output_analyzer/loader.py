@@ -533,6 +533,13 @@ def _source_record(sid, source, scene, reader, provenance, raven=False):
     )
     for i, axis in enumerate("xyz"):
         record[f"source_{axis}_m"] = position[i] if position else None
+    # Public-frame yaw from manifests only; RAVEN summaries would need reflection.
+    yaw = None if raven else _nested(source, "orientation_deg", "yaw")
+    record["source_yaw_deg"] = (
+        None
+        if yaw is None
+        else reader.value(yaw, entity, "orientation_deg.yaw", provenance)
+    )
     _spatial(record, position, scene, reader, entity)
     return record
 
@@ -882,7 +889,7 @@ def load_run(run_dir: str | Path) -> AnalysisData:
                         sid, source, scene, reader, doc["metadata_path"], True
                     )
                 else:
-                    copy = dict(source, position_m=None)
+                    copy = dict(source, position_m=None, orientation_deg=None)
                     normalized = _source_record(
                         sid, copy, scene, reader, doc["metadata_path"]
                     )
