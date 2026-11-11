@@ -38,7 +38,17 @@ This is metadata compatibility, not microphone-level analysis or beamforming.
 
 `report.html` is self-contained: all charts are inline SVG and no network or sibling images are required. Separate SVG files remain available under `images/`.
 
-The report has one general-parameters section, three spatial groups (`shoebox`, `l_shape`, `trapezoid`), global acoustics/source analysis, and metadata coverage/quality. General parameters retain distinct observed values and their frequencies. Each geometry has an independent manual carousel with one exact floor plan per scene, including concavity and offsets and equal axis scales. Previous/Next, direct scene selection and Left/Right/Home/End keyboard controls navigate without autoplay or wrapping. Empty and single-scene groups disable navigation. Cards show the run, scene identity and associated HRTF/variant identities without duplicating scenes. A square marks the receiver and colored circles mark sources/events. Expand pose provenance to audit the declared coordinates and margins.
+The report has one general-parameters section, three spatial groups (`shoebox`, `l_shape`, `trapezoid`), global acoustics/source analysis, and metadata coverage/quality. General parameters retain distinct observed values and their frequencies. Each geometry has an independent manual carousel with one exact floor plan per scene, including concavity and offsets and equal axis scales. Previous/Next, direct scene selection and Left/Right/Home/End keyboard controls navigate without autoplay or wrapping. Empty and single-scene groups disable navigation. Cards show the scene identity, its associated HRTF/variant identities as one inline list, the floor plan, the RT30 per-band table and a compact table of receiver/source positions (m), without duplicating scenes. A square marks the receiver and colored circles mark sources/events. Full pose provenance and declared margins are in the `scenes` and `sources` exports.
+
+### What the report shows
+
+The report is a reading document; record-level audit data lives only in the exports listed in its Data exports section.
+
+- **Hidden charts**: `hist_room_length`, `hist_room_width` (bounding extents), `rt30_sabine_estimate`, `rt30_raven_rpf_gett30` (all bands pooled; superseded by the RT30 scene-mean charts), `sampling_attempts` (duplicates `scene_attempt`), `sampling_requested_bin` (shown as target marks on the scene-mean histograms), `surface_area` and `hist_employed_hrtf` (replaced by an HRTF coverage table sorted by variant count). Their `metrics.json` rows are unchanged.
+- **Constant metrics** (one distinct observed value) are shown as a single summary line with value, unit and n; no SVG is written.
+- **Empty metrics** (n=0) are listed as Not available with their excluded count; no SVG is written. RT30 scene-mean charts are exempt and keep their explicit No data SVG.
+- **No raw record tables**: RT30 records, consolidated values, comparisons, pairs, matched means, coverage, materials, sampling and render-variant records are not embedded. Incidents are capped at 50 rows with the total count and a pointer to `incidents.jsonl`.
+- Charts not drawn are removed from `images/` when the output directory is reused.
 
 Public coordinates are `[x,y,z]`, with Y vertical and `[x,z]` in the floor plane. Manifest poses take precedence. Documented RAVEN fallback converts `[x,y,z]` to public `[x,y,-z]`; unknown frames are excluded. Area is computed from the actual polygon and volume is area × height. X/Z dimensions are bounding extents, never a substitute for real area. Missing yaw does not become zero; coincident poses retain distance zero and have undefined angles.
 
@@ -78,7 +88,7 @@ All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/J
 
 An excluded count refers to the named normalized population and field. Documents rejected before normalization are reported separately in incidents. Category totals may overlap: use the distinct affected-entity total from the summary rather than summing categories. Event absence is excluded from event categories. Unknown expected coverage is unavailable, never 0% or 100%.
 
-The quality section includes materials, HRTF reconciliation, sampling/batch/failure data, auditory profiles/status/common-band asymmetry and declared background noise. Missing metadata displays unavailable coverage; no effective SNR or audio level is inferred.
+The quality section charts materials, sampling attempts and obtained bins, auditory profiles/status/common-band asymmetry and declared background noise (subject to the constant/empty rules), plus incident counts and a bounded incident table; HRTF reconciliation and sampling/batch/failure records are in their exports. Missing metadata displays unavailable coverage; no effective SNR or audio level is inferred.
 
 ## Validation
 
@@ -90,13 +100,13 @@ Tests use small current-contract fixtures and do not require MATLAB, RAVEN or WA
 
 Generic geometry/identity equivalence retains tolerance 1e-8. RT30 uses separate shared constants `RT30_ABS_TOL_S = 1e-6` seconds and `RT30_REL_TOL = 1e-6` (dimensionless): every valid variant pair must satisfy `abs(a-b) <= max(RT30_ABS_TOL_S, RT30_REL_TOL * max(abs(a), abs(b)))`. This numerical resolution (one microsecond/one part per million) is not certified simulator precision or an acoustically meaningful threshold. It is fixed, not fitted per run. Constants and units are included in summary/general-parameter exports and consolidated rows. Numerical equivalence does not prove determinism. Sabine comparison eligibility follows explicit mean_bands_hz; method distributions retain all available explicit bands, including additional RAVEN bands.
 
-Every exported/embedded SVG includes a visible legend: room contour and actor/event shapes/colors, histogram series and observation counts, categorical colors, RT30 frequencies/method/sign, or an unavailable-data state with valid/excluded counts and units. Legends wrap inside the SVG canvas.
+Every exported/embedded SVG includes a visible legend: room contour and actor/event shapes/colors, histogram series and observation counts, categorical colors, RT30 frequencies/method/sign, or (scene-mean charts only) an unavailable-data state with valid/excluded counts and units. Legends wrap inside the SVG canvas.
 
-The verbose `render_configuration` block is omitted entirely from HTML presentation, including expandable tables; it remains intact in `general_parameters.json` and audit exports. No population changes follow from hiding this field.
+The verbose `render_configuration` block is omitted entirely from HTML presentation; other general parameters are shown as readable text (`value (n=count)` or `key: value`). It remains intact in `general_parameters.json` and audit exports. No population changes follow from hiding this field.
 
 CLI quality diagnostics summarize categories, affected scenes/pairs and a bounded identity sample. Consult `incidents.jsonl` and `rt30_comparisons.jsonl` for complete causal details; derived exclusions are not independent failures.
 
-Each room card in Positions by geometry includes a frequency table for Sabine RT30 and consolidated RAVEN T30 (seconds). Comparable arithmetic means reuse the same valid selected frequency pairs, with the frequency list and valid/excluded counts. Additional bands remain visible but never enter those means. Missing or conflicted values show unavailable with a reason, preserving the other method. Expand the room RT30 audit details for original values, variant support, spread, causes and provenance. The table moves with its room card using every carousel control.
+Each room card in Positions by geometry includes a frequency table for Sabine RT30 and consolidated RAVEN T30 (seconds). Comparable arithmetic means reuse the same valid selected frequency pairs, with the frequency list and valid/excluded counts. Additional bands remain visible but never enter those means. Missing or conflicted values show Not available with a reason, preserving the other method. Original values, variant support, spread, causes and provenance are in the `rt30_records`, `rt30_consolidated`, `rt30_comparisons` and `incidents` exports. The table moves with its room card using every carousel control.
 
 ## Documentation and pipeline context
 

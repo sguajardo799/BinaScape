@@ -75,7 +75,7 @@ def test_empty_run_reports_unavailable_and_incidents(tmp_path):
     data = load_run(tmp_path)
     artifacts = build_analysis(data)
     report = artifacts["report"].read_text(encoding="utf-8")
-    assert "No analyzable data" in report or "sin datos analizables" in report
+    assert "No analyzable data" in report
     assert "Not available" in report
     assert json.loads(artifacts["scenes_json"].read_text(encoding="utf-8")) == []
 
@@ -193,12 +193,12 @@ def test_carousels_keep_one_card_per_scene_and_independent_controls(sample_run):
         ]
     )
     data.render_scenes.append(
-        dict(data.render_scenes[0], variant_id="new-hrtf-variant")
+        dict(data.render_scenes[0], variant_id="new-hrtf-variant", hrtf_id="new-hrtf")
     )
     report = build_analysis(data)["report"].read_text(encoding="utf-8")
     assert report.count('data-carousel="') == 3
     assert report.count('class="carousel-card"') == 3
-    assert "new-hrtf-variant" in report
+    assert "binaural_hrtf, new-hrtf</p>" in report
     assert 'data-scene-id="second-scene"' in report
     assert "data-scene-select" in report and 'aria-live="polite"' in report
     assert "ArrowLeft" in report and "ArrowRight" in report and "Home: 0" in report
@@ -236,13 +236,15 @@ def test_every_exported_svg_has_visible_legend_and_metric_population(sample_run)
             assert "Population:" in text and "excluded=" in text and "unit:" in text
         if path.name == "rt30_difference.svg":
             assert "RAVEN − Sabine (s)" in text and "Central frequencies (Hz)" in text
-        if path.name == "sampling_receiver_attempt.svg":
-            assert "No data / Not available" in text
-            assert legend.find("svg:rect", namespace) is None
         if path.name.startswith("rt30_scene_mean_"):
             assert "Central frequencies (Hz): 125, 250" in text
             assert "Bin edges: data_derived." in text
     assert sum(path.name.startswith("rt30_scene_mean_") for path in artifacts.values()) == 3
+    assert "rt30_difference" in artifacts
+    # Empty metrics are listed in the report instead of drawn as empty SVGs.
+    assert "sampling_receiver_attempt" not in artifacts
+    report = artifacts["report"].read_text(encoding="utf-8")
+    assert '<li class="empty-metric">Receiver sampling attempt: Not available; n=0; excluded=1</li>' in report
 
 
 def test_plan_without_poses_has_no_actor_legend_symbols(tmp_path):
@@ -304,10 +306,10 @@ def test_scene_rt30_table_common_means_extra_bands_and_identity(sample_run):
     first = _rt30_card(report, "scene_static_0001")
     second = _rt30_card(report, "other_scene")
     assert "0.875" in first and "0.5" in first
-    assert "8000" in first and "Adicional" in first
+    assert "8000" in first and "Additional" in first
     assert "n=2" in first and "125, 250 Hz" in first
     assert first.index("125</td>") < first.index("250</td>") < first.index("8000</td>")
-    assert "n=0" in second and "No disponible" in second
+    assert "n=0" in second and "Not available" in second
     assert "0.875" not in second
     assert report.count("data-scene-rt30=") == 2
 
@@ -322,10 +324,9 @@ def test_scene_rt30_conflict_keeps_sabine_and_excludes_only_bad_pair(sample_run)
     first = _rt30_card(
         build_analysis(data)["report"].read_text(encoding="utf8"), "scene_static_0001"
     )
-    assert "conflicto" in first and "No disponible" in first
-    assert "n=1" in first and "excluidas=1" in first
+    assert "Not available — variant conflict" in first
+    assert "n=1" in first and "excluded=1" in first
     assert "0.75" in first and "0.5" in first
-    assert "n_variants" in first and "rt30_conflict" in first
 
 
 def test_scene_rt30_no_pairs_never_imputes_zero(sample_run):
@@ -337,9 +338,9 @@ def test_scene_rt30_no_pairs_never_imputes_zero(sample_run):
         build_analysis(load_run(sample_run))["report"].read_text(encoding="utf8"),
         "scene_static_0001",
     )
-    assert "n=0" in first and "excluidas=2" in first
-    assert "Promedio Sabine: No disponible" in first
-    assert "Promedio RAVEN: No disponible" in first
+    assert "n=0" in first and "excluded=2" in first
+    assert "Sabine mean: Not available" in first
+    assert "RAVEN mean: Not available" in first
 
 
 SVG_NS = {"svg": "http://www.w3.org/2000/svg"}
