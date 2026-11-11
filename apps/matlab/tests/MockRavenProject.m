@@ -24,6 +24,9 @@ classdef MockRavenProject < handle
         generate_rir
         generate_brir
         impulse_responses
+        pathMaterials = ''
+        modelFileList = ''
+        call_log = {}
     end
 
     methods
@@ -56,7 +59,18 @@ classdef MockRavenProject < handle
             obj.shoebox_dims = [x y z];
         end
 
+        function setPathMaterials(obj, path_materials)
+            obj.call_log{end + 1} = 'setPathMaterials';
+            obj.pathMaterials = path_materials;
+        end
+
+        function setModel(obj, filename)
+            obj.call_log{end + 1} = 'setModel';
+            obj.modelFileList = filename;
+        end
+
         function output_path = setModelToFaces(obj, points, faces, materials)
+            obj.call_log{end + 1} = 'setModelToFaces';
             obj.face_points = points;
             obj.face_definitions = faces;
             obj.face_materials = materials;
@@ -67,7 +81,16 @@ classdef MockRavenProject < handle
             else
                 obj.room_material_names = obj.room_material_names_override;
             end
-            output_path = 'mock-room.ac';
+            % Mirrors itaRavenProject: the model goes to the RavenModels folder
+            % of the current model path, then becomes the current model.
+            marker = strfind(obj.modelFileList, 'RavenModels');
+            if isempty(marker)
+                output_path = 'mock-room.ac';
+            else
+                output_path = fullfile(obj.modelFileList(1:marker(1) + 10), ...
+                    sprintf('room_%d_faces', numel(faces)));
+            end
+            obj.modelFileList = output_path;
         end
 
         function names = getRoomMaterialNames(obj)
@@ -75,6 +98,7 @@ classdef MockRavenProject < handle
         end
 
         function setMaterial(obj, slot_name, absorp, scatter)
+            obj.call_log{end + 1} = 'setMaterial';
             obj.material_calls(end + 1) = struct( ...
                 'slot_name', slot_name, ...
                 'absorp', absorp, ...

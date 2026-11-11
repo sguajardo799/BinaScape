@@ -82,7 +82,7 @@ function ctx = build_polygon_room_from_config(ctx)
     for iFace = 1:numel(faces)
         faces{iFace}(1) = iFace;
     end
-    rpf.setModelToFaces(points, faces, face_materials);
+    ctx.raven_model_path = write_model_in_workspace(ctx, rpf, points, faces, face_materials);
     actual = normalize_polygon_slots(rpf.getRoomMaterialNames);
     if numel(unique(actual)) ~= numel(actual), error('BinaScape:Matlab:DuplicateRoomMaterialSlot','RAVEN devolvió slots duplicados.'); end
     missing = expected(~ismember(expected,actual)); if ~isempty(missing), error('BinaScape:Matlab:MissingRoomMaterialSlot','Faltan slots: %s.',strjoin(missing,', ')); end
@@ -101,6 +101,23 @@ function ctx = build_polygon_room_from_config(ctx)
         applied(i)=struct('surface',logical{i},'slot_name',expected{i},'material_id',ref.material_id,'material_path',ref.material_path,'absorp',absorp,'scatter',scatter);
     end
     ctx.rpf=rpf; ctx.applied_room_materials=applied;
+end
+
+function model_path = write_model_in_workspace(ctx, rpf, points, faces, face_materials)
+    % setModelToFaces escribe room_<N>_faces en la carpeta RavenModels del
+    % modelo actual. Apuntar antes el modelo al workspace del proyecto evita
+    % que escenas concurrentes con igual número de caras compartan archivo.
+    if ~isfield(ctx, 'workspace') || ~isstruct(ctx.workspace) || ~isfield(ctx.workspace, 'models_path')
+        error('BinaScape:Matlab:MissingRavenWorkspace', ...
+            'El render poligonal requiere ctx.workspace (configure_raven_workspace).');
+    end
+    models_path = char(string(ctx.workspace.models_path));
+    rpf.setModel(fullfile(models_path, 'pending.ac'));
+    model_path = char(string(rpf.setModelToFaces(points, faces, face_materials)));
+    if ~strncmpi(model_path, [models_path filesep], numel(models_path) + 1)
+        error('BinaScape:Matlab:RavenModelOutsideWorkspace', ...
+            'RAVEN escribió el modelo fuera del workspace del proyecto: %s', model_path);
+    end
 end
 
 function names = normalize_polygon_slots(value)

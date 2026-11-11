@@ -85,6 +85,8 @@ function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, f
     run_ctx.seed_source = cfg.render.seed_source;
 
     ctx = prepare_raven_project(run_manifest, run_ctx);
+    % Se ejecuta al salir de la función, con éxito o con error.
+    workspace_cleanup = onCleanup(@() cleanup_raven_workspace(ctx.workspace)); %#ok<NASGU>
     ctx = build_room_from_config(ctx);
     if is_array
         ctx = build_circular_array_receiver(ctx);
@@ -135,6 +137,7 @@ function run_result = render_single_receiver_run(cfg, active_hrtf, output_cfg, f
     end
     [mix, background_noise_summary] = apply_background_noise(mix, fs, cfg.background_noise, run_ctx);
     mix_summary.background_noise = background_noise_summary;
+    mix_summary.raven_workspace = build_raven_workspace_summary(ctx);
 
     run_result = struct();
     run_result.hrtf_id = '';
