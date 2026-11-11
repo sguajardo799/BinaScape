@@ -305,10 +305,3 @@ The backend SHALL support Pyroomacoustics only within the version range declared
 #### Scenario: RAVEN-only installation
 - **WHEN** the orchestrator is installed without the `pyroomacoustics` extra and runs a RAVEN experiment
 - **THEN** no Pyroomacoustics import is attempted and the experiment behaves as before this change
-
-### Requirement: Legacy circular-array angular convention preserved
-The backend SHALL preserve the existing circular-array microphone positions: microphone 0 points toward public +Z at receiver yaw +90°. The ring's angular direction is opposite to receiver view-vector yaw and `fixed_position` azimuth. This known risk SHALL be recorded and characterized by tests, not corrected here. A correction SHALL require a separate, explicitly authorized specification change.
-
-#### Scenario: Characterized yaw behavior
-- **WHEN** a four-microphone array with yaw +90° is rendered
-- **THEN** microphone 0 is at public offset `[0, 0, +r]` from the center, while a `fixed_position` source at azimuth 0° with receiver yaw +90° lies toward public -Z

@@ -42,7 +42,7 @@ function array = validate_circular_array_descriptor(array, center, yaw)
             error('BinaScape:Matlab:InvalidArray', 'Micrófono/canal inválido en posición %d.', k);
         end
         theta = deg2rad(yaw + 360 * (k-1) / n);
-        expected = center + r * [cos(theta), 0, sin(theta)];
+        expected = center + r * [cos(theta), 0, -sin(theta)];
         position = double(mic.position_m(:).');
         if any(abs(position - expected) > 1e-6)
             error('BinaScape:Matlab:InvalidArray', 'Posición de micrófono %d inconsistente.', k-1);

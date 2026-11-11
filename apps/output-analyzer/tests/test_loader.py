@@ -426,3 +426,53 @@ def test_invalid_variant_and_material_conflict_keep_distinct_causes(sample_run):
     assert excluded["cause_id"] == conflict["incident_id"]
     assert unavailable["cause_id"] == invalid["incident_id"]
     assert invalid["entity"].startswith("variant:")
+
+
+@pytest.mark.parametrize(
+    "yaw, offset, global_doa, relative_doa",
+    [
+        (0.0, [1.0, 0.0, 0.0], 0.0, 0.0),
+        (0.0, [0.0, 0.0, -1.0], 90.0, 90.0),
+        (0.0, [0.0, 0.0, 1.0], -90.0, -90.0),
+        (90.0, [0.0, 0.0, -1.0], 90.0, 0.0),
+        (-90.0, [-1.0, 0.0, 0.0], -180.0, -90.0),
+    ],
+)
+def test_doa_uses_canonical_pose_convention(sample_run, yaw, offset, global_doa, relative_doa):
+    scene, render = documents(sample_run)
+    receiver = [4.0, 1.5, 3.0]
+    position = [r + o for r, o in zip(receiver, offset)]
+
+    def change(x):
+        x["receiver"]["orientation_deg"]["yaw"] = yaw
+        x["sources"] = x["sources"][:1]
+        x["sources"][0]["position_m"] = position
+
+    mutate(scene, change)
+    mutate(render, lambda x: x["summary"].update(sources=[{**x["summary"]["sources"][0], "position_m": position}], n_sources=1))
+    data = load_run(sample_run)
+    source = data.sources[0]
+    assert source["global_doa_deg"] == pytest.approx(global_doa, abs=1e-9)
+    assert source["receiver_relative_doa_deg"] == pytest.approx(relative_doa, abs=1e-9)
+
+
+@pytest.mark.parametrize("yaw", [-135.0, -90.0, 0.0, 45.0, 90.0, 180.0])
+@pytest.mark.parametrize("azimuth", [-90.0, 0.0, 30.0, 90.0])
+def test_fixed_position_azimuth_round_trips_to_relative_doa(sample_run, yaw, azimuth):
+    import math
+
+    # fixed_position placement per spatial-pose-convention: forward(yaw + azimuth).
+    angle = math.radians(yaw + azimuth)
+    receiver = [4.0, 1.5, 3.0]
+    position = [receiver[0] + 2 * math.cos(angle), receiver[1], receiver[2] - 2 * math.sin(angle)]
+    scene, render = documents(sample_run)
+
+    def change(x):
+        x["receiver"]["orientation_deg"]["yaw"] = yaw
+        x["sources"] = x["sources"][:1]
+        x["sources"][0]["position_m"] = position
+
+    mutate(scene, change)
+    mutate(render, lambda x: x["summary"].update(sources=[{**x["summary"]["sources"][0], "position_m": position}], n_sources=1))
+    relative = load_run(sample_run).sources[0]["receiver_relative_doa_deg"]
+    assert (relative - azimuth + 180) % 360 - 180 == pytest.approx(0.0, abs=1e-6)

@@ -497,7 +497,8 @@ def _source_record(sid, source, scene, reader, provenance, raven=False):
     azimuth = elevation = relative = None
     if distance is not None and distance > TOLERANCE:
         dx, dy, dz = [position[i] - receiver[i] for i in range(3)]
-        azimuth = (math.degrees(math.atan2(dx, dz)) + 180) % 360 - 180
+        # Canonical pose convention: 0 deg = +X, positive toward -Z (heard on the right in renders).
+        azimuth = (math.degrees(math.atan2(-dz, dx)) + 180) % 360 - 180
         elevation = math.degrees(math.atan2(dy, math.hypot(dx, dz)))
         if scene.get("receiver_yaw_deg") is not None:
             relative = (azimuth - scene["receiver_yaw_deg"] + 180) % 360 - 180

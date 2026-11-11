@@ -29,7 +29,7 @@ function testArrayMicrophonesRequireContainmentWithoutCenterWallMargin(testCase)
     cfg.receiver.position_m = [2 1.5 0.51];
     cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
     normalized = validate_static_scene_config(cfg);
-    verifyEqual(testCase, normalized.receiver.circular_array.microphones(4).position_m(3), 0.46, 'AbsTol', 1e-10);
+    verifyEqual(testCase, normalized.receiver.circular_array.microphones(2).position_m(3), 0.46, 'AbsTol', 1e-10);
 
     % The receiver center and sources still require the existing 0.5 m margin.
     too_close = cfg;
@@ -44,7 +44,7 @@ function testArrayMicrophonesRequireContainmentWithoutCenterWallMargin(testCase)
     cfg.receiver.circular_array.radius_m = 0.6;
     for k = 1:4
         cfg.receiver.circular_array.microphones(k).position_m = cfg.receiver.position_m + ...
-            0.6 * [cosd(90*(k-1)), 0, sind(90*(k-1))];
+            0.6 * [cosd(90*(k-1)), 0, -sind(90*(k-1))];
     end
     verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
 end
@@ -66,7 +66,7 @@ function array = make_array(center)
     microphones = repmat(struct('microphone_index', 0, 'channel_index', 0, 'position_m', []), 1, 4);
     for k = 1:4
         microphones(k) = struct('microphone_index', k-1, 'channel_index', k, ...
-            'position_m', center + 0.05 * [cosd(90*(k-1)), 0, sind(90*(k-1))]);
+            'position_m', center + 0.05 * [cosd(90*(k-1)), 0, -sind(90*(k-1))]);
     end
     array = struct('output_type', 'circular_array', 'num_microphones', 4, 'radius_m', 0.05, ...
         'center_m', center, 'yaw_deg', 0, 'microphones', microphones);

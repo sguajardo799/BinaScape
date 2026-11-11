@@ -38,7 +38,7 @@ function testSchema2ReflectsReceiverPositionAndPublicOrientation(testCase)
 
     verifyEqual(testCase, ctx.rpf.receiver_positions, [1.0 1.5 -2.0], ...
         'AbsTol', 1e-12);
-    verifyEqual(testCase, ctx.rpf.receiver_view_vectors, [0.0 0.0 -1.0], ...
+    verifyEqual(testCase, ctx.rpf.receiver_view_vectors, [0.0 0.0 1.0], ...
         'AbsTol', 1e-12);
 end
 
@@ -60,7 +60,7 @@ function testSchema3ReflectsReceiverPositionAndPublicOrientation(testCase)
 
     verifyEqual(testCase, ctx.rpf.receiver_positions, [1.0 1.5 -2.0], ...
         'AbsTol', 1e-12);
-    verifyEqual(testCase, ctx.rpf.receiver_view_vectors, [0.0 0.0 -1.0], ...
+    verifyEqual(testCase, ctx.rpf.receiver_view_vectors, [0.0 0.0 1.0], ...
         'AbsTol', 1e-12);
 end
 
@@ -83,4 +83,24 @@ function testLegacyReceiverKeepsExistingCoordinates(testCase)
         'AbsTol', 1e-12);
     verifyEqual(testCase, ctx.rpf.receiver_view_vectors, [0.0 0.0 1.0], ...
         'AbsTol', 1e-12);
+end
+
+function testSchema3ReceiverViewFollowsCanonicalYaw(testCase)
+    % Public forward is (cos y, 0, -sin y); RAVEN receives it with Z reflected.
+    hrtf_path = [tempname, '.daff'];
+    fid = fopen(hrtf_path, 'w');
+    fclose(fid);
+    cleanup = onCleanup(@() delete(hrtf_path)); %#ok<NASGU>
+    cases = {0.0, [1.0 0.0 0.0]; -90.0, [0.0 0.0 -1.0]; 180.0, [-1.0 0.0 0.0]};
+    for index = 1:size(cases, 1)
+        receiver = struct( ...
+            'position_m', [1.0 1.5 2.0], ...
+            'orientation_deg', struct('yaw', cases{index, 1}, 'pitch', 0.0, 'roll', 0.0), ...
+            'active_hrtf', struct('hrtf_path', hrtf_path));
+        ctx = struct( ...
+            'manifest', struct('schema_version', '3.0', 'receiver', receiver), ...
+            'rpf', MockRavenProject());
+        ctx = build_receiver_from_pose(ctx);
+        verifyEqual(testCase, ctx.rpf.receiver_view_vectors, cases{index, 2}, 'AbsTol', 1e-12);
+    end
 end

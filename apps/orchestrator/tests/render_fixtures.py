@@ -76,7 +76,7 @@ def write_render_metadata(manifest, t30_s=None):
             "audio_relpath": source.get("audio_relpath", ""), "audio_path": source["audio_path"],
             "directivity_path": source.get("directivity_path", ""),
             "position_m": [position[0], position[1], reflection * position[2]],
-            "view_vector": [math.cos(pitch)*math.cos(yaw), math.sin(pitch), reflection*math.cos(pitch)*math.sin(yaw)],
+            "view_vector": [math.cos(pitch)*math.cos(yaw), math.sin(pitch), math.cos(pitch)*math.sin(yaw)],
             "up_vector": [0, 1, 0], "gain_db": source.get("gain_db", 0),
             "source_start_time_s": start, "source_original_duration_s": duration, "source_end_time_s": start + duration,
         }

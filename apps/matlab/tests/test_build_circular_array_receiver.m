@@ -8,7 +8,7 @@ function testYawOnlyPositionsAndRIRSelection(testCase)
         microphones = repmat(struct('microphone_index', 0, 'channel_index', 0, 'position_m', []), 1, 4);
         positions = zeros(4, 3);
         for k = 1:4
-            positions(k,:) = center + 0.05 * [cosd(yaw+90*(k-1)) 0 sind(yaw+90*(k-1))];
+            positions(k,:) = center + 0.05 * [cosd(yaw+90*(k-1)) 0 -sind(yaw+90*(k-1))];
             microphones(k) = struct('microphone_index', k-1, 'channel_index', k, 'position_m', positions(k,:));
         end
         array = struct('output_type', 'circular_array', 'num_microphones', 4, ...

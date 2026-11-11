@@ -914,9 +914,10 @@ def _fixed_position_relative_to_receiver(
     yaw = math.radians(orientation["yaw"] + azimuth_deg)
     pitch = math.radians(orientation["pitch"] + elevation_deg)
 
-    # Manifests use canonical XYZ and the runtime adapter flips Z for RAVEN.
-    # Therefore this is MATLAB's [+X forward, +Y up, +Z at positive yaw]
-    # convention expressed before that adapter. Receiver roll is intentionally ignored.
+    # Canonical public pose convention (spatial-pose-convention): yaw 0 faces +X and positive
+    # yaw is a right-hand rotation about +Y, so forward = (cos p cos y, sin p, -cos p sin y) and
+    # positive azimuth points to -Z, which is heard on the right because the public->RAVEN
+    # mapping mirrors the scene. Receiver roll is intentionally ignored.
     offset = (
         math.cos(pitch) * math.cos(yaw),
         math.sin(pitch),

@@ -329,6 +329,142 @@ Marco público: `[x,y,z]` en metros, Y vertical, huella `[x,z]`. Scene y runtime
 
 HEAD analyzer prioriza poses del manifiesto; el fallback documentado desde sidecar RAVEN + ITA refleja Z de vuelta al marco público y declara procedencia. Si no se establece marco/orientación, excluye los cálculos espaciales afectados; yaw ausente no es cero. develop carece de esta conversión ampliada.
 
+## Convención de orientación y lectura de metadatos
+
+Capability `spatial-pose-convention`. Todos los componentes convierten ángulos en direcciones, y
+direcciones en ángulos, con la misma fórmula en el marco público `(x, y, z)` (metros, +Y vertical):
+
+```text
+forward(yaw, pitch) = (cos p·cos y,  sin p,  −cos p·sin y)
+```
+
+Yaw 0 y pitch 0 apuntan a +X; el yaw positivo gira de +X hacia −Z; el pitch positivo inclina hacia
++Y; roll no cambia la dirección. El adaptador MATLAB (esquemas 2.0/3.0) calcula esta dirección y
+luego refleja Z, `[x, y, −z]`, igual que las posiciones. Esa reflexión espeja la escena completa
+(sala, materiales y poses), así que la acústica es coherente, pero **izquierda y derecha se leen
+espejadas respecto de una lectura dextrógira del marco público**. La prueba de aceptación con RAVEN
+(receptor con yaw +90, fuente a 0.7 m) lo confirma: con azimut +90 el ILD (izquierdo − derecho) fue
+−6.0 dB, y con azimut −90 fue +2.1 dB.
+
+Regla práctica: **ángulo positivo = hacia la derecha del oyente**, tanto para yaw como para azimut,
+canales del array y DOA del analizador. El WAV binaural guarda el oído izquierdo en el canal 1 y el
+derecho en el canal 2, el mismo orden que asume MSBG.
+
+### Vista del oyente
+
+Los diagramas siguientes dibujan el plano horizontal visto como lo escucha el oyente: el frente
+hacia arriba de la página y su oído derecho hacia la derecha.
+
+```text
+Azimut relativo al yaw del receptor
+
+                         0°  (frente)
+                             ▲
+              −45°           │           +45°
+                   ╲         │         ╱
+                    ╲        │        ╱
+   −90°  oído izq.  ◄─────── ○ ───────►  oído der.  +90°
+         (canal 1)           │           (canal 2)
+                             │
+                        ±180° (atrás)
+```
+
+```text
+Ejes públicos con yaw 0                 Mismo receptor con yaw +90
+
+               +X  (frente)                           −Z  (frente)
+                ▲                                      ▲
+                │                                      │
+   +Z  ◄─────── ○ ───────►  −Z           +X  ◄──────── ○ ────────►  −X
+  (izquierda)        (derecha)          (izquierda)          (derecha)
+
+                                        yaw +90 = girar 90° a la derecha
+```
+
+### De la configuración al manifiesto
+
+`fixed_position` no guarda el azimut en el manifiesto: lo convierte en posición. La fuente queda en
+`receiver.position_m + distancia · forward(yaw + azimut, pitch + elevación)`. Ejemplo real de la
+prueba de aceptación (`scene_speech_fixed_0001`):
+
+```text
+configuración                    cálculo                           manifiesto de escena
+─────────────                    ───────                           ────────────────────
+spatial_policy:                  ángulo = yaw + azimut             receiver.position_m
+  azimuths_deg:   [90]   ──►            = 90 + 90 = 180°    ──►      [1.414, 1.000, 1.416]
+  elevations_deg: [0]            forward(180°, 0°) = [−1, 0, 0]    receiver.orientation_deg.yaw
+  distances_m:    [0.7]          fuente = receptor + 0.7·[−1,0,0]    90
+receiver yaw: 90                                                   sources[0].position_m
+                                                                     [0.714, 1.000, 1.416]
+
+audio renderizado: la fuente se oye a la DERECHA (ILD izq − der = −6.0 dB)
+```
+
+### Del manifiesto al ángulo (analizador)
+
+El analizador recupera el ángulo desde las posiciones del manifiesto, sin leer la configuración:
+
+```text
+d = source.position_m − receiver.position_m = (dx, dy, dz)
+
+DOA global   = atan2(−dz, dx)                  0° = +X, positivo hacia −Z
+DOA relativo = DOA global − receiver yaw       envuelto a [−180°, 180°)
+elevación    = atan2(dy, hypot(dx, dz))
+
+ejemplo: d = (−0.7, 0, 0)  →  global = atan2(−0, −0.7) = −180°  (envuelto)
+                              relativo = −180° − 90° = −270° ≡ +90°   (derecha; coincide con el azimut)
+```
+
+### Array circular
+
+El micrófono `k` está en `center_m + radius_m · [cos θk, 0, −sin θk]`, con `θk = yaw + 360·k/N`.
+El micrófono 0 apunta al frente y el índice avanza hacia la derecha. `channel_index = k + 1`.
+
+```text
+Array de 4 micrófonos con yaw 0 (frente = +X)
+
+                    mic 0 · canal 1   (+X, frente)
+                            ●
+                            │
+  mic 3 · canal 4  ●─────── ○ ───────●  mic 1 · canal 2
+  (+Z, izquierda)        center_m        (−Z, derecha)
+                            │
+                            ●
+                    mic 2 · canal 3   (−X, atrás)
+```
+
+### Recorrido de las coordenadas
+
+```mermaid
+flowchart LR
+    cfg["Configuración<br/>yaw · azimut · distancia"] --> man["Manifiesto de escena<br/>position_m · orientation_deg<br/>(marco público)"]
+    man --> mat["Adaptador MATLAB<br/>forward canónico,<br/>luego refleja Z"]
+    mat --> rav["RAVEN<br/>escena espejada"]
+    rav --> wav["WAV binaural<br/>canal 1 = izq · canal 2 = der"]
+    man --> ana["Analizador<br/>DOA = atan2(−dz, dx) − yaw"]
+```
+
+### Lectura rápida
+
+| Dato | Dónde aparece | Cómo leerlo |
+|---|---|---|
+| `orientation_deg.yaw` | manifiesto (receptor, fuentes) | 0 = +X; positivo = girar a la derecha (hacia −Z) |
+| `orientation_deg.pitch` | manifiesto | positivo = hacia arriba (+Y) |
+| `orientation_deg.roll` | manifiesto | no cambia la dirección |
+| `spatial_policy.azimuths_deg` | configuración | relativo al yaw; 0 frente, + derecha, − izquierda, ±180 atrás |
+| `spatial_policy.elevations_deg` | configuración | positivo = hacia arriba |
+| `microphones[k]` del array | manifiesto | k = 0 al frente; el índice crece hacia la derecha; canal WAV = k + 1 |
+| DOA relativo | reporte del analizador | mismo sentido que el azimut |
+| canales del WAV binaural | audio | 1 = oído izquierdo, 2 = oído derecho |
+| `summary.sources` | sidecar RAVEN | coordenadas RAVEN (Z reflejada), no públicas |
+
+Los manifiestos sin esquema 2.0/3.0 conservan su camino heredado en MATLAB. Las salidas generadas
+antes de esta convención (renders con yaw distinto de cero, `fixed_position`,
+`facing_surface_normal` o arrays) son inconsistentes y deben regenerarse en un directorio de salida
+nuevo, porque la reanudación no distingue la convención con que se generaron. Con yaw 0 los renders
+binaurales anteriores ya tenían este mismo sentido de izquierda y derecha; lo que cambia es el DOA
+del analizador y el orden del array.
+
 ## Reverberación y tratamientos
 
 El sampler estratifica el RT30 estimado mediante bins de igual ancho, cuotas balanceadas y tratamientos virtuales versionados en paredes/cielo, conservando scattering; el piso no recibe tratamiento. Usa el presupuesto compartido de intentos de escena y puede seleccionar un fallback válido en rango. Las cuotas son diagnósticas, no garantía de uniformidad exacta ni de uniformidad del T30 posterior de RAVEN.
@@ -398,11 +534,9 @@ central del estimador Sabine; Pyroomacoustics 0.10.1 opera con bandas de 125 a 1
 los coeficientes de 31.5 y 63 Hz no tienen efecto propio. No se declara equivalencia acústica con
 RAVEN.
 
-**Riesgo conocido: convención angular del array.** El micrófono 0 queda en `[0, 0, +r]` respecto
-del centro con yaw +90°, mientras una fuente `fixed_position` con azimut 0° y yaw +90° queda hacia
-−Z: el anillo gira en sentido opuesto a la convención yaw/azimut. Ambos backends renderizan las
-posiciones del descriptor sin corregirlas; corregir la convención requiere un cambio de
-especificación autorizado antes de producir etiquetas DOA.
+**Convención de orientación.** Pyroomacoustics recibe las posiciones del array ya calculadas con la
+convención común; ver
+[Convención de orientación y lectura de metadatos](#convención-de-orientación-y-lectura-de-metadatos).
 
 ## Clarity y errores
 

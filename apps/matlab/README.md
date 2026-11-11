@@ -275,7 +275,7 @@ Cada micrófono lleva `microphone_index` (desde cero), `channel_index` (desde un
 y `position_m`. El centro/yaw debe coincidir con la pose del receptor.
 
 La geometría permanece horizontal en XZ (Y vertical), sin cabeza ni carcasa.
-Con yaw cero, el canal 1 está en +X; los siguientes avanzan hacia +Z. Pitch/roll
+Con yaw cero, el canal 1 está en +X; los siguientes avanzan hacia −Z (derecha del oyente en el render; ver la convención en `docs/architecture/contracts.md`). Pitch/roll
 no inclinan el array. Las posiciones públicas se reflejan una vez en Z al
 construir los receptores RAVEN. El runtime puede seleccionar exclusivamente
 un descriptor mediante `render.active_output_type`; sin selección se procesan
