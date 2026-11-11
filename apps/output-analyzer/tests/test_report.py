@@ -511,3 +511,100 @@ def test_scene_mean_chart_rendering_keeps_exports_and_status(sample_run):
     assert exported == expected_metrics
     summary = json.loads(artifacts["summary"].read_text(encoding="utf-8"))
     assert summary["status"] == expected_status
+
+
+def _orientation_plan(tmp_path, receiver_yaw=None, source_yaws=()):
+    import re
+
+    path = tmp_path / "orientation.svg"
+    scene = {
+        "scene_id": "s",
+        "footprint_vertices_m": [[0, 0], [6, 0], [6, 4], [0, 4]],
+        "receiver_x_m": 3,
+        "receiver_z_m": 2,
+        "receiver_yaw_deg": receiver_yaw,
+    }
+    sources = [
+        {
+            "source_id": f"src{i}",
+            "source_type": "speech",
+            "source_x_m": 1 + i,
+            "source_z_m": 1,
+            "source_yaw_deg": yaw,
+        }
+        for i, yaw in enumerate(source_yaws)
+    ]
+    assert _write_plan(path, scene, sources)
+    svg = path.read_text(encoding="utf-8")
+    arrows = {}
+    for match in re.finditer(r"<line [^>]*data-orientation=[^>]*>", svg):
+        tag = match.group(0)
+        attr = dict(re.findall(r'([\w-]+)="([^"]*)"', tag))
+        arrows[attr["data-orientation"]] = (
+            float(attr["x2"]) - float(attr["x1"]),
+            float(attr["y2"]) - float(attr["y1"]),
+            attr,
+        )
+    return svg, arrows
+
+
+def test_orientation_receiver_yaw_zero_points_to_plus_x(tmp_path):
+    _, arrows = _orientation_plan(tmp_path, receiver_yaw=0)
+    dx, dy, _ = arrows["receiver"]
+    assert dx > 0 and abs(dy) < 1e-9
+
+
+def test_orientation_receiver_yaw_90_points_to_minus_z(tmp_path):
+    _, arrows = _orientation_plan(tmp_path, receiver_yaw=90)
+    dx, dy, _ = arrows["receiver"]
+    # Screen y grows downward while Z grows upward, so -Z is +dy.
+    assert abs(dx) < 1e-9 and dy > 0
+
+
+def test_orientation_source_uses_its_yaw_and_event_color(tmp_path):
+    from output_analyzer.report import PALETTE
+
+    _, arrows = _orientation_plan(tmp_path, receiver_yaw=0, source_yaws=[-90])
+    dx, dy, attr = arrows["source:src0"]
+    assert abs(dx) < 1e-9 and dy < 0
+    assert attr["stroke"] == PALETTE[0]
+    assert attr["data-yaw"] == "-90"
+    lengths = {round((a[0] ** 2 + a[1] ** 2) ** 0.5, 6) for a in arrows.values()}
+    assert len(lengths) == 1
+
+
+def test_orientation_arrows_do_not_move_plan(tmp_path):
+    import re
+
+    def geometry(svg):
+        # Legend length may grow the canvas height; compare only the plan body.
+        svg = svg.split('<g class="chart-legend">')[0].split(">", 1)[1]
+        svg = re.sub(r'<g class="orientation-arrows">.*?</g>', "", svg)
+        return svg
+
+    with_yaw, _ = _orientation_plan(tmp_path, receiver_yaw=45, source_yaws=[10])
+    without_yaw, arrows = _orientation_plan(tmp_path, source_yaws=[None])
+    assert not arrows
+    assert geometry(with_yaw) == geometry(without_yaw)
+
+
+def test_orientation_missing_yaw_draws_no_arrow_and_counts(tmp_path):
+    svg, arrows = _orientation_plan(tmp_path, receiver_yaw=0, source_yaws=[None, 30])
+    assert set(arrows) == {"receiver", "source:src1"}
+    assert '<circle cx="' in svg
+    legend = svg.split('<g class="chart-legend">')[1]
+    assert "Orientation" in legend
+    assert "n=2" in legend and "excluded=1" in legend
+
+
+def test_orientation_all_present_counts(tmp_path):
+    svg, arrows = _orientation_plan(tmp_path, receiver_yaw=0, source_yaws=[0, 90])
+    assert len(arrows) == 3
+    legend = svg.split('<g class="chart-legend">')[1]
+    assert "n=3, excluded=0" in legend
+
+
+def test_orientation_not_available_without_yaw(tmp_path):
+    svg, arrows = _orientation_plan(tmp_path, source_yaws=[None])
+    assert not arrows
+    assert "Orientation: Not available" in svg.split('<g class="chart-legend">')[1]

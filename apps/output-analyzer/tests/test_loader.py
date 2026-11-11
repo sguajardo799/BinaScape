@@ -476,3 +476,31 @@ def test_fixed_position_azimuth_round_trips_to_relative_doa(sample_run, yaw, azi
     mutate(render, lambda x: x["summary"].update(sources=[{**x["summary"]["sources"][0], "position_m": position}], n_sources=1))
     relative = load_run(sample_run).sources[0]["receiver_relative_doa_deg"]
     assert (relative - azimuth + 180) % 360 - 180 == pytest.approx(0.0, abs=1e-6)
+
+
+def test_source_yaw_from_manifest_orientation(sample_run):
+    scene, _ = documents(sample_run)
+    baseline = {row["source_id"]: dict(row) for row in load_run(sample_run).sources}
+
+    def change(x):
+        x["sources"][0]["orientation_deg"] = {"yaw": -90.0, "pitch": 0.0, "roll": 0.0}
+
+    mutate(scene, change)
+    sources = {row["source_id"]: row for row in load_run(sample_run).sources}
+    assert sources["src_0001"]["source_yaw_deg"] == -90
+    assert sources["src_0002"]["source_yaw_deg"] is None
+    for sid, row in sources.items():
+        rest = {k: v for k, v in row.items() if k != "source_yaw_deg"}
+        assert rest == {k: v for k, v in baseline[sid].items() if k != "source_yaw_deg"}
+
+
+def test_malformed_source_yaw_is_reported_without_excluding_source(sample_run):
+    scene, _ = documents(sample_run)
+    mutate(scene, lambda x: x["sources"][0].update(orientation_deg={"yaw": "north"}))
+    data = load_run(sample_run)
+    source = next(row for row in data.sources if row["source_id"] == "src_0001")
+    assert source["source_yaw_deg"] is None
+    assert source["source_x_m"] == 2.0
+    assert any(
+        i.get("field") == "orientation_deg.yaw" for i in data.incidents
+    )
