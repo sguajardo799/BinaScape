@@ -23,7 +23,7 @@ function verify_circular_array_render(scene_path, output_dir)
             for k = 1:n
                 theta = yaw + 360*(k-1)/n;
                 microphones(k) = struct('microphone_index', k-1, 'channel_index', k, ...
-                    'position_m', center + cfg.receiver.circular_array.radius_m*[cosd(theta),0,sind(theta)]);
+                    'position_m', center + cfg.receiver.circular_array.radius_m*[cosd(theta),0,-sind(theta)]);
             end
             cfg.receiver.circular_array.microphones = microphones;
             cfg.render.target_duration_s = 0.5;

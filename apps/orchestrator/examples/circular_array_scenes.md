@@ -28,9 +28,9 @@ these excerpts with obsolete room-dimensions manifests.
     "yaw_deg": 0,
     "microphones": [
       {"microphone_index": 0, "channel_index": 1, "position_m": [2.15, 1.5, 1.8]},
-      {"microphone_index": 1, "channel_index": 2, "position_m": [2.1, 1.5, 1.85]},
+      {"microphone_index": 1, "channel_index": 2, "position_m": [2.1, 1.5, 1.75]},
       {"microphone_index": 2, "channel_index": 3, "position_m": [2.05, 1.5, 1.8]},
-      {"microphone_index": 3, "channel_index": 4, "position_m": [2.1, 1.5, 1.75]}
+      {"microphone_index": 3, "channel_index": 4, "position_m": [2.1, 1.5, 1.85]}
     ]
   }
 }
@@ -38,7 +38,7 @@ these excerpts with obsolete room-dimensions manifests.
 
 Microphone indices start at zero; WAV channels start at one. Positions are
 public coordinates (Y vertical), with yaw zero beginning at +X and channel
-ordering toward +Z. Pitch and roll do not tilt the array. MATLAB reflects Z
+ordering toward -Z (the receiver's right in the rendered scene). Pitch and roll do not tilt the array. MATLAB reflects Z
 exactly once into RAVEN coordinates.
 
 ## Mixed scene receiver

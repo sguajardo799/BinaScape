@@ -788,6 +788,36 @@ def test_fixed_position_uses_public_coordinate_convention() -> None:
     assert positive_azimuth[2] - receiver["position_m"][2] == pytest.approx(-1.0)
 
 
+def _canonical_forward(yaw_deg: float, pitch_deg: float = 0.0) -> list[float]:
+    yaw, pitch = math.radians(yaw_deg), math.radians(pitch_deg)
+    return [math.cos(pitch) * math.cos(yaw), math.sin(pitch), -math.cos(pitch) * math.sin(yaw)]
+
+
+@pytest.mark.parametrize("yaw", [-135.0, -90.0, 0.0, 45.0, 90.0, 180.0])
+def test_fixed_position_azimuth_zero_lies_along_receiver_forward(yaw: float) -> None:
+    receiver = {"position_m": [1.0, 1.5, 2.0], "orientation_deg": {"yaw": yaw, "pitch": 0.0, "roll": 0.0}}
+
+    position = sampler._fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 2.0))
+
+    offset = [p - r for p, r in zip(position, receiver["position_m"], strict=True)]
+    assert offset == pytest.approx([2.0 * v for v in _canonical_forward(yaw)], abs=1e-12)
+
+
+def test_fixed_position_yaw_plus_90_points_to_negative_z() -> None:
+    receiver = {"position_m": [2.0, 1.0, 3.0], "orientation_deg": {"yaw": 90.0, "pitch": 0.0, "roll": 0.0}}
+
+    assert sampler._fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 1.0)) == pytest.approx(
+        [2.0, 1.0, 2.0], abs=1e-12
+    )
+
+
+def test_facing_surface_normal_forward_matches_inward_normal() -> None:
+    orientation = sampler._wall_normal_orientation((0.0, 1.0))
+
+    assert orientation == {"yaw": -90.0, "pitch": 0.0, "roll": 0.0}
+    assert _canonical_forward(orientation["yaw"]) == pytest.approx([0.0, 0.0, 1.0], abs=1e-12)
+
+
 def test_fixed_position_adds_angles_to_receiver_yaw_and_pitch() -> None:
     receiver = {
         "position_m": [0.0, 0.0, 0.0],

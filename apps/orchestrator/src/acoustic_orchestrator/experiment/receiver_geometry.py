@@ -20,7 +20,7 @@ def build_circular_array_descriptor(
                 "position_m": [
                     position_m[0] + output.radius_m * math.cos(angle),
                     position_m[1],
-                    position_m[2] + output.radius_m * math.sin(angle),
+                    position_m[2] - output.radius_m * math.sin(angle),
                 ],
             }
         )

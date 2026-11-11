@@ -772,8 +772,8 @@ Important limitations:
   gate. Use shoebox rooms with this backend.
 - The 31.5 Hz and 63 Hz absorption coefficients have no independent effect (the backend's
   octave bank starts at 125 Hz); scattering is recorded but not applied by ISM.
-- The legacy circular-array angular convention is preserved unchanged (microphone 0 points
-  to public `+Z` at yaw +90°, opposite to the yaw/azimuth convention); see the contracts.
+- Circular-array microphones follow the common pose convention (microphone 0 points along
+  the receiver's forward direction, public `-Z` at yaw +90°); see the contracts.
 - Switching an existing run directory between backends is reported as a plan conflict and
   never reuses or overwrites outputs; use a new `run_name`.
 
@@ -825,7 +825,7 @@ use `{scene_id}` and `{output_type}`. One array has one variant identity
 uses `receiver_ir_path: null`, not a fake HRTF path. Metadata records the
 public center/yaw, radius, ordered microphone positions and WAV channel mapping.
 Microphone 0 corresponds to WAV channel 1; yaw zero starts at +X, with ordering
-toward +Z. Array source WAVs are downmixed by channel mean before normalization
+toward -Z (the receiver's right in the rendered scene; see `docs/architecture/contracts.md`). Array source WAVs are downmixed by channel mean before normalization
 and gain, while HRTF/HARTF source handling is unchanged.
 
 Resume checks compare planned array geometry with the sidecar/runtime provenance
@@ -1014,8 +1014,9 @@ shuffle. The scheduled case is preferred. If scheduled cases from simultaneous
 alternatives; this exceptional substitution can reduce that block's coverage.
 WAV selection remains independent and may reuse the same file.
 
-Angles follow MATLAB/RAVEN: at receiver yaw/pitch zero, azimuth/elevation zero
-points along `+X`; positive azimuth rotates toward RAVEN `+Z`; positive
+Angles follow the common pose convention (`docs/architecture/contracts.md`): at
+receiver yaw/pitch zero, azimuth/elevation zero points along `+X`; positive
+azimuth rotates toward public `-Z`, which is heard on the right; positive
 elevation rotates toward `+Y`. Azimuth is added to receiver yaw, elevation is
 added to receiver pitch, and receiver roll is ignored. Python preserves the
 public coordinates in the manifest; the MATLAB schema 2.0/3.0 adapter reflects Z

@@ -170,21 +170,18 @@ def test_two_sources_at_rounded_offsets(tmp_path: Path) -> None:
         assert window.max() == pytest.approx(np.max(np.abs(row[0])), rel=1e-6)
 
 
-# --- 7.6 legacy angular convention (characterized, not corrected) -----------------------------
+# --- canonical angular convention ------------------------------------------------------------
 
-def test_legacy_angular_convention_characterized() -> None:
+def test_array_microphone_zero_matches_fixed_position_azimuth_zero() -> None:
     radius = 0.05
     center = [2.0, 1.5, 2.0]
     descriptor = build_circular_array_descriptor(center, {"yaw": 90.0, "pitch": 0.0, "roll": 0.0},
                                                  CircularArrayOutputConfig(enabled=True, num_microphones=4, radius_m=radius))
     offset = np.subtract(descriptor["microphones"][0]["position_m"], center)
-    np.testing.assert_allclose(offset, [0.0, 0.0, radius], atol=1e-12)  # microphone 0 toward public +Z
+    np.testing.assert_allclose(offset, [0.0, 0.0, -radius], atol=1e-12)  # microphone 0 toward public -Z
     receiver = {"position_m": center, "orientation_deg": {"yaw": 90.0, "pitch": 0.0, "roll": 0.0}}
     source = _fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 1.0))
     np.testing.assert_allclose(np.subtract(source, center), [0.0, 0.0, -1.0], atol=1e-12)  # source toward public -Z
-    # KNOWN RISK (spec "Legacy circular-array angular convention preserved"): the microphone ring
-    # turns opposite to the yaw/azimuth convention used for view vectors and fixed_position
-    # sources. The backend renders the descriptor positions unchanged; correcting the convention
-    # needs a separate, authorized specification change before any DOA labelling.
+    # The backend renders descriptor positions unchanged.
     backend_mic = public_to_backend(descriptor["microphones"][0]["position_m"])
-    assert backend_mic[1] == pytest.approx(-center[2] - radius)
+    assert backend_mic[1] == pytest.approx(-center[2] + radius)

@@ -259,7 +259,7 @@ def source_fixture(tmp_path, schema="3.0"):
         "source_id": "src1", "source_name": "src1", "event_type": "speech", "identity_id": "ID01",
         "audio_relpath": "ID01/source.wav", "audio_path": manifest["sources"][0]["audio_path"],
         "directivity_path": "", "position_m": [1, 2, -3 if reflected else 3],
-        "view_vector": [0, 0, -1 if reflected else 1], "up_vector": [0, 1, 0],
+        "view_vector": [0, 0, 1], "up_vector": [0, 1, 0],
         "gain_db": -3, "source_start_time_s": 0.5, "source_end_time_s": 1.5, "source_original_duration_s": 1,
     }
     return manifest, payload
@@ -271,6 +271,15 @@ def test_source_pose_uses_exported_coordinate_frame(tmp_path, schema):
     result = RenderValidation(metadata=payload)
     validate_sources(result, manifest)
     assert result.artifacts_ok
+
+
+@pytest.mark.parametrize("schema", ["2.0", "3.0"])
+def test_polygon_contract_rejects_pre_fix_reflected_view_vector(tmp_path, schema):
+    manifest, payload = source_fixture(tmp_path, schema)
+    payload["summary"]["sources"]["view_vector"] = [0, 0, -1]
+    result = RenderValidation(metadata=payload)
+    validate_sources(result, manifest)
+    assert not result.artifacts_ok
 
 
 @pytest.mark.parametrize("field", ["identity_id", "audio_relpath"])
@@ -287,7 +296,7 @@ def test_legacy_source_provenance_uses_empty_strings_not_inference(tmp_path, fie
     ("identity_id", "ID02"), ("audio_relpath", "ID02/source.wav"), ("audio_path", "wrong.wav"),
     ("event_type", "wrong"), ("directivity_path", "wrong.daff"),
     ("gain_db", -4), ("source_start_time_s", 0), ("source_end_time_s", 20),
-    ("position_m", [1, 2, 3]), ("view_vector", [0, 0, 1]), ("up_vector", [1, 0, 0]),
+    ("position_m", [1, 2, 3]), ("view_vector", [0, 0, -1]), ("up_vector", [1, 0, 0]),
     ("source_name", "wrong"), ("source_original_duration_s", True),
 ])
 def test_source_correspondence_rejects_altered_metadata(tmp_path, field, value):

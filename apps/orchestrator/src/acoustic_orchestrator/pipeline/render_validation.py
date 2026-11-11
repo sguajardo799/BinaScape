@@ -298,11 +298,12 @@ def _source_pose(source: dict[str, Any], schema: str) -> dict[str, list[float]]:
         raise ValueError("source orientation invalid")
     pitch, yaw = math.radians(pitch), math.radians(yaw)
     reflection = -1 if schema in ("2.0", "3.0") else 1
-    # Mirrors orientation_deg_to_vectors: roll does not alter these vectors.
+    # Mirrors the MATLAB adapter; roll does not alter these vectors. Polygon-contract schemas build
+    # the canonical public forward (cos p cos y, sin p, -cos p sin y) and reflect Z into RAVEN, which
+    # yields +cos p sin y. Legacy schemas pass (cos p cos y, sin p, +cos p sin y) unreflected.
     return {
         "position_m": [position[0], position[1], reflection * position[2]],
-        "view_vector": [math.cos(pitch) * math.cos(yaw), math.sin(pitch),
-                        reflection * math.cos(pitch) * math.sin(yaw)],
+        "view_vector": [math.cos(pitch) * math.cos(yaw), math.sin(pitch), math.cos(pitch) * math.sin(yaw)],
         "up_vector": [0, 1, 0],
     }
 

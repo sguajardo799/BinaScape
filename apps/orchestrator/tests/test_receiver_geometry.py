@@ -27,9 +27,38 @@ def test_circular_array_positions_and_channel_order(count: int, yaw: float) -> N
         assert microphone["channel_index"] == k + 1
         angle = math.radians(yaw + 360 * k / count)
         assert microphone["position_m"] == pytest.approx(
-            [center[0] + 0.2 * math.cos(angle), center[1], center[2] + 0.2 * math.sin(angle)]
+            [center[0] + 0.2 * math.cos(angle), center[1], center[2] - 0.2 * math.sin(angle)]
         )
         assert math.dist(center, microphone["position_m"]) == pytest.approx(0.2)
+
+
+def test_four_microphones_at_zero_yaw_follow_canonical_order() -> None:
+    output = CircularArrayOutputConfig(enabled=True, num_microphones=4, radius_m=0.2)
+    descriptor = build_circular_array_descriptor([0.0, 0.0, 0.0], {"yaw": 0, "pitch": 0, "roll": 0}, output)
+    offsets = [microphone["position_m"] for microphone in descriptor["microphones"]]
+    expected = [[0.2, 0, 0], [0, 0, -0.2], [-0.2, 0, 0], [0, 0, 0.2]]
+    for actual, planned in zip(offsets, expected, strict=True):
+        assert actual == pytest.approx(planned, abs=1e-12)
+
+
+def test_yaw_plus_90_moves_microphone_zero_to_negative_z_without_tilt() -> None:
+    output = CircularArrayOutputConfig(enabled=True, num_microphones=4, radius_m=0.2)
+    center = [1.0, 1.5, 2.0]
+    descriptor = build_circular_array_descriptor(center, {"yaw": 90, "pitch": 30, "roll": 40}, output)
+    assert descriptor["microphones"][0]["position_m"] == pytest.approx([1.0, 1.5, 1.8], abs=1e-12)
+    assert all(microphone["position_m"][1] == center[1] for microphone in descriptor["microphones"])
+
+
+@pytest.mark.parametrize("yaw", [-135.0, -90.0, 0.0, 45.0, 90.0, 180.0])
+def test_microphone_zero_agrees_with_fixed_position_azimuth_zero(yaw: float) -> None:
+    center = [2.0, 1.5, 2.0]
+    output = CircularArrayOutputConfig(enabled=True, num_microphones=6, radius_m=0.05)
+    descriptor = build_circular_array_descriptor(center, {"yaw": yaw, "pitch": 0, "roll": 0}, output)
+    receiver = {"position_m": center, "orientation_deg": {"yaw": yaw, "pitch": 0.0, "roll": 0.0}}
+    source = sampler._fixed_position_relative_to_receiver(receiver, (0.0, 0.0, 1.0))
+    mic_direction = [(m - c) / 0.05 for m, c in zip(descriptor["microphones"][0]["position_m"], center)]
+    source_direction = [s - c for s, c in zip(source, center)]
+    assert mic_direction == pytest.approx(source_direction, abs=1e-12)
 
 
 def test_circular_array_ignores_pitch_and_roll() -> None:
