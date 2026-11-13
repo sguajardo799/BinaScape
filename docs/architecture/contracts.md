@@ -107,6 +107,30 @@ Cada intento tiene UUID hexadecimal nuevo y conserva:
 - `failure.json`: nombre reservado para un informe funcional de entrada inválida,
   independiente de la constancia y de eventos diagnósticos; su ausencia es normal.
 
+### Preferencias de MATLAB aisladas por proceso
+
+Cada proceso MATLAB que lanza el orquestador (y el diagnóstico
+`scripts/diagnostics/rt30_reproducibility.py`) arranca con `MATLAB_PREFDIR`
+apuntando a una carpeta nueva y vacía, creada en el temporal del sistema con el
+prefijo `binascape-matlab-prefs-`, fuera de las salidas del lote. El valor
+reemplaza cualquier `MATLAB_PREFDIR` heredado. Así los procesos concurrentes no
+comparten `matlabprefs.mat` (el ITA-Toolbox lo reescribe al primer acceso) y la
+carpeta de preferencias del usuario no se lee ni se escribe. No se copian
+preferencias: ITA usa sus valores por defecto. El backend Pyroomacoustics no
+recibe la variable.
+
+Al terminar el proceso (éxito, código no nulo o fallo de lanzamiento), la carpeta
+se elimina best-effort. Si no se puede eliminar se emite un `RuntimeWarning` y el
+estado, código, clasificación y aceptación del intento no cambian. `outcome.json`
+registra el campo opcional aditivo
+`matlab_prefdir: {"path": ..., "cleanup": "removed" | "failed"}`; los lectores
+existentes (historial, `reconcile-static`, `reset-circuit`) lo ignoran.
+
+Si el orquestador muere antes de la limpieza pueden quedar carpetas huérfanas. No
+afectan la reanudación; con el orquestador detenido se borran a mano, por ejemplo
+en PowerShell:
+`Get-ChildItem $env:TEMP -Directory -Filter 'binascape-matlab-prefs-*' | Remove-Item -Recurse -Force`.
+
 El contexto funcional previsto para MATLAB es independiente del argumento de
 diagnóstico: `attempt_id`, `variant_id`, `manifest_sha256`, `completion_path` y el
 campo aditivo `failure_path`.

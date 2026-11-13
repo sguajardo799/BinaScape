@@ -9,7 +9,11 @@ Questions it answers:
   * Sequential renders of all variants agree, but parallel ones do not?
     Concurrent RAVEN processes interfere with each other.
 
-Usage (from the repository root):
+Each MATLAB process gets a private, temporary ``MATLAB_PREFDIR`` (removed
+afterwards), exactly like the orchestrator runner.
+
+Usage (from the repository root, with the orchestrator package importable,
+e.g. ``uv run python ...``):
   python scripts/diagnostics/rt30_reproducibility.py \
       outputs/directivity_experiment102 directivity_0001 --repeats 2 --parallel 1
   python scripts/diagnostics/rt30_reproducibility.py \
@@ -29,6 +33,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 from pathlib import Path
+
+from acoustic_orchestrator.pipeline.matlab_runner import isolated_matlab_env, remove_matlab_prefdir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MATLAB_APP_DIR = REPO_ROOT / "apps" / "matlab"
@@ -92,9 +98,15 @@ def run_job(job: dict, matlab: str) -> dict:
         f"run_raven_static_render('{_matlab_path(job['manifest'])}');"
     )
     started = time.time()
-    with job["log"].open("w", encoding="utf-8") as log:
-        code = subprocess.run([matlab, "-batch", command], stdout=log, stderr=subprocess.STDOUT).returncode
-    job.update(exit_code=code, started=started, finished=time.time())
+    # Same private MATLAB_PREFDIR isolation as the orchestrator runner.
+    environment, prefdir = isolated_matlab_env()
+    try:
+        with job["log"].open("w", encoding="utf-8") as log:
+            code = subprocess.run([matlab, "-batch", command], stdout=log, stderr=subprocess.STDOUT,
+                                  env=environment).returncode
+    finally:
+        cleanup = remove_matlab_prefdir(prefdir)
+    job.update(exit_code=code, started=started, finished=time.time(), prefdir_cleanup=cleanup)
     print(f"  {job['run_id']}: exit={code} ({job['finished'] - started:.0f}s)", flush=True)
     return job
 

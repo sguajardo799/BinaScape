@@ -1,8 +1,10 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -12,7 +14,7 @@ from typing import Any, Callable, NotRequired, TypedDict
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
-from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics
+from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics, diagnostic_warning
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
 
@@ -74,8 +76,42 @@ def render_manifest_with_matlab(
         if not MATLAB_ENTRYPOINT.is_file():
             raise FileNotFoundError(f"No se encontró el entrypoint de MATLAB: {MATLAB_ENTRYPOINT}")
 
-    return _run_render_process(attempt, diagnostics, [matlab_executable, "-batch", batch_command],
-                               progress=progress, before_launch=require_entrypoint)
+    environment, prefdir = isolated_matlab_env()
+    try:
+        result = _run_render_process(attempt, diagnostics, [matlab_executable, "-batch", batch_command],
+                                     progress=progress, before_launch=require_entrypoint, env=environment)
+    finally:
+        cleanup = remove_matlab_prefdir(prefdir)
+    attempt.record["matlab_prefdir"] = {"path": prefdir.as_posix(), "cleanup": cleanup}
+    try:
+        attempt.save()
+    except Exception as storage_error:
+        if result.error is not None:
+            result.error.add_note(f"Functional process evidence could not be persisted: {storage_error}")
+            raise result.error from storage_error
+        raise
+    return result
+
+
+def isolated_matlab_env() -> tuple[dict[str, str], Path]:
+    """Environment with a fresh, private ``MATLAB_PREFDIR`` (outside batch outputs) and its path.
+
+    Concurrent MATLAB processes sharing the user's preferences directory race on
+    ``matlabprefs.mat`` (ITA-Toolbox rewrites it on first access). The caller owns
+    the directory and must remove it with :func:`remove_matlab_prefdir`.
+    """
+    prefdir = Path(tempfile.mkdtemp(prefix="binascape-matlab-prefs-"))
+    return {**os.environ, "MATLAB_PREFDIR": str(prefdir)}, prefdir
+
+
+def remove_matlab_prefdir(prefdir: Path) -> str:
+    """Best-effort removal; a failure only warns and never changes the render outcome."""
+    try:
+        shutil.rmtree(prefdir)
+    except Exception as exc:
+        diagnostic_warning(f"could not remove MATLAB_PREFDIR {prefdir}: {exc}")
+        return "failed"
+    return "removed"
 
 
 def render_manifest_with_pyroomacoustics(
