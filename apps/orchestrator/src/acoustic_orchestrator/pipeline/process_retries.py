@@ -325,7 +325,8 @@ def _resolved_outcome(chain: RetryChain) -> dict[str, Any]:
             or outcome.get("commit_status") != "committed"
             or outcome.get("persistence_error")
             or outcome.get("retry_classification") != latest.get("classification")
-            or outcome.get("retry_decision") != latest.get("retry_decision")):
+            or outcome.get("retry_decision") != latest.get("retry_decision")
+            or outcome.get("circuit_reset") != latest.get("circuit_reset")):
         raise RetryBlockedError("previous process is not durably resolved with matching identity")
     if sha256_file(Path(outcome["manifest_snapshot_path"])) != chain.record["input_sha256"]:
         raise RetryBlockedError("predecessor input snapshot changed")
@@ -335,6 +336,9 @@ def _resolved_outcome(chain: RetryChain) -> dict[str, Any]:
         verify_interruption_resolution(chain.path, chain.record, outcome)
     elif outcome.get("termination_observed") is not True or type(outcome.get("exit_code")) is not int:
         raise RetryBlockedError("previous process termination was not observed")
+    if "circuit_reset" in outcome:
+        from acoustic_orchestrator.pipeline.circuit_reset import verify_circuit_reset_resolution
+        verify_circuit_reset_resolution(chain.path, chain.record, outcome)
     decision = outcome.get("decision")
     if ((classification == "accepted" and decision not in {"continue", "continue_with_warning"})
             or (classification == "acoustic_rejection" and decision != "retry_acoustic")

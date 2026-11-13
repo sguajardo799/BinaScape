@@ -258,6 +258,31 @@ Los archivos que aparezcan/cambien después de la confirmación no se atribuyen 
 interrumpido. Evidencia funcional final presente o salidas completas verificables
 requieren una revisión distinta, no su sustitución silenciosa.
 
+### Reinicio explícito del corte del lote
+
+`reset-circuit <run_root>` inspecciona sin escrituras el corte persistido en
+`metadata/indexes/matlab_process_circuit.json`. Aplicar exige
+`--apply --confirm-stopped --reason <motivo>`, exclusión de escritor, consulta de procesos
+satisfactoria sin candidatos activos y ninguna cadena `running` ni intento sin resolver
+(estos requieren `reconcile-static` antes). No lanza MATLAB, no acepta renders, no toca
+salidas públicas ni retira locks.
+
+Solo se reprograman las cadenas cuyo último intento es `unknown_process_failure` con
+terminación observada y `retry_decision=circuit_open`: pasan a `scheduled` si su ordinal es
+menor que `max_attempts`, o a `exhausted` si no, sin renovar presupuesto ni crear ordinales.
+Las cadenas cuyo último intento fue aceptado durante el corte no se modifican; la
+reanudación las reutiliza. Cualquier otra forma de cadena `circuit_open` bloquea el reinicio.
+
+El registro `metadata/indexes/circuit_resets/<reset_id>/record.json` (con
+`circuit.before.json`, `<chain_id>.chain.before.json` y `<chain_id>.outcome.before.json`
+como bytes exactos) se publica primero; después se archiva el circuito como
+`matlab_process_circuit.<reset_id>.json`, se proyectan outcome y cadena (con
+`circuit_reset` = id, ruta y sha256 del registro) y, al final, se publica un circuito
+cerrado con racha cero, `resolutions` vacío y `reset_id`. Una publicación interrumpida
+mantiene el circuito abierto y repetir el comando completa el mismo registro. La
+reanudación rechaza un `circuit_reset` cuyo registro, preimágenes o proyección no
+concuerden. La reconciliación de interrupciones sigue sin reiniciar el circuito.
+
 `execution.matlab_process_retry` admite defaults `max_attempts=3`,
 `initial_delay_s=2.0`, `max_delay_s=30.0`, `max_consecutive_failures=5`, también
 cuando el YAML anterior omite el bloque. Los presupuestos son enteros positivos
