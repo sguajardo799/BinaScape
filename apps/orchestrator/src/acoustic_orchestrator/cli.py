@@ -10,6 +10,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     render_static_scenes,
     run_clarity_handoff,
 )
+from acoustic_orchestrator.pipeline.circuit_reset import reset_batch_circuit
 from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
 from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
 from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
@@ -120,6 +121,41 @@ def reconcile_static(
         typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
     else:
         typer.echo("No se modificaron archivos. Para aplicar indique --apply --attempt <UUID> --confirm-stopped --reason <motivo>.")
+
+
+@app.command("reset-circuit")
+def reset_circuit(
+    run_root: Path,
+    apply: bool = typer.Option(False, "--apply", help="Publica el reinicio; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Reinicia un corte de procesos MATLAB persistido sin renderizar ni renovar presupuestos."""
+    try:
+        result = reset_batch_circuit(run_root, apply=apply, confirm_stopped=confirm_stopped, reason=reason)
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reinicio bloqueado: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not result["circuit_open"]:
+        typer.echo("No hay un corte de procesos MATLAB abierto; no se modificaron archivos.")
+        return
+    typer.echo(
+        f"{'Reiniciado' if result['applied'] else 'Solo lectura'}: limite={result['limit']} "
+        f"racha={result['consecutive_failures']} cadenas={len(result['chains'])} "
+        f"aceptadas_sin_cambios={len(result['untouched_chains'])}"
+        + (" publicacion_pendiente=true" if result["pending_publication"] else "")
+    )
+    for failure in result["recent_failures"]:
+        typer.echo(f"  fallo reciente: intento={failure['attempt_id']} clasificacion={failure['classification']}")
+    for chain in result["chains"]:
+        typer.echo(
+            f"  cadena={chain['chain_id']} variante={chain.get('variant_id')} intento={chain['attempt_id']} "
+            f"consumidos={chain['consumed_attempts']}/{chain['max_attempts']} siguiente_estado={chain['next_state']}"
+        )
+    if result["applied"]:
+        typer.echo(f"Evidencia: {result['reset_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --confirm-stopped --reason <motivo>.")
 
 
 def main() -> None:

@@ -667,7 +667,7 @@ class _RenderCoordinator:
         if self.progress.stage == "Otras variantes":
             self.progress.start(task["variant_paths"]["variant_id"])
         if self.circuit.is_open:
-            raise RetryBlockedError(f"Corte de procesos MATLAB persistido: {self.circuit.path}")
+            raise _circuit_blocked(self.circuit.path)
         runtime = task["runtime_manifest_path"]
         key = runtime.as_posix() + ":" + sha256_file(runtime)
         chain = self.chains.get(key)
@@ -1248,6 +1248,15 @@ def _build_planned_variants(config: AppConfig, manifest_paths: list[Path], runti
     return planned_variants
 
 
+def _circuit_blocked(circuit_path: Path) -> RetryBlockedError:
+    error = RetryBlockedError(f"Corte de procesos MATLAB persistido: {circuit_path}")
+    error.add_note(
+        "Tras corregir la causa del corte, reinícielo explícitamente con: "
+        f"reset-circuit {circuit_path.parents[2]} --apply --confirm-stopped --reason <motivo>"
+    )
+    return error
+
+
 def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) -> None:
     """Inspect every protected variant before publishing any mutable run state."""
     layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
@@ -1257,7 +1266,7 @@ def _preflight_render_artifacts(config: AppConfig, scene_manifests: list[dict]) 
     force = not config.execution.resume_if_possible and config.execution.overwrite_existing
     circuit_path = layout["render_index_path"].parent / "matlab_process_circuit.json"
     if circuit_path.exists() and read_json_object(circuit_path).get("open") and not force:
-        raise RetryBlockedError(f"Corte de procesos MATLAB persistido: {circuit_path}")
+        raise _circuit_blocked(circuit_path)
     for path in chains_dir.glob("*/chain.json"):
         chain_record = read_json_object(path)
         if chain_record.get("state") == "running":

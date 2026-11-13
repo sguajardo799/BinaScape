@@ -662,6 +662,35 @@ incoherente requieren revisión independiente y no se descartan con este comando
 Repetir la misma reconciliación es idempotente; una publicación interrumpida puede
 completarse con el mismo comando, pero nunca autoriza otro intento distinto del indicado.
 
+#### Reiniciar un corte de procesos MATLAB
+
+Si el lote termina con `circuit_open=true` (`max_consecutive_failures` alcanzado, por
+ejemplo por licencia MathWorks no disponible), `render-static` queda bloqueado con
+`Corte de procesos MATLAB persistido`. Corrija primero la causa (revise los
+`console.log` de `metadata/diagnostics/matlab/`) y luego reinicie el corte. **No lanza
+MATLAB, no renueva presupuestos y no re-renderiza las variantes ya aceptadas.**
+
+1. Inspeccione sin escribir:
+
+   ```powershell
+   uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote
+   ```
+
+2. Aplique:
+
+   ```powershell
+   uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote --apply --confirm-stopped --reason "Licencia restaurada; no quedan procesos MATLAB"
+   ```
+
+3. Reanude `render-static` con `resume_if_possible=true` y `overwrite_existing=false`.
+
+Solo las cadenas cuyo último fallo de proceso se resolvió durante el corte vuelven a
+`scheduled` (o `exhausted` sin presupuesto). Las aceptadas se reutilizan. Una cadena
+`running` bloquea el reinicio: reconcíliela antes con `reconcile-static`. La evidencia
+queda en `metadata/indexes/circuit_resets/<reset_id>/` y el circuito anterior se archiva
+como `matlab_process_circuit.<reset_id>.json`. Editar el JSON del circuito a mano no
+basta: la cadena cortada sigue bloqueando la reanudación.
+
 Las rutas públicas WAV/sidecar no cambian. Antes de repetir se archivan solo restos
 propios del proceso terminado, bajo su intento, con journal de rutas originales,
 destinos, tamaños y SHA-256. Snapshot y constancia permanecen intactos. Un archivo
