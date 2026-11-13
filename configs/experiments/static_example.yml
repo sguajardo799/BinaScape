@@ -9,11 +9,17 @@ experiment:
 
 execution:
   num_simulations: 100
-  num_workers: 1
+  # Pool size: one MATLAB session (one license) runs a parallel pool with this
+  # many workers. 3 is what a 14 GB machine holds (~1.8 GB per MATLAB process).
+  num_workers: 3
   overwrite_existing: false
   resume_if_possible: false
   save_scene_manifest: true
   save_render_metadata: true
+  matlab_runner: pool
+  matlab_pool:
+    startup_timeout_s: 600
+    heartbeat_timeout_s: 300
 
 raven:
   base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
