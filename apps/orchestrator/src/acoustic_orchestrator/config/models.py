@@ -28,6 +28,12 @@ class MatlabProcessRetryConfig(StrictConfigModel):
         return self
 
 
+class MatlabPoolConfig(StrictConfigModel):
+    """Timeouts of the shared MATLAB pool session (`execution.matlab_runner: pool`)."""
+    startup_timeout_s: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)] = 600.0
+    heartbeat_timeout_s: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)] = 300.0
+
+
 class ExecutionConfig(StrictConfigModel):
     num_simulations: int
     num_workers: int
@@ -36,6 +42,10 @@ class ExecutionConfig(StrictConfigModel):
     save_scene_manifest: bool = True
     save_render_metadata: bool = True
     matlab_process_retry: MatlabProcessRetryConfig = Field(default_factory=MatlabProcessRetryConfig)
+    # "process": one `matlab -batch` per attempt. "pool": one MATLAB session per run
+    # rendering attempts on a local parallel pool (one license checkout).
+    matlab_runner: Literal["process", "pool"] = "process"
+    matlab_pool: MatlabPoolConfig = Field(default_factory=MatlabPoolConfig)
 
 
 class RavenConfig(StrictConfigModel):

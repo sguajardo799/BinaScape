@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, NotRequired, TypedDict
 
 from acoustic_orchestrator.config.models import CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import resolve_output_paths
@@ -18,10 +18,14 @@ from acoustic_orchestrator.pipeline.matlab_diagnostics import MatlabDiagnostics,
 from acoustic_orchestrator.pipeline.render_attempt import RenderAttempt
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
 
+if TYPE_CHECKING:
+    from acoustic_orchestrator.pipeline.matlab_pool import MatlabPoolSession, PoolSessionFailure
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MATLAB_APP_DIR = (PROJECT_ROOT.parent / "matlab").resolve()
 MATLAB_ENTRYPOINT = MATLAB_APP_DIR / "run_raven_static_render.m"
+MATLAB_POOL_ENTRYPOINT = MATLAB_APP_DIR / "run_raven_pool_server.m"
 PYROOMACOUSTICS_WORKER_MODULE = "acoustic_orchestrator.backends.pyroomacoustics.worker"
 
 
@@ -93,6 +97,62 @@ def render_manifest_with_matlab(
     return result
 
 
+def render_manifest_with_matlab_pool(
+    manifest_path: Path, session: "MatlabPoolSession", *, diagnostics_dir: Path | None = None,
+    attempts_dir: Path | None = None, attempt: RenderAttempt | None = None,
+    progress: ProgressReporter | None = None,
+) -> MatlabProcessResult:
+    """Run one attempt as a job of the shared MATLAB pool session (same contract as a process)."""
+    from acoustic_orchestrator.pipeline.matlab_pool import PoolSessionFailure
+
+    attempt, diagnostics = _prepare_process(manifest_path, attempts_dir, diagnostics_dir, attempt)
+    command = ["matlab_pool", "run_raven_static_render", attempt.snapshot_path.as_posix()]
+    request = {
+        "schema_version": 1, "attempt_id": attempt.attempt_id,
+        "snapshot_path": attempt.snapshot_path.resolve().as_posix(),
+        "diagnostics": ({"attempt_id": diagnostics.attempt_id, "events_path": diagnostics.events_path.resolve().as_posix()}
+                        if diagnostics.ready else None),
+        "completion_context": {
+            "attempt_id": attempt.attempt_id, "variant_id": attempt.variant_id,
+            "manifest_sha256": attempt.manifest_sha256,
+            "completion_path": attempt.completion_path.resolve().as_posix(),
+            "failure_path": attempt.failure_path.resolve().as_posix(),
+        },
+        "console_path": diagnostics.console_path.resolve().as_posix(),
+    }
+    attempt.record.update(matlab_runner="pool", pool_session_id=None, pool_worker_id=None)
+
+    def require_entrypoint() -> None:
+        if not MATLAB_POOL_ENTRYPOINT.is_file():
+            raise FileNotFoundError(f"No se encontró el servidor de pool de MATLAB: {MATLAB_POOL_ENTRYPOINT}")
+
+    def execute(options: dict[str, Any]) -> subprocess.CompletedProcess:
+        try:
+            exit_code, worker_id, session_id = session.run_job(attempt.attempt_id, request)
+        except PoolSessionFailure as failure:
+            attempt.record.update(pool_session_id=failure.session_id, pool_session_failure=failure.as_record())
+            _append_session_console(diagnostics.console_path, failure)
+            raise subprocess.CalledProcessError(failure.exit_code, command) from failure
+        attempt.record.update(pool_session_id=session_id, pool_worker_id=worker_id)
+        if exit_code != 0:
+            raise subprocess.CalledProcessError(exit_code, command)
+        return subprocess.CompletedProcess(command, 0)
+
+    return _run_render_process(attempt, diagnostics, command, progress=progress,
+                               before_launch=require_entrypoint, execute=execute)
+
+
+def _append_session_console(console_path: Path, failure: "PoolSessionFailure") -> None:
+    """Give a failed attempt the session console, where startup errors (e.g. licensing) appear."""
+    try:
+        session_console = failure.console_path.read_bytes()
+        with console_path.open("ab") as console:
+            console.write(f"\n[pool session {failure.session_id}: {failure.reason}, exit {failure.exit_code}]\n".encode())
+            console.write(session_console)
+    except Exception as exc:
+        diagnostic_warning(f"could not copy MATLAB pool console for {failure.session_id}: {exc}")
+
+
 def isolated_matlab_env() -> tuple[dict[str, str], Path]:
     """Environment with a fresh, private ``MATLAB_PREFDIR`` (outside batch outputs) and its path.
 
@@ -150,8 +210,19 @@ def _run_render_process(
     attempt: RenderAttempt, diagnostics: MatlabDiagnostics, command: list[str], *,
     progress: ProgressReporter | None, before_launch: Callable[[], None] | None = None,
     env: dict[str, str] | None = None,
+    execute: Callable[[dict[str, Any]], subprocess.CompletedProcess] | None = None,
 ) -> MatlabProcessResult:
-    """Shared render-process core: attempt record, diagnostics, ``subprocess.run(check=True)``, status."""
+    """Shared render-process core: attempt record, diagnostics, execution, status.
+
+    ``execute`` receives the console options (``stdout``/``stderr``/``env``) and
+    must behave like ``subprocess.run(command, check=True, **options)``: return a
+    completed process or raise ``CalledProcessError`` for a non-zero exit and
+    ``OSError`` when the render could not be launched. The default runs
+    ``command`` as a subprocess; the pool runner submits a job instead.
+    """
+    if execute is None:
+        def execute(options: dict[str, Any]) -> subprocess.CompletedProcess:
+            return subprocess.run(command, check=True, **options)
     started = time.monotonic()
     attempt.record["command"] = command
     attempt.save()  # Functional storage must be ready before launching the process.
@@ -169,7 +240,7 @@ def _run_render_process(
         options: dict[str, Any] = {} if console is None else {"stdout": console, "stderr": subprocess.STDOUT}
         if env is not None:
             options["env"] = env
-        completed = subprocess.run(command, check=True, **options)
+        completed = execute(options)
         if type(completed.returncode) is not int:
             raise RuntimeError("No se observó un código de salida válido del proceso de render")
         exit_code = completed.returncode

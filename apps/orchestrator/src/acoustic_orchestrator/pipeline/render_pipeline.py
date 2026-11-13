@@ -25,6 +25,7 @@ from acoustic_orchestrator.pipeline.matlab_runner import (
     build_render_variant_paths,
     build_single_receiver_render_manifest,
     render_manifest_with_matlab,
+    render_manifest_with_matlab_pool,
     render_manifest_with_pyroomacoustics,
     write_single_receiver_render_manifest,
     receiver_variants,
@@ -40,6 +41,7 @@ from acoustic_orchestrator.pipeline.output_index import (
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
 from acoustic_orchestrator.pipeline.runtime_audio import prepare_scene_source_assets
 from acoustic_orchestrator.pipeline.matlab_runner import MatlabProcessResult
+from acoustic_orchestrator.pipeline.matlab_pool import MatlabPoolSession
 from acoustic_orchestrator.pipeline.render_acceptance import RenderAcceptance, RenderValidationError, evaluate_render, persist_acceptance
 from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs, validate_render
 from acoustic_orchestrator.pipeline.render_backends import manifest_render_backend
@@ -143,72 +145,82 @@ def _render_static_scenes_locked(
                 metadata_required=metadata_required,
             ),
         )
-    attempt_records: list[dict[str, Any]] = []
-    stage = _CanonicalStage(
-        config=config, layout=layout, coordinator=coordinator, existing_records=existing_records,
-        variant_records=variant_records, resume_history=resume_history, sampling_summary=sampling_summary,
-        matlab_executable=matlab_executable, attempt_records=attempt_records, lock=lock, progress=progress,
-    )
-    canonical_workers = min(config.execution.num_workers, len(manifest_paths))
-    progress.begin("Render canonico", len(manifest_paths), "escenas", parallel=canonical_workers > 1)
-    if canonical_workers > 1:
-        _render_canonical_in_parallel(stage, manifest_paths, canonical_workers)
-    else:
-        _render_canonical_sequentially(stage, manifest_paths)
-    first_render_error = stage.first_render_error
-    render_jobs = stage.render_jobs
-    # Scene order, not completion order, decides every downstream list.
-    finished = sorted(stage.scenes, key=lambda scene: scene.position)
-    accepted_manifest_paths = [scene.manifest_path for scene in finished if scene.accepted]
-    render_tasks: list[RenderTask] = [task for scene in finished for task in scene.remaining_tasks]
-    reused_remaining = [variant_id for scene in finished for variant_id in scene.reused_remaining]
+    if config.execution.matlab_runner == "pool":
+        # Started lazily on the first RAVEN dispatch: a fully resumed run opens no session.
+        coordinator.matlab_pool = MatlabPoolSession(
+            layout["render_attempts_dir"].parent / "matlab_pool", pool_size=config.execution.num_workers,
+            timeouts=config.execution.matlab_pool, matlab_executable=matlab_executable,
+        )
+    try:
+        attempt_records: list[dict[str, Any]] = []
+        stage = _CanonicalStage(
+            config=config, layout=layout, coordinator=coordinator, existing_records=existing_records,
+            variant_records=variant_records, resume_history=resume_history, sampling_summary=sampling_summary,
+            matlab_executable=matlab_executable, attempt_records=attempt_records, lock=lock, progress=progress,
+        )
+        canonical_workers = min(config.execution.num_workers, len(manifest_paths))
+        progress.begin("Render canonico", len(manifest_paths), "escenas", parallel=canonical_workers > 1)
+        if canonical_workers > 1:
+            _render_canonical_in_parallel(stage, manifest_paths, canonical_workers)
+        else:
+            _render_canonical_sequentially(stage, manifest_paths)
+        first_render_error = stage.first_render_error
+        render_jobs = stage.render_jobs
+        # Scene order, not completion order, decides every downstream list.
+        finished = sorted(stage.scenes, key=lambda scene: scene.position)
+        accepted_manifest_paths = [scene.manifest_path for scene in finished if scene.accepted]
+        render_tasks: list[RenderTask] = [task for scene in finished for task in scene.remaining_tasks]
+        reused_remaining = [variant_id for scene in finished for variant_id in scene.reused_remaining]
 
-    progress.finish("interrumpido" if first_render_error is not None else "")
-    manifest_paths = accepted_manifest_paths
-    _refresh_reverberation_batch(config, manifest_paths, sampling_summary)
-    if first_render_error is not None:
-        raise RenderStaticRunError(
-            manifest_paths=manifest_paths,
-            summary=_build_render_summary(
-                variant_records,
-                render_jobs,
-                index_path,
-                sampling_summary=sampling_summary,
-                clarity_summary=None,
-                attempt_records=attempt_records,
-            ),
-            cause=first_render_error,
-        ) from first_render_error
+        progress.finish("interrumpido" if first_render_error is not None else "")
+        manifest_paths = accepted_manifest_paths
+        _refresh_reverberation_batch(config, manifest_paths, sampling_summary)
+        if first_render_error is not None:
+            raise RenderStaticRunError(
+                manifest_paths=manifest_paths,
+                summary=_build_render_summary(
+                    variant_records,
+                    render_jobs,
+                    index_path,
+                    sampling_summary=sampling_summary,
+                    clarity_summary=None,
+                    attempt_records=attempt_records,
+                ),
+                cause=first_render_error,
+            ) from first_render_error
 
-    render_jobs += len(render_tasks)
-    progress.begin("Otras variantes", len(render_tasks) + len(reused_remaining), "variantes",
-                   parallel=config.execution.num_workers > 1)
-    for variant_id in reused_remaining:
-        progress.resolve(variant_id, "reutilizadas")
-    first_render_error = _run_render_tasks(
-        render_tasks,
-        num_workers=config.execution.num_workers,
-        matlab_executable=matlab_executable,
-        metadata_required=metadata_required,
-        index_path=index_path,
-        variant_records=variant_records,
-        attempt_records=attempt_records,
-        coordinator=coordinator,
-    )
-    progress.finish("interrumpido" if first_render_error is not None else "")
-    if first_render_error is not None:
-        raise RenderStaticRunError(
-            manifest_paths=manifest_paths,
-            summary=_build_render_summary(
-                variant_records,
-                render_jobs,
-                index_path,
-                sampling_summary=sampling_summary,
-                clarity_summary=None,
-                attempt_records=attempt_records,
-            ),
-            cause=first_render_error,
-        ) from first_render_error
+        render_jobs += len(render_tasks)
+        progress.begin("Otras variantes", len(render_tasks) + len(reused_remaining), "variantes",
+                       parallel=config.execution.num_workers > 1)
+        for variant_id in reused_remaining:
+            progress.resolve(variant_id, "reutilizadas")
+        first_render_error = _run_render_tasks(
+            render_tasks,
+            num_workers=config.execution.num_workers,
+            matlab_executable=matlab_executable,
+            metadata_required=metadata_required,
+            index_path=index_path,
+            variant_records=variant_records,
+            attempt_records=attempt_records,
+            coordinator=coordinator,
+        )
+        progress.finish("interrumpido" if first_render_error is not None else "")
+        if first_render_error is not None:
+            raise RenderStaticRunError(
+                manifest_paths=manifest_paths,
+                summary=_build_render_summary(
+                    variant_records,
+                    render_jobs,
+                    index_path,
+                    sampling_summary=sampling_summary,
+                    clarity_summary=None,
+                    attempt_records=attempt_records,
+                ),
+                cause=first_render_error,
+            ) from first_render_error
+    finally:
+        if coordinator.matlab_pool is not None:
+            coordinator.matlab_pool.close()
 
     clarity_summary = None
     if config.hearing_degradation.enabled:
@@ -595,6 +607,7 @@ def _render_canonical_in_parallel(stage: _CanonicalStage, manifest_paths: list[P
         futures[executor.submit(
             _run_single_render_task, scene.canonical_task, matlab_executable=stage.matlab_executable,
             metadata_required=stage.metadata_required, canonical=True, progress=coordinator.progress,
+            matlab_pool=coordinator.matlab_pool,
         )] = scene
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -656,6 +669,8 @@ class _RenderCoordinator:
         self.index_path = index_path
         self.records = records
         self.progress = progress or ProgressReporter()
+        # Shared MATLAB session for `execution.matlab_runner: pool`; None runs one process per attempt.
+        self.matlab_pool: MatlabPoolSession | None = None
         self.chains: dict[str, RetryChain] = {}
         self.circuit = BatchCircuit(
             index_path.parent / "matlab_process_circuit.json",
@@ -784,7 +799,7 @@ class _RenderCoordinator:
                 return {"task": task, "error": prior_error or exc}
             result = _run_single_render_task(
                 task, matlab_executable=matlab_executable, metadata_required=metadata_required, canonical=canonical,
-                progress=self.progress,
+                progress=self.progress, matlab_pool=self.matlab_pool,
             )
             if not self.resolve(result, metadata_required=metadata_required, attempt_records=attempt_records):
                 return result
@@ -1122,7 +1137,7 @@ def _run_render_tasks_in_parallel(
                     future = executor.submit(
                         _run_single_render_task, task, matlab_executable=matlab_executable,
                         metadata_required=metadata_required,
-                        progress=coordinator.progress,
+                        progress=coordinator.progress, matlab_pool=coordinator.matlab_pool,
                     )
                     futures[future] = task
                 except Exception as exc:
@@ -1157,7 +1172,7 @@ def _run_render_tasks_in_parallel(
 
 def _run_single_render_task(
     task: RenderTask, *, matlab_executable: str, metadata_required: bool = False, canonical: bool = False,
-    progress: ProgressReporter | None = None,
+    progress: ProgressReporter | None = None, matlab_pool: MatlabPoolSession | None = None,
 ) -> RenderResult:
     render_error: Exception | None = None
     try:
@@ -1170,7 +1185,12 @@ def _run_single_render_task(
             if progress.enabled:
                 runner_options["progress"] = progress
         # Single backend dispatch point; an absent render.backend means RAVEN.
-        if _runtime_render_backend(task) == "raven":
+        if _runtime_render_backend(task) == "raven" and matlab_pool is not None:
+            process_result = render_manifest_with_matlab_pool(
+                task["runtime_manifest_path"], matlab_pool, diagnostics_dir=task["diagnostics_dir"],
+                attempts_dir=task["attempts_dir"], **runner_options,
+            )
+        elif _runtime_render_backend(task) == "raven":
             process_result = render_manifest_with_matlab(
                 task["runtime_manifest_path"], matlab_executable=matlab_executable,
                 diagnostics_dir=task["diagnostics_dir"],

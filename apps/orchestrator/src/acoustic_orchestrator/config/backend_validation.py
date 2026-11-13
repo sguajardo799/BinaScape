@@ -48,6 +48,9 @@ def validate_backend_config(errors: list[str], config: AppConfig) -> None:
             errors.append("pyroomacoustics no aplica al backend seleccionado render.backend=raven")
         return
 
+    if config.execution.matlab_runner == "pool":
+        errors.append(f"execution.matlab_runner=pool solo está soportado por render.backend=raven; "
+                      f"no aplica a render.backend={name}")
     if config.pyroomacoustics is None:
         errors.append(f"pyroomacoustics es obligatorio cuando render.backend={name} "
                       "(requiere pyroomacoustics.max_order y pyroomacoustics.air_absorption)")
