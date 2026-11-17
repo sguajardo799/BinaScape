@@ -107,6 +107,30 @@ Cada intento tiene UUID hexadecimal nuevo y conserva:
 - `failure.json`: nombre reservado para un informe funcional de entrada inválida,
   independiente de la constancia y de eventos diagnósticos; su ausencia es normal.
 
+### Preferencias de MATLAB aisladas por proceso
+
+Cada proceso MATLAB que lanza el orquestador (y el diagnóstico
+`scripts/diagnostics/rt30_reproducibility.py`) arranca con `MATLAB_PREFDIR`
+apuntando a una carpeta nueva y vacía, creada en el temporal del sistema con el
+prefijo `binascape-matlab-prefs-`, fuera de las salidas del lote. El valor
+reemplaza cualquier `MATLAB_PREFDIR` heredado. Así los procesos concurrentes no
+comparten `matlabprefs.mat` (el ITA-Toolbox lo reescribe al primer acceso) y la
+carpeta de preferencias del usuario no se lee ni se escribe. No se copian
+preferencias: ITA usa sus valores por defecto. El backend Pyroomacoustics no
+recibe la variable.
+
+Al terminar el proceso (éxito, código no nulo o fallo de lanzamiento), la carpeta
+se elimina best-effort. Si no se puede eliminar se emite un `RuntimeWarning` y el
+estado, código, clasificación y aceptación del intento no cambian. `outcome.json`
+registra el campo opcional aditivo
+`matlab_prefdir: {"path": ..., "cleanup": "removed" | "failed"}`; los lectores
+existentes (historial, `reconcile-static`, `reset-circuit`) lo ignoran.
+
+Si el orquestador muere antes de la limpieza pueden quedar carpetas huérfanas. No
+afectan la reanudación; con el orquestador detenido se borran a mano, por ejemplo
+en PowerShell:
+`Get-ChildItem $env:TEMP -Directory -Filter 'binascape-matlab-prefs-*' | Remove-Item -Recurse -Force`.
+
 El contexto funcional previsto para MATLAB es independiente del argumento de
 diagnóstico: `attempt_id`, `variant_id`, `manifest_sha256`, `completion_path` y el
 campo aditivo `failure_path`.
@@ -149,6 +173,50 @@ eventos o resumen diagnóstico no modifican snapshots, constancias ni decisiones
 En cambio, los errores de almacenamiento funcional se propagan. Los hashes no son
 firmas contra productores maliciosos ni prueban el contenido de assets externos
 que hayan cambiado sin modificar sus rutas en el manifiesto.
+
+### Sesión MATLAB con pool (`execution.matlab_runner: pool`)
+
+`execution.matlab_runner` acepta `process` (por defecto: un `matlab -batch` por
+intento) y `pool` (solo backend `raven`; con otro backend la validación lo
+rechaza antes de planificar). El modo no forma parte de la identidad del plan,
+así que un lote puede reanudarse en el otro modo. `execution.matlab_pool`
+(opcional) fija `startup_timeout_s` (600) y `heartbeat_timeout_s` (300), ambos
+positivos y finitos.
+
+En modo `pool`, cada ejecución de `render-static` lanza como máximo una sesión
+viva a la vez: un único `matlab -batch` que ejecuta
+`run_raven_pool_server(<session_dir>, num_workers, <pid del orquestador>)`, abre
+un pool local `Processes` de `num_workers` workers y atiende una cola en
+`metadata/matlab_pool/<session_id>/`:
+
+- `requests/<attempt_id>.json` (orquestador, renombre atómico): snapshot,
+  contexto de diagnóstico, contexto de constancia y ruta de consola del intento.
+- `results/<attempt_id>.json` (MATLAB, renombre atómico): `exit_code` (0 o 1),
+  `error`, `worker_id`, `started_at`, `finished_at`.
+- `ready.json` y `heartbeat.json` (MATLAB); `stop` (orquestador).
+- `invocation.json` y `console.log` de la sesión (orquestador).
+
+Cada trabajo ejecuta `run_raven_static_render` con los mismos argumentos que el
+modo `process`, así que snapshot, `outcome.json`, `completion.json`,
+`failure.json`, `events.jsonl` y `console.log` del intento no cambian. Un
+resultado distinto de cero se registra como `process_status=failed`,
+terminación observada y error `CalledProcessError`, igual que un proceso. Si la
+sesión termina, no queda lista dentro de `startup_timeout_s` o deja de refrescar
+el heartbeat durante `heartbeat_timeout_s`, cada intento que la esperaba falla
+como proceso observado con el código de la sesión (o 1), la consola de la
+sesión se agrega a su `console.log` y `outcome.json` registra
+`pool_session_failure` (`reason`: `startup_exited`, `startup_timeout`,
+`session_exited` o `heartbeat_stale`). Cuentan para la racha del corte y siguen
+la política de reintentos. El siguiente despacho arranca una sesión nueva.
+
+Campos aditivos de `outcome.json` en modo `pool`: `matlab_runner: "pool"`,
+`pool_session_id`, `pool_worker_id` y, ante caída, `pool_session_failure`.
+`command` vale `["matlab_pool", "run_raven_static_render", <snapshot>]`.
+
+La sesión usa su propio `MATLAB_PREFDIR` privado (sección anterior), que
+comparten sus workers; antes de escribir `ready.json` el servidor hace el primer
+acceso a las preferencias del ITA-Toolbox en cada worker, de a uno por vez. El
+aislamiento de materiales y modelo de RAVEN sigue siendo por variante.
 
 ### Informe funcional de entrada inválida
 

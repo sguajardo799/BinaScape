@@ -267,6 +267,68 @@ order. Do not configure more
 workers than available MATLAB/RAVEN licenses, and return to `1` if the local
 RAVEN setup shows hidden global state.
 
+Each MATLAB process runs with its own MATLAB preferences directory: the
+orchestrator sets `MATLAB_PREFDIR` to a fresh, empty directory in the system
+temp folder (prefix `binascape-matlab-prefs-`, outside the batch outputs),
+overriding any inherited value. Parallel renders therefore never race on the
+shared `matlabprefs.mat`, and your own MATLAB preferences are neither read nor
+written by renders. The directory is removed when the process ends, whether it
+succeeded, failed or could not launch; a removal failure only emits a
+`RuntimeWarning` and never changes the attempt outcome. Each attempt's
+`outcome.json` records `matlab_prefdir: {"path": ..., "cleanup": "removed" | "failed"}`.
+`scripts/diagnostics/rt30_reproducibility.py` applies the same isolation. If
+the orchestrator is killed mid-render, leftover directories are harmless;
+delete them with the orchestrator stopped, for example:
+`Get-ChildItem $env:TEMP -Directory -Filter 'binascape-matlab-prefs-*' | Remove-Item -Recurse -Force`.
+
+### One MATLAB session with a parallel pool (`execution.matlab_runner: pool`)
+
+With a single MATLAB license, several `matlab -batch` processes started at the
+same time can fail with `Unable to communicate with required MathWorks services
+(error 5001)`. Set `execution.matlab_runner: pool` (RAVEN only; the default is
+`process`) to render with **one** MATLAB session per run instead: the
+orchestrator starts one `matlab -batch run_raven_pool_server(...)` process,
+which opens a local Parallel Computing Toolbox pool of `num_workers` workers
+and renders up to `num_workers` attempts at once. Only that session checks out
+a MATLAB license.
+
+```yaml
+execution:
+  num_workers: 3          # what the machine can hold; see below
+  matlab_runner: pool     # default: process
+  matlab_pool:            # optional
+    startup_timeout_s: 600   # pool must be ready within this time
+    heartbeat_timeout_s: 300 # session considered hung after this silence
+```
+
+Every variant is still an attempt with the same files and rules as in
+`process` mode (snapshot, `outcome.json`, `completion.json`/`failure.json`,
+`console.log`, `events.jsonl`, exit code), so acceptance, retries, the batch
+circuit, resume, `reconcile-static` and `reset-circuit` behave the same; a run
+can switch modes and resume. A job that raises is an observed exit `1`
+(`CalledProcessError`). If the session exits, never becomes ready (for example
+a licensing error at startup) or stops refreshing its heartbeat, every
+attempt waiting on it fails as an observed process failure with the session's
+exit code and the session console appended to its `console.log`; the next
+dispatch starts a new session. The session is started lazily on the first
+RAVEN dispatch (a fully resumed run opens none) and stopped when the render
+stages end, including on errors and an open circuit.
+
+Pool attempts record `matlab_runner: "pool"`, `pool_session_id`,
+`pool_worker_id` and, on session failure, `pool_session_failure` (`reason`:
+`startup_exited`, `startup_timeout`, `session_exited` or `heartbeat_stale`).
+Each session lives in `metadata/matlab_pool/<session_id>/` with
+`invocation.json` (command, private `MATLAB_PREFDIR`, start/ready/finish times,
+exit code), `console.log`, and the `requests/`/`results/` job queue. The
+session's private preferences directory is shared by its workers; before
+reporting ready, the server performs the first ITA-Toolbox preferences access
+on one worker at a time so no worker reads `matlabprefs.mat` while another
+rewrites it.
+
+Choose `num_workers` for the memory available: each worker is a full MATLAB
+process. On the development machine (13.9 GB RAM) a pool of 3 workers starts
+and renders correctly, while a 4th worker exits during startup.
+
 The same setting also parallelizes static scene planning: scenes are sampled and
 inspected in up to `min(num_workers, CPU count, num_simulations)` worker
 processes and merged in scene order, so manifests, the static plan and the

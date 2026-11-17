@@ -118,6 +118,7 @@ def _runtime(tmp_path: Path) -> Path:
 
 def test_worker_command_environment_and_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     seen = {}
+    monkeypatch.delenv("MATLAB_PREFDIR", raising=False)
 
     def fake_run(command, check, **kwargs):
         seen.update(command=command, check=check, env=kwargs.get("env"))
@@ -137,6 +138,7 @@ def test_worker_command_environment_and_record(tmp_path: Path, monkeypatch: pyte
         "--failure-path", attempt.failure_path.as_posix(),
         "--events-path", (tmp_path / "diag" / attempt.attempt_id / "events.jsonl").as_posix()]
     assert seen["env"]["OMP_NUM_THREADS"] == "1" and seen["env"]["PRA_NUM_THREADS"] == "1"
+    assert "MATLAB_PREFDIR" not in seen["env"]  # Preference isolation is MATLAB-only.
     assert result.process_status == "succeeded" and result.exit_code == 0 and result.error is None
     record = read_json_object(attempt.outcome_path)
     assert record["command"] == seen["command"] and record["process_status"] == "succeeded"

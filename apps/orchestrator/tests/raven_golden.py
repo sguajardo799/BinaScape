@@ -96,8 +96,10 @@ def _material_text(absorption: float) -> str:
 def build_example_workspace(root: Path, name: str) -> Path:
     """Copy the example config into a fixture workspace with synthetic assets.
 
-    Only the Windows RPF path, the scene count and the Clarity submission are
-    adjusted; every acoustic sampling parameter is the example's own.
+    Only the Windows RPF path, the scene count, the Clarity submission and the
+    MATLAB runner (the pool runner needs a real MATLAB session; manifests do not
+    depend on it) are adjusted; every acoustic sampling parameter is the
+    example's own.
     """
     workspace = root / "workspace"
     experiments = workspace / "configs" / "experiments"
@@ -125,6 +127,7 @@ def build_example_workspace(root: Path, name: str) -> Path:
     text = text.replace("C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf", "../../base_room.rpf")
     text = text.replace("num_simulations: 100", "num_simulations: 2")
     text = text.replace("hearing_degradation:\n  enabled: true", "hearing_degradation:\n  enabled: false")
+    text = text.replace("matlab_runner: pool", "matlab_runner: process")
     config_path = experiments / f"{name}.yml"
     config_path.write_text(text, encoding="utf-8")
     return config_path
