@@ -332,8 +332,13 @@ and renders correctly, while a 4th worker exits during startup.
 The same setting also parallelizes static scene planning: scenes are sampled and
 inspected in up to `min(num_workers, CPU count, num_simulations)` worker
 processes and merged in scene order, so manifests, the static plan and the
-sampling failure journal are identical to the sequential run. Custom samplers
-that cannot be pickled (for example closures) are planned in-process.
+sampling failure journal are identical to the sequential run. A worker that
+finishes a scene takes the next pending one without waiting for slower,
+earlier scenes, with at most `2 * workers` scenes in flight. Fingerprints of
+the selected dependencies (audio, receiver IRs, materials) are computed on
+background threads as soon as a scene finishes, once per path and inspection,
+overlapping with the sampling of other scenes. Custom samplers that cannot be
+pickled (for example closures) are planned in-process.
 
 The canonical single-output example enables `binaural_hrtf`. MATLAB requires
 `render.sample_rate_hz: 44100`. Before completing the remaining variants,
