@@ -141,6 +141,9 @@ def normalized_static_config(config: AppConfig) -> dict:
         data["render"].pop("backend")
     if data.get("pyroomacoustics") is None:
         data.pop("pyroomacoustics", None)
+    # Independent receiver IR sampling predates subject pairing; omit it at its default.
+    if data["receiver_outputs"].get("subject_pairing") == "independent":
+        data["receiver_outputs"].pop("subject_pairing")
     data["execution"] = {
         "num_simulations": config.execution.num_simulations,
         "save_render_metadata": config.execution.save_render_metadata,

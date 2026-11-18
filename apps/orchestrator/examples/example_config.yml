@@ -76,6 +76,10 @@ receiver_sampling:
       fixed: 0.0
 
 receiver_outputs:
+  # independent (default): cada salida HRTF/HARTF sortea su archivo por separado.
+  # shared: un sujeto por escena (prefijo antes del primer '_', p. ej. id22_HRTF.daff)
+  # usado en todas las salidas HRTF/HARTF habilitadas; requiere num_hrtfs: 1.
+  subject_pairing: independent
   binaural_hrtf:
     enabled: true
     ir_catalog_path: ../../../assets/hrtf/   # Fijarme en resolución sobretodo en elevación ya que se asumen posiciones discretas, o generar posiciones en base a resolución

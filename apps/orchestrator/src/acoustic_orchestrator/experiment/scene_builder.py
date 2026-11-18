@@ -82,6 +82,7 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
                 {
                     "hrtf_id": hrtf["hrtf_id"],
                     "hrtf_path": _absolute_path(hrtf["hrtf_path"]),
+                    **({"subject_id": hrtf["subject_id"]} if "subject_id" in hrtf else {}),
                 }
                 for hrtf in sampled_scene["receiver"]["hrtfs"]
             ],

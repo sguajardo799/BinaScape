@@ -22,6 +22,7 @@ from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeho
 from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
 from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
 from acoustic_orchestrator.source_audio import list_source_wavs
+from acoustic_orchestrator.receiver_ir_subjects import subject_catalog
 from acoustic_orchestrator.config.backend_validation import validate_backend_config
 
 
@@ -322,6 +323,13 @@ def validate_config(config: AppConfig) -> None:
         else:
             _validate_receiver_output(errors, output_name, output)
 
+    if config.receiver_outputs.subject_pairing == "shared":
+        _validate_subject_pairing(errors, {
+            output_name: output
+            for output_name, output in enabled_outputs.items()
+            if not isinstance(output, CircularArrayOutputConfig)
+        })
+
     _validate_output_naming(errors, config, enabled_outputs)
 
     for target_name in config.hearing_degradation.input_targets:
@@ -581,6 +589,32 @@ def _validate_receiver_output(errors: list[str], output_name: str, output: Recei
     if not is_safe_output_subdir(output.output_subdir):
         errors.append(
             f"receiver_outputs.{output_name}.output_subdir debe ser un subdirectorio relativo no vacío y sin segmentos inseguros"
+        )
+
+
+def _validate_subject_pairing(errors: list[str], outputs: dict[str, ReceiverOutputConfig]) -> None:
+    common_subjects: set[str] | None = None
+    for output_name, output in outputs.items():
+        if output.num_hrtfs != 1:
+            errors.append(
+                f"receiver_outputs.{output_name}.num_hrtfs debe ser 1 con receiver_outputs.subject_pairing=shared"
+            )
+        if not output.ir_catalog_path.is_dir():
+            continue
+        subjects, unidentified, duplicates = subject_catalog(sorted(output.ir_catalog_path.glob(output.file_pattern)))
+        for path in unidentified:
+            errors.append(
+                f"receiver_outputs.{output_name}: el archivo {path.name} no tiene ID de sujeto "
+                "(prefijo antes del primer '_') requerido por subject_pairing=shared"
+            )
+        for subject, paths in sorted(duplicates.items()):
+            names = ", ".join(path.name for path in paths)
+            errors.append(f"receiver_outputs.{output_name}: el sujeto {subject} aparece en varios archivos ({names})")
+        catalog_subjects = set(subjects) | set(duplicates)
+        common_subjects = catalog_subjects if common_subjects is None else common_subjects & catalog_subjects
+    if common_subjects is not None and not common_subjects:
+        errors.append(
+            "receiver_outputs.subject_pairing=shared: los catálogos de receiver IR habilitados no comparten ningún sujeto"
         )
 
 
