@@ -342,6 +342,33 @@ positive bands and can retry within the scene budget. This measured T30 is
 distinct from the seven-band Sabine estimate used by sampling. The runtime also
 supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
+### Receiver IR subject pairing
+
+By default (`receiver_outputs.subject_pairing: independent`) each enabled
+HRTF/HARTF output draws its IR file independently, so the `binaural_hrtf`,
+`bte_front_hartf`, and `bte_rear_hartf` renders of one scene usually come from
+different subjects. Set `subject_pairing: shared` to draw one subject per scene
+and use that subject's file in every enabled HRTF/HARTF output:
+
+```yaml
+receiver_outputs:
+  subject_pairing: shared   # independent (default) | shared
+  binaural_hrtf: {enabled: true, ir_catalog_path: ../assets/hrtf, ...}
+  bte_front_hartf: {enabled: true, ir_catalog_path: ../assets/hartf/front, ...}
+  bte_rear_hartf: {enabled: true, ir_catalog_path: ../assets/hartf/rear, ...}
+```
+
+The subject ID is the filename part before the first `_`
+(`id22_HRTF.daff`, `id22_HARTF_front.daff`, `id22_HARTF_rear.daff` → `id22`).
+The subject is drawn uniformly from the IDs present in every enabled catalog.
+In `shared` mode validation rejects `num_hrtfs` other than 1, catalog files
+without a subject ID, a subject repeated within one catalog, and catalogs with
+no subject in common. Each `receiver.hrtfs[]` entry of the scene manifest then
+carries `subject_id`. The circular array is not part of the pairing.
+`independent` keeps the previous sampling, so existing configs and seeds
+reproduce the same scenes; `shared` draws differ from `independent` for the
+same seed.
+
 ## Diagnóstico por invocación MATLAB
 
 ### Progreso de planificación

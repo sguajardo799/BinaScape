@@ -45,6 +45,7 @@ from acoustic_orchestrator.experiment.reverberation_sampling import (
     classify,
 )
 from acoustic_orchestrator.experiment.treatment_catalog import get_preset, mix_absorption, preset_ids
+from acoustic_orchestrator.receiver_ir_subjects import subject_catalog
 from acoustic_orchestrator.experiment.geometry import (
     ABS_COORD_TOL_M,
     build_l_shape_footprint,
@@ -599,6 +600,8 @@ def _sample_receiver(config: AppConfig, room: dict, rng: random.Random) -> dict:
 
 
 def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
+    if config.receiver_outputs.subject_pairing == "shared":
+        return _sample_shared_subject_hrtfs(config, rng)
     hrtfs: list[dict] = []
     for output_name, output in _enabled_outputs(config).items():
         matches = sorted(output.ir_catalog_path.glob(output.file_pattern))
@@ -611,6 +614,24 @@ def _sample_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
                 }
             )
     return hrtfs
+
+
+def _sample_shared_subject_hrtfs(config: AppConfig, rng: random.Random) -> list[dict]:
+    """Pick one subject per scene and use its file in every HRTF/HARTF output (validated upfront)."""
+    catalogs = {
+        output_name: subject_catalog(sorted(output.ir_catalog_path.glob(output.file_pattern)))[0]
+        for output_name, output in _enabled_outputs(config).items()
+    }
+    if not catalogs:
+        return []
+    common = set.intersection(*(set(subjects) for subjects in catalogs.values()))
+    if not common:
+        raise ValueError("receiver_outputs.subject_pairing=shared: los catálogos no comparten ningún sujeto")
+    subject_id = rng.choice(sorted(common))
+    return [
+        {"hrtf_id": output_name, "hrtf_path": subjects[subject_id], "subject_id": subject_id}
+        for output_name, subjects in catalogs.items()
+    ]
 
 
 def _sample_sources(

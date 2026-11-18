@@ -183,6 +183,7 @@ class ReceiverOutputsConfig(StrictConfigModel):
     bte_rear_hartf: ReceiverOutputConfig | None = None
     bte_front_hartf: ReceiverOutputConfig | None = None
     circular_array: CircularArrayOutputConfig | None = None
+    subject_pairing: Literal["independent", "shared"] = "independent"
 
 
 class ShoeboxGeometryConfig(StrictConfigModel):
