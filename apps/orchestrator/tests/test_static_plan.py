@@ -777,3 +777,109 @@ def test_dependency_fingerprinting_overlaps_with_scene_evaluation(tmp_path, monk
     config.execution.num_workers = 2
     plan = inspect_static_plan(config, layout, sample_scene=_first_scene_waits_for_parent_fingerprint)
     assert [m.scene_index for m in plan.manifests] == [0, 1, 2, 3]
+
+
+def _count_listings(monkeypatch, directory):
+    import os
+
+    from acoustic_orchestrator import source_audio
+
+    calls = []
+    original = os.scandir
+
+    def counting_scandir(path=".", *args, **kwargs):
+        if Path(path) == directory:
+            calls.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(source_audio.os, "scandir", counting_scandir)
+    return calls
+
+
+def test_sequential_inspection_lists_each_source_dir_once(tmp_path, monkeypatch):
+    config, layout = fixture_config(tmp_path, count=3)
+    config.execution.num_workers = 1
+    calls = _count_listings(monkeypatch, config.source_sampling.source_types[0].audio_dir)
+    inspect_static_plan(config, layout)
+    assert len(calls) == 1
+
+
+def _scan_counting_sampler(config, rng, index, **kwargs):
+    """Install a per-process scan counter on first use; one marker line per listing."""
+    import os
+
+    from acoustic_orchestrator import source_audio
+
+    if not getattr(source_audio, "_test_scan_counter", False):
+        directory = config.source_sampling.source_types[0].audio_dir
+        log = Path(os.environ[_MARKER_ENV]) / f"scans_{os.getpid()}.txt"
+        original = source_audio.os.scandir
+
+        def counting_scandir(path=".", *args, **kwargs):
+            if Path(path) == directory:
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write("scan\n")
+            return original(path, *args, **kwargs)
+
+        source_audio.os.scandir = counting_scandir
+        source_audio._test_scan_counter = True
+    return sampler.sample_static_scene(config, rng, index, **kwargs)
+
+
+def test_parallel_inspection_lists_each_source_dir_once_per_worker(tmp_path, monkeypatch):
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setenv(_MARKER_ENV, str(markers))
+    pools = _spy_process_pool(monkeypatch)
+    config, layout = fixture_config(tmp_path / "work", count=6)
+    config.execution.num_workers = 1
+    sequential = inspect_static_plan(config, layout)
+
+    config.execution.num_workers = 3
+    plan = inspect_static_plan(config, layout, sample_scene=_scan_counting_sampler)
+    assert pools == [3]
+    counts = [len(path.read_text(encoding="utf-8").splitlines()) for path in markers.glob("scans_*.txt")]
+    assert counts and max(counts) == 1
+    assert [m.manifest for m in plan.manifests] == [m.manifest for m in sequential.manifests]
+    assert plan.metadata == sequential.metadata
+
+
+def test_source_listing_is_refreshed_between_inspections_and_before_publication(tmp_path):
+    from test_generate_manifests import _write_test_wav
+
+    config, layout = fixture_config(tmp_path, count=2)
+    config.execution.overwrite_existing = True
+    audio_dir = config.source_sampling.source_types[0].audio_dir
+    event = config.source_sampling.source_types[0].event_type
+    first = inspect_static_plan(config, layout)
+    added = audio_dir / "added_between.wav"
+    _write_test_wav(added, duration_s=0.1)
+    second = inspect_static_plan(config, layout)
+    assert added.resolve().as_posix() not in first.catalog["sources"][event]
+    assert added.resolve().as_posix() in second.catalog["sources"][event]
+
+    _write_test_wav(audio_dir / "added_after.wav", duration_s=0.1)
+    with static_writer_lock(layout) as lock:
+        with pytest.raises(StaticPlanConflict, match="Sampling catalog changed after preflight"):
+            apply_static_plan(second, lock=lock)
+
+
+def test_plan_from_previous_source_listing_requires_explicit_fresh_run(tmp_path):
+    from acoustic_orchestrator.pipeline import static_plan
+
+    config, layout = fixture_config(tmp_path, count=2)
+    plan = publish(config, layout)
+    data = json.loads(plan.plan_path.read_text(encoding="utf-8"))
+    # Simulate a plan published by the previous source_audio.py implementation.
+    data["contract"]["generation"]["implementation"]["source_audio.py"] = "0" * 64
+    data["contract_hash"] = static_plan._hash(data["contract"])
+    plan.plan_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    before = snapshot(layout["run_root"])
+    with pytest.raises(StaticPlanConflict, match="Generation contract changed; requires resume=false and overwrite=true"):
+        inspect_static_plan(config, layout)
+    assert snapshot(layout["run_root"]) == before
+    config.execution.resume_if_possible = False
+    config.execution.overwrite_existing = True
+    replacement = publish(config, layout)
+    assert replacement.metadata["plan_revision_history"][-1]["reason"] == "generation_contract_changed"
+    assert [m.manifest for m in replacement.manifests] == [m.manifest for m in plan.manifests]

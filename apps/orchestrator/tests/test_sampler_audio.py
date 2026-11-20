@@ -145,3 +145,22 @@ def test_flat_sampling_matches_pre_identity_baseline(tmp_path: Path) -> None:
     assert hashlib.sha256(normalized.encode()).hexdigest() == (
         "cd375b2ee710049b4df505af115d2af8d8ed9bb7563454aca8d3f569641880f3"
     )
+
+
+def test_source_listing_order_matches_path_ordering_and_returns_fresh_lists(tmp_path: Path) -> None:
+    names = ["z.wav", "A.WAV", "b.Wav", "..wav", "ID02/clip.wav", "ID01/clip.WaV", "id01b/x.wav",
+             "ID01/Clip2.wav", "ID01/session/deep.wav", "ID10/a.wav", "ID9/a.wav",
+             # Characters where os.path.normcase and str.lower disagree on Windows.
+             "İd.wav", "K.wav", "ẞ.wav", "ß2.wav", "ÉCOLE.wav", "école2.wav", "ǅ.wav"]
+    for name in names:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        _write_test_wav(tmp_path / name, duration_s=0.1)
+    (tmp_path / "ID01" / "labels.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("", encoding="utf-8")
+    expected = sorted(tmp_path / name for name in names if name != "ID01/session/deep.wav")
+    first = list_source_wavs(tmp_path)
+    assert first == expected
+    first.clear()
+    assert list_source_wavs(tmp_path) == expected
+    (tmp_path / ".wav").write_bytes(b"")  # No suffix for pathlib: never a candidate.
+    assert tmp_path / ".wav" not in list_source_wavs(tmp_path)
