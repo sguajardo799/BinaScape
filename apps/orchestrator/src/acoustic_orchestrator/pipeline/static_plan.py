@@ -8,7 +8,7 @@ creates directories. A lock left by an interrupted writer requires intervention.
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ import math
 import os
 from pathlib import Path
 import pickle
-from typing import Callable, Iterator
+from typing import Callable, Container, Iterator
 import uuid
 
 from acoustic_orchestrator.config.models import AppConfig
@@ -464,25 +464,60 @@ def _plan_scenes_in_parallel(
     config: AppConfig, scene_inputs: list[_SceneInputs], failures_path: Path,
     sample_scene: Callable[..., dict], workers: int, progress: ProgressReporter,
     merge: Callable[[_SceneInputs, _SceneResult], None],
+    fingerprints: dict[Path, Future[tuple[int, int, str] | None]],
+    observed: Container[Path],
 ) -> None:
-    """Evaluate scenes in worker processes and merge results strictly in scene order."""
+    """Evaluate scenes in worker processes and merge results strictly in scene order.
+
+    Dispatch is completion-driven: a finished scene frees a slot for the next
+    pending one, so a slow early scene never starves idle workers. Finished
+    results wait in a buffer until every earlier scene has been merged.
+    Dependency fingerprints start on a thread pool as soon as a scene finishes,
+    once per path; ``merge`` consumes them (and their errors) in scene order.
+    """
     window = 2 * workers
-    futures: dict[int, Future[_SceneResult]] = {}
+    running: dict[Future[_SceneResult], int] = {}
+    finished: dict[int, Future[_SceneResult]] = {}
+    submitted = merged = 0
     executor = ProcessPoolExecutor(max_workers=workers)
+    hasher = ThreadPoolExecutor(max_workers=workers)
+
+    def prefetch(result: _SceneResult) -> None:
+        if result.manifest is None or result.conflict is not None:
+            return
+        try:
+            references = _references(result.manifest)
+        except _SCENE_CONFLICTS:
+            return  # merge reports the malformed manifest in scene order
+        for dependency in sorted(references):
+            if dependency not in fingerprints and dependency not in observed:
+                fingerprints[dependency] = hasher.submit(_snapshot, dependency)
+
     try:
-        submitted = 0
-        for position, item in enumerate(scene_inputs):
-            while submitted < len(scene_inputs) and submitted < position + window:
+        while merged < len(scene_inputs):
+            while submitted < len(scene_inputs) and len(running) < window:
                 pending = scene_inputs[submitted]
-                futures[submitted] = executor.submit(_evaluate_scene_task, config, pending, failures_path, sample_scene)
+                future = executor.submit(_evaluate_scene_task, config, pending, failures_path, sample_scene)
+                running[future] = submitted
                 progress.start(pending.scene_id)
                 submitted += 1
-            merge(item, futures.pop(position).result())
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                finished[running.pop(future)] = future
+                if future.exception() is None:
+                    prefetch(future.result())
+            while merged in finished:
+                # result() re-raises a worker exception (e.g. an interrupt) only
+                # once every earlier scene is merged, keeping the resolved prefix.
+                merge(scene_inputs[merged], finished.pop(merged).result())
+                merged += 1
     except BaseException:
-        # Inspection is read-only: drop queued scenes and leave them pending.
+        # Inspection is read-only: drop queued scenes and fingerprints.
         executor.shutdown(wait=False, cancel_futures=True)
+        hasher.shutdown(wait=False, cancel_futures=True)
         raise
     executor.shutdown()
+    hasher.shutdown()
 
 
 def inspect_static_plan(
@@ -584,6 +619,8 @@ def inspect_static_plan(
             noise=noise_plan[index],
         ))
 
+    fingerprints: dict[Path, Future[tuple[int, int, str] | None]] = {}
+
     def merge(item: _SceneInputs, result: _SceneResult) -> None:
         outcome = result.outcome
         if result.observed:
@@ -605,7 +642,11 @@ def inspect_static_plan(
                     # Shared dependencies are fingerprinted once per inspection;
                     # revalidate_static_plan re-checks them before publication.
                     if dependency not in preconditions:
-                        observe(dependency)
+                        # A prefetched fingerprint (parallel path) re-raises its
+                        # error for every referencing scene, as observe would.
+                        prefetched = fingerprints.get(dependency)
+                        preconditions[dependency] = (prefetched.result() if prefetched is not None
+                                                     else _snapshot(dependency))
                     snapshot = preconditions[dependency]
                     assert snapshot is not None
                     key = dependency.as_posix()
@@ -625,7 +666,8 @@ def inspect_static_plan(
     workers = _planning_workers(config, sample_scene)
     progress.begin("Planificacion", config.execution.num_simulations, "escenas", parallel=workers > 1)
     if workers > 1:
-        _plan_scenes_in_parallel(config, scene_inputs, failures_path, sample_scene, workers, progress, merge)
+        _plan_scenes_in_parallel(config, scene_inputs, failures_path, sample_scene, workers, progress, merge,
+                                 fingerprints, preconditions)
     else:
         for item in scene_inputs:
             progress.start(item.scene_id)

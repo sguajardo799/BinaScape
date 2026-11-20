@@ -616,3 +616,164 @@ def test_non_mapping_failed_scenes_is_tolerated_as_before(tmp_path):
     resumed = inspect_static_plan(config, layout)
     assert [m.scene_index for m in resumed.manifests] == [0, 1, 2]
     assert not resumed.failures
+
+
+_MARKER_ENV = "STATIC_PLAN_TEST_MARKERS"
+
+
+def _slow_first_scene(config, rng, index, **kwargs):
+    """Scene 0 waits until every later scene was evaluated (cross-process via marker files)."""
+    import os
+    import time
+
+    markers = Path(os.environ[_MARKER_ENV])
+    if index == 0:
+        others = config.execution.num_simulations - 1
+        deadline = time.monotonic() + 20
+        while len(list(markers.glob("done_*"))) < others:
+            if time.monotonic() > deadline:
+                raise RuntimeError("scene 0 starved: later scenes were never dispatched")
+            time.sleep(0.05)
+    result = sampler.sample_static_scene(config, rng, index, **kwargs)
+    if index != 0:
+        (markers / f"done_{index}").write_text("")
+    return result
+
+
+def test_slow_first_scene_does_not_block_dispatch_of_later_scenes(tmp_path, monkeypatch):
+    from acoustic_orchestrator.pipeline.progress import ProgressReporter
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setenv(_MARKER_ENV, str(markers))
+    pools = _spy_process_pool(monkeypatch)
+    config, layout = fixture_config(tmp_path / "work", count=8)
+    config.execution.num_workers = 1
+    sequential = inspect_static_plan(config, layout)
+
+    config.execution.num_workers = 2
+    events = []
+    plan = inspect_static_plan(config, layout, sample_scene=_slow_first_scene,
+                               progress=ProgressReporter(events.append))
+    assert pools == [2]
+    assert [e.key for e in events if e.kind == "resolved"] == [f"scene_static_{i:04d}" for i in range(1, 9)]
+    assert [m.scene_index for m in plan.manifests] == list(range(8))
+    assert [m.manifest for m in plan.manifests] == [m.manifest for m in sequential.manifests]
+    assert plan.metadata == sequential.metadata
+    assert list(plan.preconditions.items()) == list(sequential.preconditions.items())
+
+
+def test_parallel_planning_bounds_unfinished_submissions(tmp_path, monkeypatch):
+    from acoustic_orchestrator.pipeline import static_plan
+
+    _spy_process_pool(monkeypatch)
+    submitted = []
+    peak = []
+    original_submit = static_plan.ProcessPoolExecutor.submit
+
+    def counting_submit(self, *args, **kwargs):
+        future = original_submit(self, *args, **kwargs)
+        submitted.append(future)
+        peak.append(sum(not f.done() for f in submitted))
+        return future
+
+    monkeypatch.setattr(static_plan.ProcessPoolExecutor, "submit", counting_submit)
+    config, layout = fixture_config(tmp_path, count=8)
+    config.execution.num_workers = 2
+    plan = inspect_static_plan(config, layout)
+    assert len(submitted) == 8
+    assert max(peak) <= 2 * 2
+    assert [m.scene_index for m in plan.manifests] == list(range(8))
+
+
+def test_parallel_planning_fingerprints_each_dependency_once_like_sequential(tmp_path, monkeypatch):
+    from acoustic_orchestrator.pipeline import static_plan
+
+    _spy_process_pool(monkeypatch)
+    config, layout = fixture_config(tmp_path, count=4)
+    config.execution.num_workers = 1
+    sequential = inspect_static_plan(config, layout)
+
+    original = static_plan._file_hash
+    hashed = []
+
+    def counting_hash(path):
+        hashed.append(path)
+        return original(path)
+
+    monkeypatch.setattr(static_plan, "_file_hash", counting_hash)
+    config.execution.num_workers = 3
+    plan = inspect_static_plan(config, layout)
+    references = {ref for m in plan.manifests for ref in static_plan._references(m.manifest)}
+    assert references <= set(hashed)
+    assert len(hashed) == len(set(hashed))
+    assert list(plan.preconditions.items()) == list(sequential.preconditions.items())
+
+
+def test_unreadable_dependency_conflicts_match_sequential_planning(tmp_path, monkeypatch):
+    from collections import defaultdict
+
+    from acoustic_orchestrator.pipeline import static_plan
+
+    _spy_process_pool(monkeypatch)
+    config, layout = fixture_config(tmp_path, count=4)
+    config.execution.num_workers = 1
+    users = defaultdict(list)
+    for item in inspect_static_plan(config, layout).manifests:
+        for ref in static_plan._references(item.manifest):
+            users[ref].append(item)
+    broken, referencing = min(users.items(), key=lambda pair: (len(pair[1]), str(pair[0])))
+    assert 2 in [item.scene_index for item in referencing]  # Fixture guard: scene 2 uses it.
+    original = static_plan._snapshot
+
+    def failing_snapshot(path):
+        if path == broken:
+            raise OSError("unreadable dependency")
+        return original(path)
+
+    monkeypatch.setattr(static_plan, "_snapshot", failing_snapshot)
+    conflicts = {}
+    for workers in (1, 3):
+        config.execution.num_workers = workers
+        with pytest.raises(StaticPlanConflict) as raised:
+            inspect_static_plan(config, layout)
+        conflicts[workers] = raised.value.conflicts
+    assert conflicts[3] == conflicts[1]
+    assert conflicts[3] == [f"{item.path}: unreadable dependency" for item in referencing]
+    assert not layout["run_root"].exists()
+
+
+def _first_scene_waits_for_parent_fingerprint(config, rng, index, **kwargs):
+    """Scene 0 finishes only after the parent fingerprinted a later scene's dependency."""
+    import os
+    import time
+
+    if index == 0:
+        marker = Path(os.environ[_MARKER_ENV]) / "fingerprinted"
+        deadline = time.monotonic() + 20
+        while not marker.exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("no dependency was fingerprinted while scene 0 was running")
+            time.sleep(0.05)
+    return sampler.sample_static_scene(config, rng, index, **kwargs)
+
+
+def test_dependency_fingerprinting_overlaps_with_scene_evaluation(tmp_path, monkeypatch):
+    from acoustic_orchestrator.pipeline import static_plan
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setenv(_MARKER_ENV, str(markers))
+    _spy_process_pool(monkeypatch)
+    original = static_plan._file_hash
+
+    def marking_hash(path):
+        if path.suffix in {".wav", ".daff", ".mat", ".rpf"}:
+            (markers / "fingerprinted").write_text("")
+        return original(path)
+
+    monkeypatch.setattr(static_plan, "_file_hash", marking_hash)
+    config, layout = fixture_config(tmp_path / "work", count=4)
+    config.execution.num_workers = 2
+    plan = inspect_static_plan(config, layout, sample_scene=_first_scene_waits_for_parent_fingerprint)
+    assert [m.scene_index for m in plan.manifests] == [0, 1, 2, 3]
