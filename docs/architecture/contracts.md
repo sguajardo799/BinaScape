@@ -326,6 +326,33 @@ Los archivos que aparezcan/cambien después de la confirmación no se atribuyen 
 interrumpido. Evidencia funcional final presente o salidas completas verificables
 requieren una revisión distinta, no su sustitución silenciosa.
 
+### Reconciliación de un resultado del pool sin leer
+
+`reconcile-pool-result <run_root> --chain <UUID>` cubre el caso inverso: un intento del
+pool que terminó con un render válido, pero cuyo `results/<attempt_id>.json` el
+orquestador no pudo leer (por ejemplo, un bloqueo de Windows que superó la ventana de
+lectura) y quedó como `launch_failed` o `termination_unobserved` en una cadena
+`not_retryable`. Ese intento bloquea toda reanudación con "termination was not observed".
+Inspecciona sin escrituras por defecto; aplicar exige
+`--apply --attempt <UUID> --confirm-stopped --reason <motivo>` y las mismas guardas que
+`reconcile-static` (lock de escritor, ningún escritor activo, circuito cerrado).
+
+La evidencia de terminación es el resultado publicado por el pool: legible, con el mismo
+`attempt_id` y `exit_code` 0. Si el outcome no registró `pool_session_id`, se busca en
+`metadata/matlab_pool/*/results/` y se exige exactamente uno. Además se exigen
+`completion.json` válido, ningún `failure.json` y salidas que validen como render válido
+sin rechazo acústico; cualquier ausencia o contradicción bloquea sin escribir.
+
+El registro `render_attempts/<attempt_id>/pool_result_reconciliation/record.json` guarda
+preimágenes exactas de cadena y outcome, el resultado del pool y su hash, la validación, la
+fila previa del índice, operador y motivo, y se publica antes de cambiar estados. Después se
+publican el outcome (`succeeded`, `exit_code=0`, terminación observada, `accepted`), el
+intento de la cadena (`accepted`; la cadena sigue `not_retryable`) y la fila de
+`render_index.jsonl` (`decision=continue`). Es idempotente. Al reanudar, la cadena verifica
+que outcome e intento coinciden exactamente con la proyección del registro y que el
+resultado del pool conserva su hash. No lanza MATLAB, no renueva presupuestos ni reinicia
+el circuito.
+
 ### Reinicio explícito del corte del lote
 
 `reset-circuit <run_root>` inspecciona sin escrituras el corte persistido en

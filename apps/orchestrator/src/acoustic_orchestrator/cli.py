@@ -12,6 +12,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
 )
 from acoustic_orchestrator.pipeline.circuit_reset import reset_batch_circuit
 from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
+from acoustic_orchestrator.pipeline.pool_result_recovery import reconcile_pool_result
 from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
 from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
 
@@ -116,6 +117,35 @@ def reconcile_static(
         f"cadena={chain} intento={result['attempt_id']} consumidos={result['consumed_attempts']} "
         f"restantes={result['remaining_attempts']} siguiente_estado={result['next_state']} "
         "exit_code=null termination_observed=false"
+    )
+    if apply:
+        typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --attempt <UUID> --confirm-stopped --reason <motivo>.")
+
+
+@app.command("reconcile-pool-result")
+def reconcile_pool_result_command(
+    run_root: Path,
+    chain: str = typer.Option(..., "--chain", help="UUID de la cadena del intento sin resultado leído"),
+    attempt: str | None = typer.Option(None, "--attempt", help="UUID exacto del intento que se autoriza reconciliar"),
+    apply: bool = typer.Option(False, "--apply", help="Publica la reconciliación; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Acepta un intento del pool cuyo resultado publicado (exit 0) no pudo leerse, sin renderizar."""
+    try:
+        result = reconcile_pool_result(
+            run_root, chain, apply=apply, confirm_stopped=confirm_stopped,
+            expected_attempt=attempt, reason=reason,
+        )
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reconciliación bloqueada: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"{'Reconciliado' if apply else 'Solo lectura'}: variante={result['variant_id']} "
+        f"cadena={chain} intento={result['attempt_id']} sesion_pool={result['pool_session_id']} "
+        f"worker={result['worker_id']} exit_code={result['pool_exit_code']}"
     )
     if apply:
         typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")

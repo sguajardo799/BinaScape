@@ -396,6 +396,9 @@ def _resolved_outcome(chain: RetryChain) -> dict[str, Any]:
         verify_interruption_resolution(chain.path, chain.record, outcome)
     elif outcome.get("termination_observed") is not True or type(outcome.get("exit_code")) is not int:
         raise RetryBlockedError("previous process termination was not observed")
+    if "pool_result_reconciliation" in outcome or "pool_result_reconciliation" in latest:
+        from acoustic_orchestrator.pipeline.pool_result_recovery import verify_pool_result_resolution
+        verify_pool_result_resolution(chain.path, chain.record, outcome)
     if "circuit_reset" in outcome:
         from acoustic_orchestrator.pipeline.circuit_reset import verify_circuit_reset_resolution
         verify_circuit_reset_resolution(chain.path, chain.record, outcome)
