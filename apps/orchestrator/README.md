@@ -337,8 +337,11 @@ finishes a scene takes the next pending one without waiting for slower,
 earlier scenes, with at most `2 * workers` scenes in flight. Fingerprints of
 the selected dependencies (audio, receiver IRs, materials) are computed on
 background threads as soon as a scene finishes, once per path and inspection,
-overlapping with the sampling of other scenes. Custom samplers that cannot be
-pickled (for example closures) are planned in-process.
+overlapping with the sampling of other scenes. Each source `audio_dir` is
+listed once per inspection and process and reused for every scene and attempt;
+the next inspection, and the catalog check before publication, list it again.
+Custom samplers that cannot be pickled (for example closures) are planned
+in-process.
 
 The canonical single-output example enables `binaural_hrtf`. MATLAB requires
 `render.sample_rate_hz: 44100`. Before completing the remaining variants,

@@ -34,7 +34,7 @@ from acoustic_orchestrator.experiment.manifest_writer import write_manifest
 from acoustic_orchestrator.experiment.scene_builder import build_static_manifest
 from acoustic_orchestrator.pipeline.output_paths import ArtifactLayout, resolve_artifact_layout
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
-from acoustic_orchestrator.source_audio import list_source_wavs
+from acoustic_orchestrator.source_audio import enable_source_listing_cache, list_source_wavs, source_listing_cache
 
 
 PLAN_VERSION = 1
@@ -479,7 +479,8 @@ def _plan_scenes_in_parallel(
     running: dict[Future[_SceneResult], int] = {}
     finished: dict[int, Future[_SceneResult]] = {}
     submitted = merged = 0
-    executor = ProcessPoolExecutor(max_workers=workers)
+    # The pool lives for this inspection only, so each worker's listing cache does too.
+    executor = ProcessPoolExecutor(max_workers=workers, initializer=enable_source_listing_cache)
     hasher = ThreadPoolExecutor(max_workers=workers)
 
     def prefetch(result: _SceneResult) -> None:
@@ -535,7 +536,16 @@ def inspect_static_plan(
     A changed generation implementation additionally requires resume=false.
     Existing corrupt plan records never become trusted via overwrite permission.
     ``sample_scene`` is used for generation and exact persisted-attempt replay.
+    Source audio directories are listed once per inspection and process.
     """
+    with source_listing_cache():
+        return _inspect_static_plan(config, layout, sample_scene, progress)
+
+
+def _inspect_static_plan(
+    config: AppConfig, layout: ArtifactLayout | None,
+    sample_scene: Callable[..., dict] | None, progress: ProgressReporter | None,
+) -> StaticPlan:
     progress = progress or ProgressReporter()
     progress.begin("Inspeccionando catalogos")
     layout = layout or resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
