@@ -37,6 +37,7 @@ from acoustic_orchestrator.pipeline.output_index import (
     should_resume_variant,
     summarize_variant_index,
     upsert_variant,
+    upsert_variants,
 )
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_artifact_layout
 from acoustic_orchestrator.pipeline.runtime_audio import prepare_scene_source_assets
@@ -133,18 +134,20 @@ def _render_static_scenes_locked(
     metadata_required = config.execution.save_render_metadata
     coordinator = _RenderCoordinator(config, layout["render_attempts_dir"], index_path, variant_records, progress=progress)
     # Publish the complete plan before the first render while still enforcing
-    # canonical-first execution below.
-    for planned_variant in _build_planned_variants(config, manifest_paths, runtime_manifest_dir):
-        if planned_variant["variant_paths"]["variant_id"] in existing_records:
-            continue  # Publishing a plan must not erase an earlier decision.
-        upsert_variant(
-            index_path,
-            variant_records,
-            build_planned_variant_record(
-                planned_variant["variant_paths"],
-                metadata_required=metadata_required,
-            ),
-        )
+    # canonical-first execution below. One index rewrite for the whole plan:
+    # per-variant upserts rewrite the full index each time (quadratic).
+    progress.begin("Registrando variantes planificadas")
+    upsert_variants(
+        index_path,
+        variant_records,
+        [
+            build_planned_variant_record(planned_variant["variant_paths"], metadata_required=metadata_required)
+            for planned_variant in _build_planned_variants(config, manifest_paths, runtime_manifest_dir)
+            # Publishing a plan must not erase an earlier decision.
+            if planned_variant["variant_paths"]["variant_id"] not in existing_records
+        ],
+    )
+    progress.finish()
     if config.execution.matlab_runner == "pool":
         # Started lazily on the first RAVEN dispatch: a fully resumed run opens no session.
         coordinator.matlab_pool = MatlabPoolSession(

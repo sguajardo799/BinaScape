@@ -126,6 +126,30 @@ def test_upsert_variant_rewrites_current_record_per_variant(tmp_path: Path) -> N
     assert load_variant_index(index_path)[variant_paths["variant_id"]]["attempted"] is True
 
 
+def test_upsert_variants_writes_index_once_preserving_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import acoustic_orchestrator.pipeline.output_index as output_index
+
+    index_path = tmp_path / "output_index.jsonl"
+    base = build_planned_variant_record(_variant_paths(tmp_path), metadata_required=False)
+    existing = {**base, "variant_id": "scene_b__hrtf", "status": "completed"}
+    records: dict[str, VariantRecord] = {}
+    upsert_variant(index_path, records, existing)
+    planned = [{**base, "variant_id": f"scene_{name}__hrtf"} for name in ("c", "a")]
+
+    replacements: list[Path] = []
+    original_replace = output_index._replace_index
+    monkeypatch.setattr(output_index, "_replace_index",
+                        lambda temp, target: (replacements.append(target), original_replace(temp, target)))
+    output_index.upsert_variants(index_path, records, planned)
+    output_index.upsert_variants(index_path, records, [])
+
+    assert replacements == [index_path]
+    lines = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    assert [line["variant_id"] for line in lines] == ["scene_a__hrtf", "scene_b__hrtf", "scene_c__hrtf"]
+    assert load_variant_index(index_path)["scene_b__hrtf"]["status"] == "completed"
+    assert set(records) == {"scene_a__hrtf", "scene_b__hrtf", "scene_c__hrtf"}
+
+
 def test_metadata_disabled_allows_completed_without_metadata(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
     write_variant_fixture(variant_paths)
