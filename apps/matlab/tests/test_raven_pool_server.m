@@ -3,7 +3,7 @@ function tests = test_raven_pool_server
 end
 
 function setup(testCase)
-    root = fullfile(tempdir, 'binascape-pool-test', char(java.util.UUID.randomUUID));
+    root = fullfile(tempdir, 'binascape-pool-test', random_hex_id());
     mkdir(fullfile(root, 'requests'));
     testCase.TestData.root = root;
     testCase.addTeardown(@() rmdir(root, 's'));

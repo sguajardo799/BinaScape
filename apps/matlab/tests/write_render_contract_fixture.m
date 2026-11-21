@@ -3,7 +3,7 @@ function write_render_contract_fixture(output_dir, schema_version)
     % No representa una validación física de RAVEN.
     if nargin < 2, schema_version = '3.0'; end
     if ~isfolder(output_dir), mkdir(output_dir); end
-    output_dir = char(java.io.File(output_dir).getCanonicalPath());
+    output_dir = canonical_absolute_path(output_dir);
     fs = 44100;
     source_path = fullfile(output_dir, 'source.wav');
     write_output_wav(0.1*ones(200, 1), fs, source_path);

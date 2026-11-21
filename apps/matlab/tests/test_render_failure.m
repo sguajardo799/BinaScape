@@ -4,7 +4,7 @@ end
 
 function setup(testCase)
     root = fullfile('C:/Users/sguaj/AppData/Local/Temp/opencode', ...
-        char(java.util.UUID.randomUUID));
+        random_hex_id());
     mkdir(root);
     testCase.TestData.root = root;
     testCase.TestData.previous = pwd;
