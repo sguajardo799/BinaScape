@@ -310,6 +310,12 @@ def upsert_variant(index_path: Path, records: dict[str, VariantRecord], record: 
     _upsert_jsonl(index_path=index_path, records=records, key=record["variant_id"], record=record)
 
 
+def upsert_variants(index_path: Path, records: dict[str, VariantRecord], new_records: list[VariantRecord]) -> None:
+    """Upsert many variants with a single index rewrite (avoids O(n^2) publishing)."""
+    if new_records:
+        _upsert_many_jsonl(index_path, records, {record["variant_id"]: record for record in new_records})
+
+
 def summarize_variant_index(records: dict[str, VariantRecord]) -> dict[str, int]:
     summary = {
         "total_variants": len(records),
@@ -969,9 +975,14 @@ def _replace_index(temp_path: Path, index_path: Path) -> None:
 
 
 def _upsert_jsonl(index_path: Path, records: dict[str, Any], key: str, record: Any) -> None:
+    _upsert_many_jsonl(index_path, records, {key: record})
+
+
+def _upsert_many_jsonl(index_path: Path, records: dict[str, Any], updates: dict[str, Any]) -> None:
+    """Merge ``updates`` into ``records`` and rewrite the index once."""
     index_path.parent.mkdir(parents=True, exist_ok=True)
     with _index_write_lock(index_path):
-        records[key] = record
+        records.update(updates)
         temp_path = _index_temp_path(index_path)
         lines = [json.dumps(records[current_key], sort_keys=True) for current_key in sorted(records)]
         try:
