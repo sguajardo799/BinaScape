@@ -16,7 +16,7 @@ function run_raven_pool_server(session_dir, pool_size, parent_pid, options)
     %
     % options (optional struct, used by tests):
     %   render_fn        function handle, default @run_raven_static_render
-    %   pool_factory     @(pool_size) -> pool, default parpool('Processes', n)
+    %   pool_factory     @(pool_size) -> pool, default open_processes_pool
     %   prepare_workers  @(pool) -> [], default raven_pool_prepare_workers
     %   poll_s           loop period in seconds, default 0.5
     %   heartbeat_s      heartbeat period in seconds, default 2
@@ -30,7 +30,7 @@ function run_raven_pool_server(session_dir, pool_size, parent_pid, options)
         options = struct();
     end
     render_fn = option(options, 'render_fn', @run_raven_static_render);
-    pool_factory = option(options, 'pool_factory', @(n) parpool('Processes', n));
+    pool_factory = option(options, 'pool_factory', @open_processes_pool);
     prepare_workers = option(options, 'prepare_workers', @(p) raven_pool_prepare_workers(p, app_dir));
     poll_s = option(options, 'poll_s', 0.5);
     heartbeat_s = option(options, 'heartbeat_s', 2);
@@ -193,6 +193,17 @@ function ensure_dir(path)
     if ~isfolder(path)
         mkdir(path);
     end
+end
+
+
+function pool = open_processes_pool(pool_size)
+    % The orchestrator starts MATLAB with a private, empty MATLAB_PREFDIR, so the
+    % user's saved "Processes" profile is not visible and its default NumWorkers
+    % (often the physical core count or less) would cap execution.num_workers.
+    % Raise the in-memory cluster limit to the requested size; nothing is saved.
+    cluster = parcluster('Processes');
+    cluster.NumWorkers = max(cluster.NumWorkers, pool_size);
+    pool = parpool(cluster, pool_size);
 end
 
 
