@@ -582,3 +582,57 @@ def test_previous_process_error_preserves_recorded_cause_and_evidence_links(mani
     assert snapshot_tree(manifest.parent) == before
     with pytest.raises(retries.RetryBlockedError):
         current.verify_resolved()
+
+
+def _write_chain(chains_dir: Path, chain_id: str, manifest: Path) -> Path:
+    path = chains_dir / chain_id / "chain.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(_chain_record(chain_id, manifest)), encoding="utf-8")
+    return path
+
+
+def _chain_record(chain_id: str, manifest: Path) -> dict:
+    return {"schema_version": 1, "chain_id": chain_id, "manifest_path": manifest.resolve().as_posix(),
+            "policy": MatlabProcessRetryConfig().model_dump(), "state": "ready", "attempts": []}
+
+
+def test_matching_chains_parses_each_chain_once_and_sees_new_ones(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    chains_dir = tmp_path / "process_chains"
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    for index in range(20):
+        _write_chain(chains_dir, f"{index:032x}", a if index % 2 else b)
+    reads: list[Path] = []
+    original = retries.read_json_object
+    monkeypatch.setattr(retries, "read_json_object", lambda path: (reads.append(path), original(path))[1])
+
+    assert len(retries._matching_chains(a, chains_dir)) == 10
+    first_scan = len(reads)
+    reads.clear()
+    assert len(retries._matching_chains(b, chains_dir)) == 10
+    assert len(reads) == 10 < first_scan  # Only matching chains are re-read.
+
+    new = _write_chain(chains_dir, "f" * 32, a)
+    assert new in {chain.path for chain in retries._matching_chains(a, chains_dir)}
+
+
+def test_matching_chains_sees_late_chain_json_and_removed_chains(tmp_path: Path) -> None:
+    chains_dir = tmp_path / "process_chains"
+    manifest = tmp_path / "a.json"
+    kept = _write_chain(chains_dir, "1" * 32, manifest)
+    (chains_dir / ("2" * 32)).mkdir()  # Directory published before its chain.json.
+    assert [chain.path for chain in retries._matching_chains(manifest, chains_dir)] == [kept]
+
+    late = chains_dir / ("2" * 32) / "chain.json"
+    late.write_text(json.dumps(_chain_record("2" * 32, manifest)), encoding="utf-8")
+    assert {chain.path for chain in retries._matching_chains(manifest, chains_dir)} == {kept, late}
+
+    late.unlink()
+    assert [chain.path for chain in retries._matching_chains(manifest, chains_dir)] == [kept]
+
+
+def test_matching_chains_rejects_unsupported_chain_schema(tmp_path: Path) -> None:
+    chains_dir = tmp_path / "process_chains"
+    path = _write_chain(chains_dir, "3" * 32, tmp_path / "other.json")
+    path.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    with pytest.raises(retries.RetryBlockedError, match="unsupported chain"):
+        retries._matching_chains(tmp_path / "a.json", chains_dir)
