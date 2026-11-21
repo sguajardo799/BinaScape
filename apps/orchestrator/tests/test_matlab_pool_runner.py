@@ -312,3 +312,36 @@ def test_attempt_is_fresh_render_attempt(tmp_path: Path) -> None:
     finally:
         session.close()
     assert result.attempt is attempt and result.process_status == "succeeded"
+
+
+def test_result_read_retries_transient_sharing_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A result locked right after MATLAB's movefile (Windows) is not a launch failure."""
+    path = tmp_path / "attempt.json"
+    path.write_text(json.dumps({"attempt_id": "attempt", "exit_code": 0}), encoding="utf-8")
+    original = Path.read_text
+    failures = iter([PermissionError(13, "Permission denied"), json.JSONDecodeError("partial", "", 0)])
+
+    def flaky_read(self: Path, *args, **kwargs) -> str:
+        error = next(failures, None)
+        if self == path and error is not None:
+            raise error
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+    monkeypatch.setattr(matlab_pool, "RESULT_READ_RETRY_S", 0.0)
+
+    assert matlab_pool._read_result(path, "attempt")["exit_code"] == 0
+
+
+def test_result_read_gives_up_after_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "attempt.json"
+    path.write_text("{}", encoding="utf-8")
+
+    def locked(self: Path, *args, **kwargs) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    monkeypatch.setattr(matlab_pool, "RESULT_READ_TIMEOUT_S", 0.0)
+
+    with pytest.raises(PermissionError):
+        matlab_pool._read_result(path, "attempt")
