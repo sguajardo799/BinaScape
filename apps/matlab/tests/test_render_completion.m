@@ -3,7 +3,7 @@ function tests = test_render_completion
 end
 
 function setup(testCase)
-    root = fullfile(tempdir, 'opencode', char(java.util.UUID.randomUUID));
+    root = fullfile(tempdir, 'opencode', random_hex_id());
     mkdir(root);
     testCase.TestData.root = root;
     testCase.addTeardown(@() rmdir(root, 's'));
@@ -28,13 +28,11 @@ function testKnownSha256AndMultiBlockInput(testCase)
     write_bytes(large, repmat(uint8('a'), 1, 1000000));
     verifyEqual(testCase, sha256_file(large), ...
         'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0');
-    % Más de un bloque de lectura; comparar con digest Java de una sola entrada.
-    bytes = repmat(uint8(0:255), 1, 9000);
-    write_bytes(large, bytes);
-    digest = java.security.MessageDigest.getInstance('SHA-256');
-    digest.update(typecast(bytes(:), 'int8'));
-    expected = lower(reshape(dec2hex(typecast(digest.digest(), 'uint8'), 2).', 1, []));
-    verifyEqual(testCase, sha256_file(large), expected);
+    % Más de un bloque de lectura (2.3 MB); digest de referencia de
+    % hashlib.sha256(bytes(range(256)) * 9000) en Python.
+    write_bytes(large, repmat(uint8(0:255), 1, 9000));
+    verifyEqual(testCase, sha256_file(large), ...
+        '62bf4dac314280c65bfec2a49872d67974db10af14c8a4b84c70166fb11252b9');
 end
 
 function testSingleVariantReceiptHasExactFilesAndHashes(testCase)

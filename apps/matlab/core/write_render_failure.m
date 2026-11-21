@@ -24,11 +24,10 @@ function write_render_failure(config_path, context, original_error)
     if ~strcmp(sha256_file(config_path), context.manifest_sha256)
         error('BinaScape:Failure:ManifestMismatch', 'El manifiesto no coincide con el intento.');
     end
-    target_file = java.io.File(context.failure_path);
-    if ~target_file.isAbsolute()
+    [target_path, is_absolute] = canonical_absolute_path(context.failure_path);
+    if ~is_absolute
         error('BinaScape:Failure:InvalidPath', 'La ruta debe ser absoluta.');
     end
-    target_path = char(target_file.getCanonicalPath());
     if isfile(target_path) || isfolder(target_path)
         error('BinaScape:Failure:AlreadyExists', 'El informe ya existe.');
     end
@@ -68,10 +67,7 @@ function write_render_failure(config_path, context, original_error)
         if isfile(target_path) || isfolder(target_path)
             error('BinaScape:Failure:AlreadyExists', 'El informe ya existe.');
         end
-        options = javaArray('java.nio.file.CopyOption', 1);
-        options(1) = java.nio.file.StandardCopyOption.ATOMIC_MOVE;
-        java.nio.file.Files.move(java.io.File(temporary_path).toPath(), ...
-            java.io.File(target_path).toPath(), options);
+        atomic_move_file(temporary_path, target_path);
     catch ME
         if fid ~= -1
             try, fclose(fid); catch, end

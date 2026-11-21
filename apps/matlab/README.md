@@ -134,7 +134,7 @@ manifiesto y usar un directorio nuevo):
 
 ```matlab
 addpath(genpath('apps/matlab'));
-attempt_id = erase(char(java.util.UUID.randomUUID), '-');
+attempt_id = lower(reshape(dec2hex(randi([0 255], 1, 16), 2).', 1, []));
 attempt_root = fullfile('D:/outputs/run/metadata/render_attempts', attempt_id);
 mkdir(attempt_root);
 snapshot_path = fullfile(attempt_root, 'input_manifest.json');

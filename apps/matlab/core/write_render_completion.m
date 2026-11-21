@@ -81,11 +81,7 @@ function write_render_completion(config_path, cfg, context)
             error('BinaScape:Completion:AlreadyExists', 'La constancia ya existe.');
         end
         % Solicitar atomicidad al sistema; no degradar a copiar y borrar.
-        source = java.io.File(temporary_path).toPath();
-        target = java.io.File(completion_path).toPath();
-        options = javaArray('java.nio.file.CopyOption', 1);
-        options(1) = java.nio.file.StandardCopyOption.ATOMIC_MOVE;
-        java.nio.file.Files.move(source, target, options);
+        atomic_move_file(temporary_path, completion_path);
     catch ME
         if fid ~= -1
             try, fclose(fid); catch, end
@@ -96,9 +92,9 @@ end
 
 function value = absolute_path(value)
     value = char(value);
-    file = java.io.File(value);
-    if ~file.isAbsolute()
+    [canonical, is_absolute] = canonical_absolute_path(value);
+    if ~is_absolute
         error('BinaScape:Completion:InvalidPath', 'La ruta debe ser absoluta: %s', value);
     end
-    value = strrep(char(file.getCanonicalPath()), '\', '/');
+    value = strrep(canonical, '\', '/');
 end
