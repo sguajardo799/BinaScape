@@ -34,6 +34,8 @@ from acoustic_orchestrator.pipeline.matlab_diagnostics import diagnostic_warning
 
 SERVER_ENTRYPOINT = "run_raven_pool_server"
 STOP_GRACE_S = 120.0
+RESULT_READ_TIMEOUT_S = 10.0
+RESULT_READ_RETRY_S = 0.05
 Launch = Callable[[list[str], Path, dict[str, str], BinaryIO], Any]
 
 
@@ -284,7 +286,18 @@ def _kill_tree(process: Any) -> None:
 
 
 def _read_result(path: Path, attempt_id: str) -> dict[str, Any]:
-    result = json.loads(path.read_text(encoding="utf-8"))
+    # On Windows the file can be briefly locked (sharing violation) right after
+    # MATLAB's movefile publishes it, e.g. by antivirus or the move itself.
+    # A transient read failure must not turn a finished job into launch_failed.
+    deadline = time.monotonic() + RESULT_READ_TIMEOUT_S
+    while True:
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except (PermissionError, json.JSONDecodeError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(RESULT_READ_RETRY_S)
     if (not isinstance(result, dict) or result.get("attempt_id") != attempt_id
             or type(result.get("exit_code")) is not int):
         raise RuntimeError(f"Resultado del pool MATLAB inválido para {attempt_id}: {path}")

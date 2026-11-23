@@ -9,6 +9,7 @@ never launch after one. No console or diagnostic text participates in policy.
 import math
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -296,13 +297,72 @@ def _verify_archive(journal: dict[str, Any], artifacts: list[dict[str, Any]], di
         raise RetryBlockedError("untracked output appeared during archive")
 
 
-def _matching_chains(manifest_path: Path, chains_dir: Path) -> list[RetryChain]:
-    matches = []
-    for path in chains_dir.glob("*/chain.json"):
+class _ChainCatalog:
+    """In-memory ``manifest_path -> chain.json`` lookup for one chains directory.
+
+    Scanning and parsing every chain per variant is O(variants x chains): hours
+    for a 30000-variant preflight. A chain's manifest_path is fixed when it is
+    created, so only the location is cached; matching records are always re-read
+    from disk. The directory is rescanned when its mtime changes, chains created
+    by this process are registered directly, and a directory whose chain.json is
+    not published yet stays pending until it appears.
+    """
+
+    def __init__(self) -> None:
+        self.dir_mtime_ns: int | None = None
+        self.known: set[str] = set()
+        self.pending: set[str] = set()
+        self.by_manifest: dict[str, list[Path]] = {}
+
+    def refresh(self, chains_dir: Path) -> None:
+        try:
+            mtime_ns = chains_dir.stat().st_mtime_ns
+        except FileNotFoundError:
+            self.__init__()
+            return
+        if mtime_ns != self.dir_mtime_ns:
+            self.dir_mtime_ns = mtime_ns
+            with os.scandir(chains_dir) as entries:
+                self.pending.update(entry.name for entry in entries
+                                    if entry.name not in self.known and entry.is_dir())
+        for name in sorted(self.pending):
+            self.register(chains_dir / name / "chain.json")
+
+    def register(self, path: Path) -> None:
+        if not path.is_file():
+            return
         record = read_json_object(path)
         if record.get("schema_version") != 1:
             raise RetryBlockedError(f"unsupported chain: {path}")
-        if record.get("manifest_path") == manifest_path.resolve().as_posix():
+        name = path.parent.name
+        if name not in self.known:
+            self.by_manifest.setdefault(record.get("manifest_path"), []).append(path)
+            self.known.add(name)
+        self.pending.discard(name)
+
+
+_CHAIN_CATALOGS: dict[Path, _ChainCatalog] = {}
+_CHAIN_CATALOGS_GUARD = threading.Lock()
+
+
+def _catalog(chains_dir: Path) -> _ChainCatalog:
+    return _CHAIN_CATALOGS.setdefault(chains_dir.resolve(), _ChainCatalog())
+
+
+def _matching_chains(manifest_path: Path, chains_dir: Path) -> list[RetryChain]:
+    key = manifest_path.resolve().as_posix()
+    with _CHAIN_CATALOGS_GUARD:
+        catalog = _catalog(chains_dir)
+        catalog.refresh(chains_dir)
+        candidates = list(catalog.by_manifest.get(key, []))
+    matches = []
+    for path in candidates:
+        if not path.is_file():
+            continue  # Removed by an operator since it was catalogued.
+        record = read_json_object(path)
+        if record.get("schema_version") != 1:
+            raise RetryBlockedError(f"unsupported chain: {path}")
+        if record.get("manifest_path") == key:
             matches.append(RetryChain(path, record))
     return matches
 
@@ -535,6 +595,8 @@ def open_chain(manifest_path: Path, chains_dir: Path, policy: MatlabProcessRetry
         "supersedes": [previous.record["chain_id"] for previous in active],
     })
     chain.save()
+    with _CHAIN_CATALOGS_GUARD:
+        _catalog(chains_dir).register(chain.path)
     for previous in active:
         previous.record["superseded_by"] = chain_id
         previous.save()
