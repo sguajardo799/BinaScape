@@ -79,6 +79,22 @@ From inside `apps/orchestrator`, the equivalent app-local example command is:
 uv run acoustic-orchestrator generate-manifests .\examples\example_config.yml
 ```
 
+On Windows with **Smart App Control** enabled, the unsigned console-script
+launchers that uv generates (`.venv\Scripts\acoustic-orchestrator.exe`,
+`clarity-backend.exe`, …) are blocked ("Una directiva de Control de aplicaciones
+bloqueó este archivo"). Run the packages as modules through the signed
+python.org `python.exe` instead; every command above works the same way:
+
+```sh
+uv run --project apps/orchestrator python -m acoustic_orchestrator generate-manifests configs/experiments/static_example.yml
+```
+
+Create the venv from the python.org interpreter, not a uv-managed (unsigned)
+build, e.g. with `python-preference = "only-system"` in `%APPDATA%\uv\uv.toml`.
+For the same reason, `hearing_degradation.runner.entrypoint` defaults to
+`python -m clarity_backend`. The value is split like a shell command; with
+`use_uv: false` a leading `python` resolves to the orchestrator's own interpreter.
+
 The local `main.py` entrypoint can also be used for development:
 
 ```sh

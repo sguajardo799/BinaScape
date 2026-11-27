@@ -2,6 +2,7 @@ from functools import lru_cache
 from math import isclose, isfinite
 from pathlib import Path, PurePath
 import re
+import shlex
 from typing import Any, TypedDict
 
 import yaml
@@ -686,6 +687,11 @@ def _validate_output_naming(
 def _validate_clarity_runner(errors: list[str], runner: ClarityRunnerConfig) -> None:
     if runner.entrypoint.strip() == "":
         errors.append("hearing_degradation.runner.entrypoint no puede estar vacío")
+    else:
+        try:
+            shlex.split(runner.entrypoint)
+        except ValueError as exc:
+            errors.append(f"hearing_degradation.runner.entrypoint no se puede interpretar como comando: {exc}")
 
     backend_project_path = runner.backend_project_path
     if backend_project_path is not None and backend_project_path.exists() and not backend_project_path.is_dir():

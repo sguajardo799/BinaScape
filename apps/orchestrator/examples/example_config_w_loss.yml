@@ -255,6 +255,6 @@ hearing_degradation:
     # Nuevo backend hermano. Cuando auto_submit=false, el orquestador
     # solo prepara manifests/indexes y no invoca el backend.
     backend_project_path: ../../clarity-backend
-    entrypoint: clarity-backend
+    entrypoint: python -m clarity_backend
     auto_submit: false
     use_uv: true
