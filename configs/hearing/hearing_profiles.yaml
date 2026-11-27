@@ -78,3 +78,15 @@ profiles:
           2000: 70
           4000: 60
           8000: 60
+
+  - hearing_profile_id: nh_reference
+    description: >-
+      Control 0 dB HL (125-8000 Hz) con compresión sana. Sirve para medir latencia,
+      ancho de banda y diferencia de nivel entre procesadores sobre el mismo render.
+    ears:
+      left:
+        loss_db_by_band: {125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0}
+        compression_health: 1
+      right:
+        loss_db_by_band: {125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0}
+        compression_health: 1

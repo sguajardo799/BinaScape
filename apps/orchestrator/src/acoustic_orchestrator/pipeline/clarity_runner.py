@@ -12,10 +12,28 @@ from acoustic_orchestrator.pipeline.progress import ProgressReporter
 SubmissionStatus = Literal["submitted", "blocked"]
 
 
-class ClaritySubmissionResult(TypedDict):
+class ClaritySubmissionResult(TypedDict, total=False):
     status: SubmissionStatus
     command: list[str] | None
     message: str
+    # job_id -> reason for jobs withheld before submission (e.g. WHIS environment missing).
+    blocked_jobs: dict[str, str]
+
+
+WHIS_REQUIRED_DIRS = (("WHIS", "WHISv302"), ("gammachirp-filterbank", "GCFBv234"))
+
+
+def check_whis_environment(processor_config: dict) -> str | None:
+    """Return why a WHIS job cannot run on this machine, or None when its environment is complete."""
+    install_root = Path(str(processor_config.get("install_root") or ""))
+    for parts in WHIS_REQUIRED_DIRS:
+        required = install_root.joinpath(*parts)
+        if not required.is_dir():
+            return f"WHIS no disponible: falta {required.as_posix()} bajo hearing_degradation.whis.install_root"
+    executable = str(processor_config.get("matlab_executable") or "matlab")
+    if shutil.which(executable) is None and not Path(executable).is_file():
+        return f"WHIS no disponible: no se encontró el ejecutable de MATLAB '{executable}'"
+    return None
 
 
 def build_clarity_command(runner: ClarityRunnerConfig, manifest_path: Path, *, no_progress: bool = False) -> list[str]:
@@ -44,16 +62,32 @@ def submit_clarity_manifest(
     runner: ClarityRunnerConfig, manifest_path: Path, *, progress: ProgressReporter | None = None,
 ) -> ClaritySubmissionResult:
     blocked_message = _validate_submission_environment(runner)
+    blocked_jobs: dict[str, str] = {}
     if blocked_message is None:
         try:
-            for line in manifest_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
+            lines = [line for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            runnable_lines: list[str] = []
+            whis_checks: dict[tuple[str, str], str | None] = {}
+            for line in lines:
                 job = json.loads(line)
                 output_type = job.get("output_type") if isinstance(job, dict) else None
                 if not isinstance(output_type, str) or not is_clarity_output_eligible(output_type):
                     blocked_message = f"Clarity rechaza output_type no elegible: {output_type}"
                     break
+                if job.get("processor") == "whis":
+                    config = job.get("processor_config") or {}
+                    key = (str(config.get("install_root")), str(config.get("matlab_executable")))
+                    if key not in whis_checks:
+                        whis_checks[key] = check_whis_environment(config)
+                    if whis_checks[key] is not None:
+                        blocked_jobs[str(job.get("job_id"))] = whis_checks[key]
+                        continue
+                runnable_lines.append(line)
+            if blocked_message is None and blocked_jobs:
+                # Only the WHIS jobs are withheld; MSBG jobs of the same manifest still run.
+                manifest_path.write_text("".join(f"{line}\n" for line in runnable_lines), encoding="utf-8")
+                if not runnable_lines:
+                    blocked_message = next(iter(blocked_jobs.values()))
         except (OSError, ValueError) as exc:
             blocked_message = f"No se pudo validar el manifiesto Clarity: {exc}"
     if blocked_message is not None:
@@ -61,6 +95,7 @@ def submit_clarity_manifest(
             "status": "blocked",
             "command": None,
             "message": blocked_message,
+            "blocked_jobs": blocked_jobs,
         }
 
     command = build_clarity_command(runner, manifest_path, no_progress=not (progress and progress.enabled))
@@ -82,12 +117,14 @@ def submit_clarity_manifest(
                 "El backend de Clarity devolvió exit code "
                 f"{completed_process.returncode}; se reinspeccionarán los resultados por job"
             ),
+            "blocked_jobs": blocked_jobs,
         }
 
     return {
         "status": "submitted",
         "command": command,
         "message": "Backend de Clarity enviado correctamente",
+        "blocked_jobs": blocked_jobs,
     }
 
 

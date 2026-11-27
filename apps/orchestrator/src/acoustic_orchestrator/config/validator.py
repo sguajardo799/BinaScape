@@ -11,6 +11,7 @@ from .models import (
     AudioFolderNoiseStrategyConfig,
     CircularArrayOutputConfig,
     ClarityRunnerConfig,
+    HearingDegradationConfig,
     LShapeGeometryConfig,
     ReceiverOutputConfig,
     RoomShapeConfig,
@@ -38,6 +39,8 @@ class HearingProfileDefinition(TypedDict):
     hearing_profile_id: str
     left_loss_db_by_band: dict[str, float]
     right_loss_db_by_band: dict[str, float]
+    left_compression_health: float | dict[str, float] | None
+    right_compression_health: float | dict[str, float] | None
 
 
 def _validate_room_geometry(errors: list[str], config: AppConfig) -> None:
@@ -353,6 +356,8 @@ def validate_config(config: AppConfig) -> None:
 
         _validate_clarity_runner(errors, config.hearing_degradation.runner)
 
+    _validate_hearing_processors(errors, config.hearing_degradation)
+
     min_total_sources = 0
     max_total_sources = 0
     event_types: set[str] = set()
@@ -406,7 +411,10 @@ def validate_config(config: AppConfig) -> None:
         )
         if config.hearing_degradation.hearing_profiles_path.is_file():
             try:
-                load_hearing_profile_catalog(config.hearing_degradation.hearing_profiles_path)
+                load_hearing_profile_catalog(
+                    config.hearing_degradation.hearing_profiles_path,
+                    processors=config.hearing_degradation.processors,
+                )
             except ValueError as exc:
                 errors.extend(
                     f"hearing_degradation.hearing_profiles_path {issue}"
@@ -501,7 +509,9 @@ def _load_material_coefficients(material_path: Path, field_name: str) -> tuple[f
     return tuple(_parse_material_values(values_raw))
 
 
-def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingProfileDefinition]:
+def load_hearing_profile_catalog(
+    hearing_profiles_path: Path, *, processors: list[str] | tuple[str, ...] = ("msbg",),
+) -> list[HearingProfileDefinition]:
     try:
         raw_catalog = yaml.safe_load(hearing_profiles_path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -546,6 +556,22 @@ def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingPro
             issues.extend(issue for issue in str(exc).splitlines() if issue.strip())
             continue
 
+        named_path = f"{profile_path} ({hearing_profile_id})"
+        compression_health: dict[str, float | dict[str, float] | None] = {}
+        for ear_name, loss_db_by_band in (("left", left_loss_db_by_band), ("right", right_loss_db_by_band)):
+            ear_path = f"{named_path}.ears.{ear_name}"
+            compression_health[ear_name] = _parse_compression_health(
+                raw_profile["ears"][ear_name], ear_path, loss_db_by_band, issues,
+            )
+            if "whis" in processors:
+                if compression_health[ear_name] is None and "compression_health" not in raw_profile["ears"][ear_name]:
+                    issues.append(f"{ear_path}.compression_health es obligatorio con el procesador whis")
+                issues.extend(
+                    f"{ear_path}.loss_db_by_band.{band} no puede ser negativo con el procesador whis"
+                    for band, loss_db in loss_db_by_band.items()
+                    if loss_db < 0
+                )
+
         if is_duplicate_profile_id:
             continue
 
@@ -554,6 +580,8 @@ def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingPro
                 "hearing_profile_id": hearing_profile_id,
                 "left_loss_db_by_band": left_loss_db_by_band,
                 "right_loss_db_by_band": right_loss_db_by_band,
+                "left_compression_health": compression_health["left"],
+                "right_compression_health": compression_health["right"],
             }
         )
 
@@ -704,6 +732,58 @@ def _validate_clarity_runner(errors: list[str], runner: ClarityRunnerConfig) -> 
             errors.append(
                 "hearing_degradation.runner.backend_project_path debe apuntar a un proyecto uv válido con pyproject.toml"
             )
+
+
+def _validate_hearing_processors(errors: list[str], hearing: HearingDegradationConfig) -> None:
+    uses_whis = "whis" in hearing.processors
+    calibration = hearing.calibration
+    if calibration is None:
+        if uses_whis:
+            errors.append(
+                "hearing_degradation.calibration es obligatorio cuando hearing_degradation.processors incluye whis"
+            )
+    elif calibration.mode == "fixed_scale":
+        if calibration.digital_rms1_spl_db is None:
+            errors.append("hearing_degradation.calibration.digital_rms1_spl_db es obligatorio con mode=fixed_scale")
+        for field_name in ("presentation_level_db_spl", "presentation_level_range_db_spl"):
+            if getattr(calibration, field_name) is not None:
+                errors.append(f"hearing_degradation.calibration.{field_name} no aplica con mode=fixed_scale")
+    else:
+        if calibration.digital_rms1_spl_db is not None:
+            errors.append(
+                "hearing_degradation.calibration.digital_rms1_spl_db no aplica con mode=presentation_level"
+            )
+        has_level = calibration.presentation_level_db_spl is not None
+        has_range = calibration.presentation_level_range_db_spl is not None
+        if has_level and has_range:
+            errors.append(
+                "hearing_degradation.calibration.presentation_level_db_spl y "
+                "presentation_level_range_db_spl son excluyentes"
+            )
+        elif not has_level and not has_range:
+            errors.append(
+                "hearing_degradation.calibration requiere presentation_level_db_spl o "
+                "presentation_level_range_db_spl con mode=presentation_level"
+            )
+        elif has_range:
+            low, high = calibration.presentation_level_range_db_spl
+            if low > high:
+                errors.append("hearing_degradation.calibration.presentation_level_range_db_spl debe cumplir min <= max")
+
+    if hearing.outer_middle_ear is None and uses_whis:
+        errors.append(
+            "hearing_degradation.outer_middle_ear es obligatorio cuando hearing_degradation.processors incluye whis"
+        )
+    if hearing.msbg is not None and "msbg" not in hearing.processors:
+        errors.append("hearing_degradation.msbg no aplica: msbg no está en hearing_degradation.processors")
+    if uses_whis and hearing.whis is None:
+        errors.append(
+            "hearing_degradation.whis.install_root es obligatorio cuando hearing_degradation.processors incluye whis"
+        )
+    if not uses_whis and hearing.whis is not None:
+        errors.append("hearing_degradation.whis no aplica: whis no está en hearing_degradation.processors")
+    if hearing.whis is not None and hearing.whis.matlab_executable.strip() == "":
+        errors.append("hearing_degradation.whis.matlab_executable no puede estar vacío")
 
 
 def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> None:
@@ -964,6 +1044,41 @@ def _parse_loss_db_by_band(raw_profile: dict[str, Any], profile_path: str, ear_n
         raise ValueError("\n".join(issues))
 
     return normalized_loss_db_by_band
+
+
+def _parse_compression_health(
+    ear: dict[str, Any], ear_path: str, loss_db_by_band: dict[str, float], issues: list[str],
+) -> float | dict[str, float] | None:
+    """Return a scalar or per-band compression health in [0, 1]; invalid values are reported in issues."""
+    raw = ear.get("compression_health")
+    if raw is None:
+        return None
+
+    def _valid(value: object, field_path: str) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(float(value)):
+            issues.append(f"{field_path} debe ser numérico y finito")
+            return None
+        if not 0.0 <= float(value) <= 1.0:
+            issues.append(f"{field_path} debe estar en [0, 1]")
+            return None
+        return float(value)
+
+    if not isinstance(raw, dict):
+        return _valid(raw, f"{ear_path}.compression_health")
+
+    per_band: dict[str, float] = {}
+    for raw_band, raw_value in raw.items():
+        band = str(raw_band).strip()
+        if band not in loss_db_by_band:
+            issues.append(f"{ear_path}.compression_health.{band} no es una banda de loss_db_by_band")
+            continue
+        value = _valid(raw_value, f"{ear_path}.compression_health.{band}")
+        if value is not None:
+            per_band[band] = value
+    missing = [band for band in loss_db_by_band if band not in {str(key).strip() for key in raw}]
+    if missing:
+        issues.append(f"{ear_path}.compression_health no declara las bandas {', '.join(missing)}")
+    return per_band
 
 
 def _defined_outputs(config: AppConfig) -> list[ReceiverOutputConfig]:

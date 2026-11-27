@@ -14,10 +14,12 @@ El layout de generación es común a develop y HEAD. Su productor principal es `
     indexes/
       render_index.jsonl
       clarity_index.jsonl
+      level_calibration.jsonl        # escala K por render
       scene_sampling_failures.jsonl
   output_audio/
     render/<output_subdir>/          # WAV y sidecar de render
-    degraded/<output_type>/<hearing_profile_id>/
+    degraded/<processor>/<output_type>/<hearing_profile_id>/
+    presentation/<playback_id>/      # solo tras export-presentation
   cropped_audio/                    # únicamente si se prepara audio
   analysis/                         # destino predeterminado del analizador
 ```
@@ -38,11 +40,13 @@ Los paths WAV/JSON se resuelven según `output_subdir` y patrones configurados; 
 
 ## 3. Render a Clarity opcional
 
-`clarity-handoff CONFIG` selecciona variantes render completadas/validadas, con WAV, sidecar y perfil disponibles y tipo incluido en `input_targets`. Produce un job schema 1.0 por combinación elegible variante/perfil y actualiza el índice Clarity. `--submit` invoca el backend hermano; el render también puede enviar automáticamente según `runner.auto_submit`.
+`clarity-handoff CONFIG` selecciona variantes render completadas/validadas, con WAV, sidecar y perfil disponibles y tipo incluido en `input_targets`. Calcula una vez por render la escala K (dB SPL para RMS digital 1.0) y la registra en `level_calibration.jsonl`. Produce un job schema 1.0 por combinación elegible variante/perfil/procesador (`hearing_degradation.processors`: `msbg`, `whis`), todos con el mismo K del render, y actualiza el índice Clarity. `--submit` invoca el backend hermano; el render también puede enviar automáticamente según `runner.auto_submit`.
 
-Clarity consume `input_wav_path`, `input_render_metadata_path`, `hearing_profiles_path`, `expected_output_wav_path` y `expected_output_metadata_path`. Preserva el basename del WAV render; el JSON usa su stem. Su directorio es `output_audio/degraded/{output_type}/{hearing_profile_id}`. Un `hearing_degradation.output_dir` explícito puede sustituir la raíz degradada. Estos paths son autoritativos, no nombres fijos inferidos.
+Clarity consume `input_wav_path`, `input_render_metadata_path`, `hearing_profiles_path`, `expected_output_wav_path` y `expected_output_metadata_path`. Preserva el basename del WAV render; el JSON usa su stem. Su directorio es `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}`; el layout anterior sin `{processor}` no se reutiliza, aunque el analizador lo sigue leyendo como `msbg` con marca `legacy`. Además consume `processor`, `calibration`, `outer_middle_ear`, `processor_config` y `processing_signature`, y los repite en el sidecar. Un `hearing_degradation.output_dir` explícito puede sustituir la raíz degradada. Estos paths son autoritativos, no nombres fijos inferidos.
 
-El backend verifica la existencia del sidecar de entrada, pero no interpreta su contenido. Escribe sidecar degradado 1.0 con estado completed/failed cuando el error se captura. El orquestador inspecciona artefactos y mantiene estados/resume; no equivale a validar el contenido acústico del WAV.
+El backend verifica la existencia del sidecar de entrada, pero no interpreta su contenido. MSBG corre en Python; todos los jobs WHIS de un manifiesto corren en una sola sesión `matlab -batch`. Escribe sidecar degradado 1.0 con estado completed/failed cuando el error se captura.
+
+`export-presentation RUN --playback ARCHIVO` lleva cada render y sus versiones degradadas a una cadena de reproducción calibrada con la misma ganancia por canal (`K − k_play_db`), en `output_audio/presentation/<playback_id>/`. Ver las guías de [validación de simuladores](../guides/calibration-simulator-validation.md) y de [datasets para redes](../guides/calibration-nn-dataset.md). El orquestador inspecciona artefactos y mantiene estados/resume; no equivale a validar el contenido acústico del WAV.
 
 ## 4. Análisis posterior de metadatos
 

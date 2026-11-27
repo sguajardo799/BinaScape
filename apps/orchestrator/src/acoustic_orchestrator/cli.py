@@ -13,6 +13,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
 from acoustic_orchestrator.pipeline.circuit_reset import reset_batch_circuit
 from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
 from acoustic_orchestrator.pipeline.pool_result_recovery import reconcile_pool_result
+from acoustic_orchestrator.pipeline.presentation_export import export_presentation
 from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
 from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
 
@@ -91,6 +92,27 @@ def clarity_handoff(
                 f"mensaje={summary['message']}",
             ]
         )
+    )
+
+
+@app.command("export-presentation")
+def export_presentation_command(
+    run_root: Path,
+    playback: Path = typer.Option(..., "--playback", help="YAML con playback_id, k_play_db.left/right y max_spl_db"),
+) -> None:
+    """Exporta cada render y sus versiones degradadas con la misma ganancia K - k_play_db por canal."""
+    try:
+        summary = export_presentation(run_root, playback)
+    except ValueError as exc:
+        typer.echo(f"Calibración de reproducción inválida: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    reasons: dict[str, int] = {}
+    for reason in summary["skipped_renders"].values():
+        reasons[reason] = reasons.get(reason, 0) + 1
+    typer.echo(
+        f"Exportación {summary['playback_id']}: renders={summary['exported_renders']} "
+        f"archivos={summary['exported_files']} omitidos={reasons or 0} "
+        f"renders_con_degradados_ausentes={len(summary['missing_degraded'])} destino={summary['export_root']}"
     )
 
 

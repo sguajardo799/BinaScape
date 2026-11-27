@@ -354,12 +354,46 @@ class ClarityRunnerConfig(StrictConfigModel):
     use_uv: bool = True
 
 
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+HearingProcessorName = Literal["msbg", "whis"]
+OuterMiddleEar = Literal["free_field", "diffuse_field", "itu", "eardrum"]
+
+
+class LevelCalibrationConfig(StrictConfigModel):
+    mode: Literal["fixed_scale", "presentation_level"]
+    digital_rms1_spl_db: FiniteFloat | None = None
+    presentation_level_db_spl: FiniteFloat | None = None
+    presentation_level_range_db_spl: tuple[FiniteFloat, FiniteFloat] | None = None
+
+
+class MsbgProcessorConfig(StrictConfigModel):
+    level_handling: Literal["true_level", "legacy_active_rescale"] = "true_level"
+
+
+class WhisProcessorConfig(StrictConfigModel):
+    install_root: Path
+    matlab_executable: str = "matlab"
+    synth_method: Literal["dtvf", "fbanasyn"] = "dtvf"
+
+
 class HearingDegradationConfig(StrictConfigModel):
     enabled: bool = False
     input_targets: list[str]
     hearing_profiles_path: Path
     output_dir: Path | None = None
     runner: ClarityRunnerConfig = ClarityRunnerConfig()
+    processors: list[HearingProcessorName] = Field(default_factory=lambda: ["msbg"], min_length=1)
+    calibration: LevelCalibrationConfig | None = None
+    outer_middle_ear: OuterMiddleEar | None = None
+    msbg: MsbgProcessorConfig | None = None
+    whis: WhisProcessorConfig | None = None
+
+    @model_validator(mode="after")
+    def _reject_repeated_processors(self) -> "HearingDegradationConfig":
+        repeated = sorted({name for name in self.processors if self.processors.count(name) > 1})
+        if repeated:
+            raise ValueError(f"hearing_degradation.processors no admite repetidos: {', '.join(repeated)}")
+        return self
 
 
 class AppConfig(StrictConfigModel):

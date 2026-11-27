@@ -241,7 +241,9 @@ Everything else is secondary until this path is stable.
 
 When `hearing_degradation.enabled=true`, keep the public degraded-output contract explicit in docs, examples, and code:
 - default root: `{artifact_root}/{run_name}/output_audio/degraded/`
-- per-profile directories: `{output_type}/{hearing_profile_id}/`
+- per-processor and per-profile directories: `{processor}/{output_type}/{hearing_profile_id}/` (every processor, `msbg` included)
+- job ids: `clarity__{variant_id}__{hearing_profile_id}__{processor}`
+- the render scale K is computed once per render by the orchestrator (`level_calibration.jsonl`) and copied into every job; backends never recompute it
 - degraded WAV filename: preserve the rendered WAV basename exactly
 - degraded metadata: write a sidecar `{render_wav_stem}.json` in the same directory
 

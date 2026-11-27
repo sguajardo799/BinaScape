@@ -94,6 +94,8 @@ def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
             backend_project_path,
             base_dir,
         )
+    if config.hearing_degradation.whis is not None:
+        config.hearing_degradation.whis.install_root = _resolve(config.hearing_degradation.whis.install_root, base_dir)
 
     return config
 

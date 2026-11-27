@@ -1,5 +1,6 @@
+import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import yaml
 
@@ -8,6 +9,16 @@ from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.clarity_runner import submit_clarity_manifest
 from acoustic_orchestrator.pipeline.progress import ProgressReporter
 from acoustic_orchestrator.pipeline.clarity_eligibility import is_clarity_output_eligible
+from acoustic_orchestrator.pipeline.level_calibration import (
+    CALIBRATION_UNDEFINED_SILENT_INPUT,
+    RenderCalibrationRecord,
+    compute_render_calibration,
+    effective_calibration,
+    effective_outer_middle_ear,
+    load_level_calibration_index,
+    upsert_level_calibration_records,
+    uses_level_range,
+)
 from acoustic_orchestrator.pipeline.matlab_runner import build_single_receiver_render_manifest, receiver_variants
 from acoustic_orchestrator.pipeline.render_attempt import read_json_object
 from acoustic_orchestrator.pipeline.render_history import RenderHistory, load_render_history, resume_evidence
@@ -18,6 +29,7 @@ from acoustic_orchestrator.pipeline.output_index import (
     ClarityRecord,
     ClarityStatus,
     VariantRecord,
+    _upsert_many_jsonl,
     build_clarity_record,
     inspect_clarity_record,
     load_clarity_index,
@@ -101,20 +113,27 @@ def _prepare_clarity_handoff(
     render_records = load_variant_index(layout["render_index_path"])
     render_history = load_render_history(layout["render_attempts_dir"])
     clarity_records = dict(load_clarity_index(layout["clarity_index_path"]))
+    _drop_legacy_layout_records(layout["clarity_index_path"], clarity_records)
+    calibration_records = load_level_calibration_index(layout["level_calibration_index_path"])
+    processors = config.hearing_degradation.processors
     planned_jobs: list[ClarityJobManifestRecord] = []
     try:
-        hearing_profiles = load_hearing_profile_catalog(config.hearing_degradation.hearing_profiles_path)
+        hearing_profiles = load_hearing_profile_catalog(
+            config.hearing_degradation.hearing_profiles_path, processors=processors,
+        )
     except ValueError as exc:
         for variant_id in sorted(render_records):
             variant_record = render_records[variant_id]
             if not is_clarity_output_eligible(variant_record["output_type"]):
                 continue
-            for hearing_profile_id in _read_profile_ids_for_blocked_records(config.hearing_degradation.hearing_profiles_path):
+            profile_ids = _read_profile_ids_for_blocked_records(config.hearing_degradation.hearing_profiles_path)
+            for hearing_profile_id, processor in ((p, proc) for p in profile_ids for proc in processors):
                 job = build_clarity_job_record(
                     config=config,
                     layout=layout,
                     variant_record=variant_record,
                     hearing_profile_id=hearing_profile_id,
+                    processor=processor,
                 )
                 upsert_clarity_record(
                     layout["clarity_index_path"],
@@ -140,18 +159,25 @@ def _prepare_clarity_handoff(
             message=f"Catálogo de hearing profiles inválido: {exc}",
         )
 
+    new_calibrations: list[RenderCalibrationRecord] = []
     for variant_id in sorted(render_records):
         variant_record = render_records[variant_id]
         if not is_clarity_output_eligible(variant_record["output_type"]):
             continue
         manifest_path = layout["clarity_jobs_path"]
         revalidation_issues = _revalidate_render_input(config, variant_record, render_history)
-        for hearing_profile in hearing_profiles:
+        # K is computed once per render and shared unchanged by every profile and processor.
+        calibration, calibration_issue = _calibrate_render(config, variant_record, revalidation_issues)
+        if calibration is not None:
+            new_calibrations.append(calibration)
+        for hearing_profile, processor in ((p, proc) for p in hearing_profiles for proc in processors):
             job = build_clarity_job_record(
                 config=config,
                 layout=layout,
                 variant_record=variant_record,
                 hearing_profile_id=hearing_profile["hearing_profile_id"],
+                processor=processor,
+                calibration=calibration,
             )
             eligibility_issues = get_clarity_job_issues(
                 config=config,
@@ -159,6 +185,8 @@ def _prepare_clarity_handoff(
                 job=job,
                 revalidation_issues=revalidation_issues,
             )
+            if not eligibility_issues and calibration_issue is not None:
+                eligibility_issues = [calibration_issue]
 
             if not eligibility_issues and resume_enabled and should_resume_clarity_job(clarity_records, job, manifest_path=manifest_path):
                 upsert_clarity_record(
@@ -204,6 +232,7 @@ def _prepare_clarity_handoff(
                 ),
             )
 
+    upsert_level_calibration_records(layout["level_calibration_index_path"], calibration_records, new_calibrations)
     write_clarity_job_manifest(layout["clarity_jobs_path"], planned_jobs)
 
     if not submit_enabled or not planned_jobs:
@@ -255,6 +284,15 @@ def _prepare_clarity_handoff(
                               message="Entradas de render rechazadas al revalidar antes del envío")
 
     submission = submit_clarity_manifest(config.hearing_degradation.runner, layout["clarity_jobs_path"], progress=progress)
+    withheld = submission.get("blocked_jobs") or {}
+    for job in planned_jobs:
+        if job["job_id"] in withheld:
+            upsert_clarity_record(
+                layout["clarity_index_path"], clarity_records,
+                build_clarity_record(job, manifest_path=layout["clarity_jobs_path"], status="blocked", attempted=False,
+                                     resumed=False, runnable=False, validation_issues=[withheld[job["job_id"]]]),
+            )
+    planned_jobs = [job for job in planned_jobs if job["job_id"] not in withheld]
     if submission["status"] == "blocked":
         for job in planned_jobs:
             upsert_clarity_record(
@@ -325,9 +363,12 @@ def build_clarity_job_record(
     layout: ArtifactLayout,
     variant_record: VariantRecord,
     hearing_profile_id: str,
+    processor: str = "msbg",
+    calibration: RenderCalibrationRecord | None = None,
 ) -> ClarityJobManifestRecord:
     clarity_paths = resolve_clarity_job_paths(
         output_root=config.hearing_degradation.output_dir or layout["degraded_output_root"],
+        processor=processor,
         output_type=variant_record["output_type"],
         variant_id=variant_record["variant_id"],
         hearing_profile_id=hearing_profile_id,
@@ -348,7 +389,72 @@ def build_clarity_job_record(
         "output_dir": clarity_paths["output_dir"],
         "expected_output_wav_path": clarity_paths["expected_output_wav_path"],
         "expected_output_metadata_path": clarity_paths["expected_output_metadata_path"],
+        "processor": processor,
+        "calibration": calibration,
+        "outer_middle_ear": effective_outer_middle_ear(config.hearing_degradation),
+        "processor_config": build_processor_config(config, processor),
+        "processing_signature": build_processing_signature(config, processor),
     }
+
+
+def build_processor_config(config: AppConfig, processor: str) -> dict[str, Any]:
+    hearing = config.hearing_degradation
+    if processor == "whis":
+        if hearing.whis is None:
+            raise ValueError("hearing_degradation.whis es obligatorio para planificar jobs whis")
+        return {
+            "install_root": hearing.whis.install_root.resolve().as_posix(),
+            "matlab_executable": hearing.whis.matlab_executable,
+            "synth_method": hearing.whis.synth_method,
+        }
+    return {"level_handling": hearing.msbg.level_handling if hearing.msbg is not None else "true_level"}
+
+
+def build_processing_signature(config: AppConfig, processor: str) -> dict[str, Any]:
+    """Everything that changes a processor's output for the same render audio (design D9)."""
+    calibration = effective_calibration(config.hearing_degradation)
+    processor_config = build_processor_config(config, processor)
+    signature: dict[str, Any] = {
+        "processor": processor,
+        "calibration": dict(calibration),
+        "random_seed": config.experiment.random_seed if uses_level_range(calibration) else None,
+        "outer_middle_ear": effective_outer_middle_ear(config.hearing_degradation),
+    }
+    if processor == "whis":
+        signature["whis"] = {"synth_method": processor_config["synth_method"]}
+    else:
+        signature["msbg"] = {"level_handling": processor_config["level_handling"]}
+    return json.loads(json.dumps(signature, sort_keys=True))
+
+
+def _calibrate_render(
+    config: AppConfig, variant_record: VariantRecord, revalidation_issues: list[str],
+) -> tuple[RenderCalibrationRecord | None, str | None]:
+    """Return the render calibration, or the blocking issue that prevents it."""
+    wav_path = variant_record["rendered_wav_path"]
+    if revalidation_issues or variant_record["status"] != "completed" or not wav_path or not Path(wav_path).is_file():
+        return None, None  # the job is already ineligible for another, reported reason
+    try:
+        record = compute_render_calibration(
+            config.hearing_degradation,
+            random_seed=config.experiment.random_seed,
+            variant_id=variant_record["variant_id"],
+            input_wav_path=wav_path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"calibration_unreadable_input:{exc}"
+    if record["status"] != "ok":
+        return record, CALIBRATION_UNDEFINED_SILENT_INPUT
+    return record, None
+
+
+def _drop_legacy_layout_records(index_path: Path, records: dict[str, ClarityRecord]) -> None:
+    """Records from the layout before per-processor directories are never resumed (design D6)."""
+    legacy_ids = {job_id for job_id, record in records.items() if record["processor"] is None}
+    if legacy_ids:
+        kept = {job_id: record for job_id, record in records.items() if job_id not in legacy_ids}
+        records.clear()
+        _upsert_many_jsonl(index_path, records, kept)
 
 
 def get_clarity_job_issues(
@@ -510,6 +616,7 @@ def _is_blocking_issue(issues: list[str]) -> bool:
             "missing_input_wav",
             "missing_input_render_metadata",
             "missing_hearing_profiles",
+            "calibration_",
             "render_revalidation:",
             "render_history_not_accepted",
         ]

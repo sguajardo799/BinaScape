@@ -140,3 +140,83 @@ def test_submit_clarity_manifest_keeps_submission_state_on_non_zero_exit(
 
     assert result["status"] == "submitted"
     assert "exit code 1" in result["message"]
+
+
+def _whis_install(root: Path, *, gcfb: bool = True) -> Path:
+    (root / "WHIS" / "WHISv302").mkdir(parents=True)
+    if gcfb:
+        (root / "gammachirp-filterbank" / "GCFBv234").mkdir(parents=True)
+    return root
+
+
+def _mixed_manifest(path: Path, install_root: Path, matlab: str = "matlab") -> None:
+    jobs = [
+        {"job_id": "clarity__v__p__msbg", "output_type": "binaural_hrtf", "processor": "msbg",
+         "processor_config": {"level_handling": "true_level"}},
+        {"job_id": "clarity__v__p__whis", "output_type": "binaural_hrtf", "processor": "whis",
+         "processor_config": {"install_root": install_root.as_posix(), "matlab_executable": matlab, "synth_method": "dtvf"}},
+    ]
+    path.write_text("".join(json.dumps(job) + "\n" for job in jobs), encoding="utf-8")
+
+
+def _direct_runner(monkeypatch: pytest.MonkeyPatch, which=lambda name: f"/bin/{name}") -> tuple[ClarityRunnerConfig, list]:
+    calls: list[list[str]] = []
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_runner.shutil.which", which)
+    monkeypatch.setattr(
+        "acoustic_orchestrator.pipeline.clarity_runner.subprocess.run",
+        lambda command, check: calls.append(command) or type("Completed", (), {"returncode": 0})(),
+    )
+    return ClarityRunnerConfig(use_uv=False), calls
+
+
+def test_missing_gcfb_blocks_whis_jobs_and_still_submits_msbg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_root = _whis_install(tmp_path / "whis", gcfb=False)
+    manifest = tmp_path / "jobs.jsonl"
+    _mixed_manifest(manifest, install_root)
+    runner, calls = _direct_runner(monkeypatch)
+
+    result = submit_clarity_manifest(runner, manifest)
+
+    assert result["status"] == "submitted"
+    assert len(calls) == 1
+    assert list(result["blocked_jobs"]) == ["clarity__v__p__whis"]
+    assert "gammachirp-filterbank/GCFBv234" in result["blocked_jobs"]["clarity__v__p__whis"]
+    remaining = [json.loads(line)["job_id"] for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert remaining == ["clarity__v__p__msbg"]
+
+
+def test_missing_matlab_blocks_whis_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    install_root = _whis_install(tmp_path / "whis")
+    manifest = tmp_path / "jobs.jsonl"
+    _mixed_manifest(manifest, install_root, matlab="matlab-r2099")
+    runner, calls = _direct_runner(monkeypatch, which=lambda name: None if name.startswith("matlab") else f"/bin/{name}")
+
+    result = submit_clarity_manifest(runner, manifest)
+
+    assert "no se encontró el ejecutable de MATLAB 'matlab-r2099'" in result["blocked_jobs"]["clarity__v__p__whis"]
+    assert len(calls) == 1
+
+
+def test_complete_whis_environment_submits_every_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = tmp_path / "jobs.jsonl"
+    _mixed_manifest(manifest, _whis_install(tmp_path / "whis"))
+    runner, calls = _direct_runner(monkeypatch)
+
+    result = submit_clarity_manifest(runner, manifest)
+
+    assert result["status"] == "submitted" and result["blocked_jobs"] == {}
+    assert len(manifest.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_manifest_with_only_blocked_whis_jobs_is_not_submitted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest = tmp_path / "jobs.jsonl"
+    manifest.write_text(json.dumps({
+        "job_id": "clarity__v__p__whis", "output_type": "binaural_hrtf", "processor": "whis",
+        "processor_config": {"install_root": (tmp_path / "missing").as_posix(), "matlab_executable": "matlab"},
+    }) + "\n", encoding="utf-8")
+    runner, calls = _direct_runner(monkeypatch)
+
+    result = submit_clarity_manifest(runner, manifest)
+
+    assert result["status"] == "blocked" and not calls
+    assert "WHIS/WHISv302" in result["message"]

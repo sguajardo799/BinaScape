@@ -73,6 +73,13 @@ Prepare and submit Clarity handoff artifacts to the sibling backend:
 uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit
 ```
 
+Export a run for a calibrated playback chain (same gain for unprocessed, MSBG and WHIS versions;
+see [Presentation export](#presentation-export)):
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator export-presentation outputs/artifacts/<run_name> --playback apps/orchestrator/examples/playback_calibration.yaml
+```
+
 From inside `apps/orchestrator`, the equivalent app-local example command is:
 
 ```sh
@@ -1011,23 +1018,138 @@ uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs
 Expected artifacts:
 
 - `metadata/manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
-  variant, including `run_id` and `backend_invocation`.
+  variant, hearing profile and processor, including `run_id` and `backend_invocation`.
 - `metadata/indexes/clarity_index.jsonl`: status tracking for planned, submitted,
   completed, partial, failed, blocked, or skipped jobs.
-- `output_audio/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
+- `metadata/indexes/level_calibration.jsonl`: one record per render with its effective
+  scale K (see [Level calibration](#level-calibration)).
+- `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
   degraded output from the backend.
-- `output_audio/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
+- `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
   metadata sidecar next to the degraded WAV.
 
 Current degradation output contract:
 
 - The default root is `{artifact_root}/{run_name}/output_audio/degraded/`; an explicit `hearing_degradation.output_dir` overrides it.
-- Subdirectories are `{output_type}/{hearing_profile_id}/`.
+- Subdirectories are `{processor}/{output_type}/{hearing_profile_id}/` for every processor,
+  `msbg` included, so outputs of different processors never overwrite each other.
+- Job ids are `clarity__{variant_id}__{hearing_profile_id}__{processor}`.
 - `expected_output_wav_path` and `expected_output_metadata_path` in each JSONL
   job are authoritative for the backend.
-- Resume checks validate the explicit paths reserved in the handoff manifest.
-- Legacy layouts under `outputs/clarity/...` are not enough to satisfy new runs
-  by themselves.
+- Resume checks validate the explicit paths reserved in the handoff manifest and the
+  `processing_signature` of the job (see [Resume](#resume-by-processing-signature)).
+- Outputs of the layout before per-processor directories
+  (`output_audio/degraded/{output_type}/{hearing_profile_id}/`) and legacy layouts under
+  `outputs/clarity/...` are never reused; their jobs are processed again in the new layout.
+
+### Hearing processors
+
+`hearing_degradation.processors` selects the simulators applied to every eligible render
+(default `[msbg]`). With `[msbg, whis]` each render gets one job per profile and processor,
+all sharing the same calibration and outer/middle ear reference:
+
+```yaml
+hearing_degradation:
+  enabled: true
+  input_targets: [binaural_hrtf]
+  hearing_profiles_path: ./hearing_profiles.yaml
+  processors: [msbg, whis]
+  calibration:
+    mode: presentation_level
+    presentation_level_range_db_spl: [55, 80]   # or presentation_level_db_spl: 65
+  outer_middle_ear: itu                         # free_field | diffuse_field | itu | eardrum
+  msbg:
+    level_handling: true_level                  # or legacy_active_rescale
+  whis:
+    install_root: ../../../../whis              # contains WHIS/WHISv302 and gammachirp-filterbank/GCFBv234
+    matlab_executable: matlab
+    synth_method: dtvf                          # or fbanasyn
+```
+
+See `examples/example_config_whis.yml` for a full config. Rules checked before planning:
+
+- `processors` is a non-empty list of `msbg`/`whis` without repeats.
+- With `whis`: `calibration`, `outer_middle_ear` and `whis.install_root` are mandatory and every
+  profile must declare `compression_health` in both ears with no negative thresholds.
+- Without `whis` a `whis` block is rejected; without `msbg` a `msbg` block is rejected.
+- With only `msbg` and no `calibration`/`outer_middle_ear`, the run uses `fixed_scale` 90 dB
+  (recorded as default) and `free_field`, as before this change.
+- Profiles may declare band `125` and `compression_health` (a number in [0, 1] or one value per
+  `loss_db_by_band` band). MSBG ignores both and lists them in `ignored_profile_fields`.
+- `configs/hearing/hearing_profiles.yaml` includes `nh_reference` (0 dB HL, compression health 1),
+  the control profile for comparing processors on the same render.
+
+Before submitting, WHIS jobs are checked against the machine: if `install_root` lacks
+`WHIS/WHISv302` or `gammachirp-filterbank/GCFBv234`, or the MATLAB executable is not found, only
+the WHIS jobs are marked `blocked` with the missing path; MSBG jobs of the same manifest still run.
+
+### Level calibration
+
+K is the dB SPL that corresponds to digital RMS 1.0. The orchestrator computes it once per render
+during the handoff and copies it unchanged into every job of that render, whatever the processor or
+profile; the backend never recomputes it and the signal is never rescaled for calibration.
+
+- `fixed_scale`: K = `digital_rms1_spl_db`.
+- `presentation_level`: K = P − 10·log10((ms_L + ms_R)/2), where `ms_c` is the unweighted mean square
+  of channel c over the whole file and P the binaural presentation level (Leq) of the render.
+  With `presentation_level_range_db_spl: [min, max]`, P is drawn uniformly from SHA-256 of
+  `experiment.random_seed` and the `variant_id`, so every run and resume gives the same P.
+- Each ear is simulated at `K + 20·log10(rms_c)`: both channels share K, which preserves the ILD.
+- A silent channel stays silent. In `presentation_level`, a render with both channels silent has no
+  K and its jobs are `blocked` with `calibration_undefined_silent_input`.
+
+`metadata/indexes/level_calibration.jsonl` holds, per render: `variant_id`, `mode`, `configured`
+values, `is_default`, `random_seed` (only with a range), `presentation_level_db_spl`,
+`effective_scale_db_spl` (K), per-channel `mean_square`, `leq_db_spl` and `silent`, the
+`silent_channels`, `level_measure: rms_unweighted_full_file` and `status`.
+
+Each job line adds to the fields above: `processor`, `calibration` (the render record),
+`outer_middle_ear`, `processor_config` (`level_handling` for MSBG; `install_root`,
+`matlab_executable`, `synth_method` for WHIS) and `processing_signature`.
+
+### Resume by processing signature
+
+A completed result is reused only if its sidecar declares the job's `processor.name`, the same
+`processing_signature` and a `calibration.effective_scale_db_spl` equal to the job's K. The signature
+covers the processor, the configured calibration, the seed (only with a level range), the outer/middle
+ear reference and `msbg.level_handling` or `whis.synth_method`. Consequences:
+
+- Adding `whis` to a completed `[msbg]` run plans only the WHIS jobs.
+- Changing `outer_middle_ear`, the calibration or, with a level range, `experiment.random_seed`
+  reprocesses every job.
+- WHIS/GCFB commits and `install_root` are recorded in the sidecar but are not part of the signature;
+  use `runner.force_rerun` after updating WHIS in place.
+- To reproduce a run made before this change bit for bit, use `processors: [msbg]`,
+  `msbg.level_handling: legacy_active_rescale`, `outer_middle_ear: free_field` and no `calibration`.
+
+Calibration guides: [validating the simulators with listeners](../../docs/guides/calibration-simulator-validation.md)
+and [generating neural-network datasets](../../docs/guides/calibration-nn-dataset.md).
+
+### Presentation export
+
+`export-presentation` prepares a run for listening tests on a calibrated playback chain:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator export-presentation outputs/artifacts/sim_001_msbg_whis --playback apps/orchestrator/examples/playback_calibration.yaml
+```
+
+The playback file (see `examples/playback_calibration.yaml`) declares `playback_id`
+(path-safe), `k_play_db.left/right` (dB SPL that digital RMS 1.0 produces in each channel of the
+measured chain: play the 1 kHz tone at -26 dBFS RMS and use `k_play_db = L_measured + 26`) and
+`max_spl_db`. Missing or non-finite values are rejected before writing anything.
+
+For every render with a calibration record, the unprocessed WAV and each completed, valid degraded
+output of that render get the same per-channel gain `g_c = K_render - k_play_db_c` dB, so each version
+is played at the SPL it was simulated at. Outputs are float32 with a JSON sidecar (render, version,
+K, `k_play_db`, gain and estimated SPL per channel):
+
+- `output_audio/presentation/{playback_id}/unprocessed/{output_type}/{render_wav_name}.wav`
+- `output_audio/presentation/{playback_id}/{processor}/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`
+
+If any version of a render would exceed `max_spl_db` or clip after the gain, no version of that render
+is exported (`exceeds_max_spl` / `would_clip`). Renders without degraded outputs still export their
+unprocessed version; missing or failed degraded versions are listed per render. The summary is written
+to `output_audio/presentation/{playback_id}/export_summary.json`.
 
 The orchestrator does not add the Clarity backend as a direct Python dependency.
 The current design keeps a file-and-subprocess boundary between the two apps.

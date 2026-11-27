@@ -27,6 +27,7 @@ class ArtifactLayout(TypedDict):
     render_attempts_dir: Path
     sampling_failures_path: Path
     clarity_index_path: Path
+    level_calibration_index_path: Path
     render_outputs_root: Path
     degraded_output_root: Path
 
@@ -53,6 +54,7 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
         "render_attempts_dir": run_root / "metadata" / "render_attempts",
         "sampling_failures_path": run_root / "metadata" / "indexes" / "scene_sampling_failures.jsonl",
         "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
+        "level_calibration_index_path": run_root / "metadata" / "indexes" / "level_calibration.jsonl",
         "render_outputs_root": run_root / "output_audio" / "render",
         "degraded_output_root": run_root / "output_audio" / "degraded",
     }
@@ -103,22 +105,24 @@ def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverO
     return receiver_output
 
 
-def build_clarity_job_id(variant_id: str, hearing_profile_id: str) -> str:
-    return f"clarity__{variant_id}__{hearing_profile_id}"
+def build_clarity_job_id(variant_id: str, hearing_profile_id: str, processor: str) -> str:
+    return f"clarity__{variant_id}__{hearing_profile_id}__{processor}"
 
 
 def resolve_clarity_job_paths(
     *,
     output_root: Path,
+    processor: str,
     output_type: str,
     variant_id: str,
     hearing_profile_id: str,
     input_wav_path: str | Path,
 ) -> ClarityJobPaths:
+    """Degraded outputs live in ``<output_root>/<processor>/<output_type>/<hearing_profile_id>/``."""
     input_wav = Path(input_wav_path)
-    output_dir = (output_root / output_type / hearing_profile_id).resolve()
+    output_dir = (output_root / processor / output_type / hearing_profile_id).resolve()
     return {
-        "job_id": build_clarity_job_id(variant_id, hearing_profile_id),
+        "job_id": build_clarity_job_id(variant_id, hearing_profile_id, processor),
         "output_dir": output_dir.as_posix(),
         "expected_output_wav_path": (output_dir / input_wav.name).resolve().as_posix(),
         "expected_output_metadata_path": (output_dir / f"{input_wav.stem}.json").resolve().as_posix(),

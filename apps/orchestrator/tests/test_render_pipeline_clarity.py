@@ -44,7 +44,7 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
     assert second_summary["batch_status"] == "completed"
     assert layout["clarity_jobs_path"].read_text(encoding="utf-8") == ""
     assert len(records) == 1
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "skipped"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "skipped"
     assert json.loads(Path(first_manifest_rows[0]["expected_output_metadata_path"]).read_text(encoding="utf-8")) == {
         "schema_version": "1.0",
         "job_id": first_manifest_rows[0]["job_id"],
@@ -57,6 +57,7 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
         "input_render_metadata_path": first_manifest_rows[0]["input_render_metadata_path"],
         "output_wav_path": first_manifest_rows[0]["expected_output_wav_path"],
         "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+        **_processing_identity(first_manifest_rows[0]),
     }
 
 
@@ -101,8 +102,8 @@ def test_run_clarity_handoff_can_force_rerun_completed_outputs(
     assert len(second_manifest_rows) == 1
     assert second_manifest_rows[0]["job_id"] == first_manifest_rows[0]["job_id"]
     assert len(records) == 1
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "planned"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["resumed"] is False
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "planned"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["resumed"] is False
 
 
 def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
@@ -153,13 +154,13 @@ def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
 
     assert len(submissions) == 1
     assert len(submissions[0]) == 1
-    assert submissions[0][0]["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss"
+    assert submissions[0][0]["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"
     assert summary["clarity"] is not None
     assert summary["clarity"]["auto_submit"] is True
     assert summary["clarity"]["submitted"] is True
     assert summary["clarity"]["completed_jobs"] == 1
     assert summary["clarity"]["resumed_jobs"] == 0
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "completed"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
 
 
 def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
@@ -215,6 +216,7 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
                     "input_render_metadata_path": jobs[0]["input_render_metadata_path"],
                     "output_wav_path": jobs[0]["expected_output_wav_path"],
                     "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                    **_processing_identity(jobs[0]),
                 }
             ),
             encoding="utf-8",
@@ -236,12 +238,12 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
     assert first_summary["failed_jobs"] == 1
     assert first_summary["batch_status"] == "failed"
     assert len(first_records) == 1
-    assert first_records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "failed"
+    assert first_records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "failed"
     assert second_summary["submitted"] is True
     assert second_summary["completed_jobs"] == 1
     assert second_summary["batch_status"] == "completed"
     assert len(second_records) == 1
-    assert second_records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "completed"
+    assert second_records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
     assert attempts["count"] == 2
 
 
@@ -301,18 +303,18 @@ def test_run_clarity_handoff_marks_mixed_backend_results_as_partial_batch(
     assert summary["completed_jobs"] == 1
     assert summary["failed_jobs"] == 1
     assert summary["batch_status"] == "partial"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "completed"
-    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["status"] == "failed"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["output_dir"] != records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["output_dir"]
-    assert Path(records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["output_dir"]).parts[-2:] == ("binaural_hrtf", "mild_loss")
-    assert Path(records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["output_dir"]).parts[-2:] == ("binaural_hrtf", "severe_loss")
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
+    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["status"] == "failed"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["output_dir"] != records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["output_dir"]
+    assert Path(records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["output_dir"]).parts[-3:] == ("msbg", "binaural_hrtf", "mild_loss")
+    assert Path(records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["output_dir"]).parts[-3:] == ("msbg", "binaural_hrtf", "severe_loss")
     assert json.loads(
-        Path(layout["degraded_output_root"] / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.json").read_text(
+        Path(layout["degraded_output_root"] / "msbg" / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.json").read_text(
             encoding="utf-8"
         )
     ) == {
         "schema_version": "1.0",
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -532,5 +534,14 @@ def _completed_clarity_result(job: dict[str, object]) -> str:
             "input_render_metadata_path": job["input_render_metadata_path"],
             "output_wav_path": job["expected_output_wav_path"],
             "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+            **_processing_identity(job),
         }
     )
+
+
+def _processing_identity(job: dict) -> dict:
+    return {
+        "processor": {"name": job["processor"]},
+        "processing_signature": job["processing_signature"],
+        "calibration": job["calibration"],
+    }

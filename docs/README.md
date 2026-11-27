@@ -11,13 +11,15 @@ Entrada técnica del monorepo: cuatro aplicaciones, generación estática y aná
 | Preparar entorno | [Instalación y entorno](development/setup.md) |
 | Ejecutar pruebas existentes | [Validación y pruebas](development/testing.md) |
 | Revisar evidencias y cambios documentales | [Auditoría](maintenance/documentation-audit.md) |
+| Calibrar niveles para escuchar estímulos (NH vs IH) con MSBG y WHIS | [Guía de validación de simuladores](guides/calibration-simulator-validation.md) |
+| Calibrar niveles para generar datasets de entrenamiento | [Guía de datasets para redes](guides/calibration-nn-dataset.md) |
 | Consultar decisiones históricas cerradas | [Índice PRD](PRD/README.md) |
 
 ## Guías locales
 
 - [Orchestrator](../apps/orchestrator/README.md) y [arquitectura de módulos](../apps/orchestrator/ARCHITECTURE.md).
 - [MATLAB/RAVEN](../apps/matlab/README.md).
-- [Clarity/MSBG](../apps/clarity-backend/README.md).
+- [Degradación auditiva: Clarity/MSBG y WHIS](../apps/clarity-backend/README.md).
 - [Output Analyzer](../apps/output-analyzer/README.md).
 
 Las instrucciones para agentes permanecen junto a sus aplicaciones: [Orchestrator](../apps/orchestrator/AGENTS.md), [MATLAB](../apps/matlab/AGENTS.md) y [Clarity](../apps/clarity-backend/AGENTS.md). No reemplazan a contratos técnicos; el contexto histórico señalado en la auditoría se resuelve con código y documentación vigente.

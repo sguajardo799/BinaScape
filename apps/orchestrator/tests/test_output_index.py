@@ -460,6 +460,7 @@ def test_inspect_clarity_record_detects_completed_outputs(tmp_path: Path) -> Non
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -493,6 +494,7 @@ def test_should_resume_clarity_job_requires_existing_completed_outputs(tmp_path:
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -535,6 +537,7 @@ def test_inspect_clarity_record_marks_resumed_completed_outputs_as_skipped(tmp_p
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -622,6 +625,7 @@ def test_inspect_clarity_record_treats_completed_metadata_without_wav_as_partial
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -638,7 +642,7 @@ def test_summarize_clarity_index_marks_mixed_batch_as_partial(tmp_path: Path) ->
     completed_job = _clarity_job(tmp_path)
     failed_job = {
         **_clarity_job(tmp_path),
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg",
         "hearing_profile_id": "severe_loss",
         "output_dir": str(tmp_path / "degraded" / "binaural_hrtf" / "severe_loss"),
         "expected_output_wav_path": str(tmp_path / "degraded" / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.wav"),
@@ -663,6 +667,7 @@ def test_summarize_clarity_index_marks_mixed_batch_as_partial(tmp_path: Path) ->
                 "input_render_metadata_path": completed_job["input_render_metadata_path"],
                 "output_wav_path": completed_job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(completed_job),
             }
         ),
         encoding="utf-8",
@@ -718,6 +723,7 @@ def test_should_resume_clarity_job_rejects_legacy_fixed_filename_outputs(tmp_pat
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": str((legacy_dir / "degraded.wav").resolve()),
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -876,7 +882,7 @@ def _clarity_job(tmp_path: Path) -> ClarityJobManifestRecord:
     return {
         "schema_version": "1.0",
         "run_id": "sim_test",
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -890,11 +896,117 @@ def _clarity_job(tmp_path: Path) -> ClarityJobManifestRecord:
         },
         "input_wav_path": str(tmp_path / "input.wav"),
         "input_render_metadata_path": str(tmp_path / "render.json"),
-        "output_dir": str(tmp_path / "degraded" / "binaural_hrtf" / "mild_loss"),
+        "output_dir": str(tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss"),
         "expected_output_wav_path": str(
-            tmp_path / "degraded" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
+            tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
         ),
         "expected_output_metadata_path": str(
-            tmp_path / "degraded" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.json"
+            tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.json"
         ),
+        "processor": "msbg",
+        "calibration": {"variant_id": "scene_static_0001__binaural_hrtf", "effective_scale_db_spl": 90.0},
+        "outer_middle_ear": "free_field",
+        "processor_config": {"level_handling": "true_level"},
+        "processing_signature": {
+            "processor": "msbg",
+            "calibration": {"mode": "fixed_scale", "configured": {"digital_rms1_spl_db": 90.0}, "is_default": True},
+            "random_seed": None,
+            "outer_middle_ear": "free_field",
+            "msbg": {"level_handling": "true_level"},
+        },
     }
+
+
+def _processing_identity(job: ClarityJobManifestRecord) -> dict:
+    return {
+        "processor": {"name": job["processor"]},
+        "processing_signature": job["processing_signature"],
+        "calibration": dict(job["calibration"]),
+    }
+
+
+def _write_completed_sidecar(job: ClarityJobManifestRecord, **overrides) -> None:
+    Path(job["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(job["expected_output_wav_path"]).write_text("wav", encoding="utf-8")
+    payload = {
+        "schema_version": "1.0",
+        "job_id": job["job_id"],
+        "variant_id": job["variant_id"],
+        "scene_id": job["scene_id"],
+        "output_type": job["output_type"],
+        "hearing_profile_id": job["hearing_profile_id"],
+        "status": "completed",
+        "input_wav_path": job["input_wav_path"],
+        "input_render_metadata_path": job["input_render_metadata_path"],
+        "output_wav_path": job["expected_output_wav_path"],
+        "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+        **_processing_identity(job),
+        **overrides,
+    }
+    Path(job["expected_output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_completed_sidecar_from_another_processor_is_invalid(tmp_path: Path) -> None:
+    job = {**_clarity_job(tmp_path), "processor": "whis"}
+    job["processing_signature"] = {**job["processing_signature"], "processor": "whis"}
+    _write_completed_sidecar(job, processor={"name": "msbg"})
+
+    record = inspect_clarity_record(job, manifest_path=tmp_path / "clarity_jobs.jsonl", attempted=True)
+
+    assert record["status"] == "partial"
+    assert "clarity_result_processor_mismatch: expected whis got msbg" in record["validation"]["issues"]
+    assert should_resume_clarity_job({}, job, manifest_path=tmp_path / "clarity_jobs.jsonl") is False
+
+
+@pytest.mark.parametrize(
+    "change, issue",
+    [
+        (lambda job: job["processing_signature"].update(outer_middle_ear="itu"), "processing_signature_mismatch"),
+        (lambda job: job["processing_signature"]["calibration"].update(
+            mode="fixed_scale", configured={"digital_rms1_spl_db": 100.0}, is_default=False), "processing_signature_mismatch"),
+        (lambda job: job["processing_signature"].update(random_seed=43), "processing_signature_mismatch"),
+        (lambda job: job["calibration"].update(effective_scale_db_spl=95.0), "calibration_mismatch"),
+    ],
+    ids=["outer_middle_ear", "calibration", "seed_with_range", "scale_k"],
+)
+def test_completed_result_is_not_resumed_when_the_job_processing_changes(tmp_path: Path, change, issue: str) -> None:
+    completed_job = _clarity_job(tmp_path)
+    _write_completed_sidecar(completed_job)
+    assert should_resume_clarity_job({}, completed_job, manifest_path=tmp_path / "clarity_jobs.jsonl") is True
+
+    current_job = json.loads(json.dumps(completed_job))
+    change(current_job)
+
+    assert should_resume_clarity_job({}, current_job, manifest_path=tmp_path / "clarity_jobs.jsonl") is False
+    record = inspect_clarity_record(current_job, manifest_path=tmp_path / "clarity_jobs.jsonl", attempted=False, resumed=True)
+    assert any(issue in item for item in record["validation"]["issues"])
+
+
+def test_completed_sidecar_without_processing_identity_is_invalid(tmp_path: Path) -> None:
+    job = _clarity_job(tmp_path)
+    _write_completed_sidecar(job)
+    payload = json.loads(Path(job["expected_output_metadata_path"]).read_text(encoding="utf-8"))
+    for field in ("processor", "processing_signature", "calibration"):
+        payload.pop(field)
+    Path(job["expected_output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+    issues = inspect_clarity_record(job, manifest_path=tmp_path / "x.jsonl", attempted=True)["validation"]["issues"]
+
+    assert "clarity_result_processor_mismatch: expected msbg got None" in issues
+    assert "clarity_result_processing_signature_missing" in issues
+    assert "clarity_result_calibration_missing" in issues
+
+
+def test_legacy_index_records_load_without_processor(tmp_path: Path) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    record = build_clarity_record(
+        _clarity_job(tmp_path), manifest_path=tmp_path / "clarity_jobs.jsonl", status="completed",
+        attempted=True, resumed=False, runnable=True,
+    )
+    legacy = {key: value for key, value in record.items() if key != "processor"}
+    legacy["job_id"] = "clarity__scene_static_0001__binaural_hrtf__mild_loss"
+    index_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    loaded = load_clarity_index(index_path)
+
+    assert loaded[legacy["job_id"]]["processor"] is None

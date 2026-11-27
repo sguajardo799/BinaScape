@@ -1023,3 +1023,263 @@ def _make_receiver_orientation_compatible(config_path: Path) -> None:
         1,
     )
     config_path.write_text(text, encoding="utf-8")
+
+
+# --- Procesadores de degradación auditiva, calibración y catálogo extendido ---
+
+def _hearing_config(tmp_path: Path, hearing_overrides: dict) -> Path:
+    config_path = _write_config(tmp_path)
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw_config["hearing_degradation"].update(hearing_overrides)
+    config_path.write_text(yaml.safe_dump(raw_config), encoding="utf-8")
+    return config_path
+
+
+def _whis_block(tmp_path: Path) -> dict:
+    return {
+        "processors": ["msbg", "whis"],
+        "calibration": {"mode": "presentation_level", "presentation_level_db_spl": 65},
+        "outer_middle_ear": "itu",
+        "whis": {"install_root": (tmp_path / "whis").as_posix()},
+    }
+
+
+def _write_profiles(path: Path, ears_yaml: str) -> Path:
+    path.write_text("profiles:\n  - hearing_profile_id: p1\n    ears:\n" + ears_yaml, encoding="utf-8")
+    return path
+
+
+_WHIS_READY_EARS = (
+    "      left:\n        loss_db_by_band: {250: 10}\n        compression_health: 1\n"
+    "      right:\n        loss_db_by_band: {250: 10}\n        compression_health: 1\n"
+)
+
+
+def test_hearing_processor_defaults_keep_existing_configs_valid(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    validate_config(config)
+    hearing = config.hearing_degradation
+    assert hearing.processors == ["msbg"]
+    assert hearing.calibration is None and hearing.outer_middle_ear is None
+    assert hearing.msbg is None and hearing.whis is None
+
+
+@pytest.mark.parametrize(
+    "overrides, field",
+    [
+        ({"processors": ["msbg", "ahaah"]}, ("processors",)),
+        ({"processors": []}, ("processors",)),
+        ({"calibration": {"mode": "auto"}}, ("calibration", "mode")),
+        ({"outer_middle_ear": "pinna"}, ("outer_middle_ear",)),
+        ({"msbg": {"level_handling": "auto"}}, ("msbg", "level_handling")),
+        ({"whis": {"install_root": "x", "synth_method": "fft"}}, ("whis", "synth_method")),
+        ({"calibration": {"mode": "fixed_scale", "digital_rms1_spl_db": float("nan")}},
+         ("calibration", "digital_rms1_spl_db")),
+    ],
+)
+def test_hearing_processor_unknown_values_fail_naming_field(
+    tmp_path: Path, overrides: dict, field: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(_hearing_config(tmp_path, overrides))
+    locations = [tuple(str(part) for part in error["loc"]) for error in exc_info.value.errors()]
+    assert any(loc[: len(field) + 1] == ("hearing_degradation", *field) for loc in locations), locations
+
+
+def test_hearing_processor_unknown_mode_lists_supported_modes(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(_hearing_config(tmp_path, {"calibration": {"mode": "auto"}}))
+    assert "fixed_scale" in str(exc_info.value) and "presentation_level" in str(exc_info.value)
+
+
+def test_hearing_processor_repeated_list_fails_naming_field(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match=r"hearing_degradation\.processors no admite repetidos: msbg"):
+        load_config(_hearing_config(tmp_path, {"processors": ["msbg", "msbg"]}))
+
+
+def test_fixed_scale_calibration_is_accepted(tmp_path: Path) -> None:
+    config = load_config(_hearing_config(tmp_path, {"calibration": {"mode": "fixed_scale", "digital_rms1_spl_db": 100}}))
+    validate_config(config)
+    assert config.hearing_degradation.calibration.digital_rms1_spl_db == 100
+
+
+@pytest.mark.parametrize(
+    "calibration, message",
+    [
+        ({"mode": "fixed_scale"}, "digital_rms1_spl_db es obligatorio"),
+        ({"mode": "fixed_scale", "digital_rms1_spl_db": 90, "presentation_level_db_spl": 65},
+         "presentation_level_db_spl no aplica con mode=fixed_scale"),
+        ({"mode": "presentation_level", "presentation_level_db_spl": 65, "presentation_level_range_db_spl": [55, 80]},
+         "son excluyentes"),
+        ({"mode": "presentation_level"}, "requiere presentation_level_db_spl o presentation_level_range_db_spl"),
+        ({"mode": "presentation_level", "presentation_level_range_db_spl": [80, 55]}, "min <= max"),
+        ({"mode": "presentation_level", "digital_rms1_spl_db": 90, "presentation_level_db_spl": 65},
+         "digital_rms1_spl_db no aplica con mode=presentation_level"),
+    ],
+)
+def test_calibration_mode_rules(tmp_path: Path, calibration: dict, message: str) -> None:
+    config = load_config(_hearing_config(tmp_path, {"calibration": calibration}))
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)
+
+
+def test_presentation_range_with_equal_bounds_is_accepted(tmp_path: Path) -> None:
+    config = load_config(
+        _hearing_config(tmp_path, {"calibration": {"mode": "presentation_level", "presentation_level_range_db_spl": [65, 65]}})
+    )
+    validate_config(config)
+
+
+@pytest.mark.parametrize(
+    "removed, message",
+    [
+        ("calibration", r"hearing_degradation\.calibration es obligatorio"),
+        ("outer_middle_ear", r"hearing_degradation\.outer_middle_ear es obligatorio"),
+        ("whis", r"hearing_degradation\.whis\.install_root es obligatorio"),
+    ],
+)
+def test_whis_requires_its_blocks(tmp_path: Path, removed: str, message: str) -> None:
+    _write_profiles(tmp_path / "hearing_profiles.yaml", _WHIS_READY_EARS)
+    block = _whis_block(tmp_path)
+    del block[removed]
+    config_path = _hearing_config(tmp_path, block)
+    _write_profiles(tmp_path / "hearing_profiles.yaml", _WHIS_READY_EARS)
+    config = load_config(config_path)
+    with pytest.raises(ValueError, match=message):
+        validate_config(config)
+
+
+def test_whis_block_without_whis_processor_is_rejected(tmp_path: Path) -> None:
+    config = load_config(_hearing_config(tmp_path, {"whis": {"install_root": "whis"}}))
+    with pytest.raises(ValueError, match=r"hearing_degradation\.whis no aplica"):
+        validate_config(config)
+
+
+def test_msbg_block_without_msbg_processor_is_rejected(tmp_path: Path) -> None:
+    block = _whis_block(tmp_path) | {"processors": ["whis"], "msbg": {"level_handling": "true_level"}}
+    config_path = _hearing_config(tmp_path, block)
+    _write_profiles(tmp_path / "hearing_profiles.yaml", _WHIS_READY_EARS)
+    config = load_config(config_path)
+    with pytest.raises(ValueError, match=r"hearing_degradation\.msbg no aplica"):
+        validate_config(config)
+
+
+def test_whis_config_resolves_install_root_and_defaults(tmp_path: Path) -> None:
+    block = _whis_block(tmp_path) | {"whis": {"install_root": "whis"}}
+    config_path = _hearing_config(tmp_path, block)
+    _write_profiles(tmp_path / "hearing_profiles.yaml", _WHIS_READY_EARS)
+    config = load_config(config_path)
+    validate_config(config)
+    whis = config.hearing_degradation.whis
+    assert whis.install_root == (tmp_path / "whis").resolve()
+    assert whis.matlab_executable == "matlab" and whis.synth_method == "dtvf"
+
+
+def test_catalog_accepts_band_125_and_compression_health(tmp_path: Path) -> None:
+    path = _write_profiles(
+        tmp_path / "profiles.yaml",
+        "      left:\n        loss_db_by_band: {125: 0, 250: 10, 4000: 30}\n        compression_health: 0.5\n"
+        "      right:\n        loss_db_by_band: {125: 0, 250: 10, 4000: 30}\n"
+        "        compression_health: {125: 1, 250: 1, 4000: 0}\n",
+    )
+    [profile] = load_hearing_profile_catalog(path, processors=["msbg", "whis"])
+    assert profile["left_loss_db_by_band"]["125"] == 0.0
+    assert profile["left_compression_health"] == 0.5
+    assert profile["right_compression_health"] == {"125": 1.0, "250": 1.0, "4000": 0.0}
+
+
+@pytest.mark.parametrize(
+    "right_ch, message",
+    [
+        ("{4000: 1.2, 250: 1}", r"profiles\[1\] \(p1\)\.ears\.right\.compression_health\.4000 debe estar en \[0, 1\]"),
+        ("{250: 1}", r"profiles\[1\] \(p1\)\.ears\.right\.compression_health no declara las bandas 4000"),
+        ("{250: 1, 4000: 1, 3000: 1}", r"compression_health\.3000 no es una banda"),
+        ("-0.1", r"ears\.right\.compression_health debe estar en \[0, 1\]"),
+        (".nan", r"ears\.right\.compression_health debe ser numérico y finito"),
+    ],
+)
+def test_catalog_rejects_invalid_compression_health_with_any_processor(
+    tmp_path: Path, right_ch: str, message: str
+) -> None:
+    path = _write_profiles(
+        tmp_path / "profiles.yaml",
+        "      left:\n        loss_db_by_band: {250: 10, 4000: 30}\n"
+        f"      right:\n        loss_db_by_band: {{250: 10, 4000: 30}}\n        compression_health: {right_ch}\n",
+    )
+    with pytest.raises(ValueError, match=message):
+        load_hearing_profile_catalog(path)
+
+
+def test_catalog_with_whis_requires_compression_health_per_ear(tmp_path: Path) -> None:
+    path = _write_profiles(
+        tmp_path / "profiles.yaml",
+        "      left:\n        loss_db_by_band: {250: 10}\n"
+        "      right:\n        loss_db_by_band: {250: 10}\n        compression_health: 1\n",
+    )
+    load_hearing_profile_catalog(path)  # msbg ignora la ausencia
+    with pytest.raises(ValueError) as exc_info:
+        load_hearing_profile_catalog(path, processors=["msbg", "whis"])
+    assert "profiles[1] (p1).ears.left.compression_health es obligatorio con el procesador whis" in str(exc_info.value)
+    assert "ears.right.compression_health es obligatorio" not in str(exc_info.value)
+
+
+def test_catalog_with_whis_rejects_negative_thresholds(tmp_path: Path) -> None:
+    path = _write_profiles(
+        tmp_path / "profiles.yaml",
+        "      left:\n        loss_db_by_band: {250: -5}\n        compression_health: 1\n"
+        "      right:\n        loss_db_by_band: {250: 10}\n        compression_health: 1\n",
+    )
+    load_hearing_profile_catalog(path)
+    with pytest.raises(ValueError, match=r"profiles\[1\] \(p1\)\.ears\.left\.loss_db_by_band\.250 no puede ser negativo"):
+        load_hearing_profile_catalog(path, processors=["whis"])
+
+
+def test_validate_config_applies_whis_catalog_rules(tmp_path: Path) -> None:
+    config = load_config(_hearing_config(tmp_path, _whis_block(tmp_path)))
+    with pytest.raises(ValueError, match=r"hearing_degradation\.hearing_profiles_path .*compression_health es obligatorio"):
+        validate_config(config)
+
+
+def test_repository_hearing_catalogs_include_nh_reference() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    for path, processors in (
+        (repository / "configs" / "hearing" / "hearing_profiles.yaml", ["msbg"]),
+        (repository / "apps" / "orchestrator" / "examples" / "hearing_profiles.yaml", ["msbg", "whis"]),
+    ):
+        profiles = {p["hearing_profile_id"]: p for p in load_hearing_profile_catalog(path, processors=processors)}
+        nh = profiles["nh_reference"]
+        for ear in ("left", "right"):
+            assert nh[f"{ear}_loss_db_by_band"] == {str(f): 0.0 for f in (125, 250, 500, 1000, 2000, 4000, 8000)}
+            assert nh[f"{ear}_compression_health"] == 1.0
+
+
+def test_msbg_whis_example_config_validates_except_install_root(tmp_path: Path) -> None:
+    fixture_config = load_config(_write_config(tmp_path))
+    example = load_config(Path(__file__).resolve().parents[1] / "examples" / "example_config_whis.yml")
+    fixture_config.hearing_degradation = example.hearing_degradation
+    validate_config(fixture_config)
+    hearing = fixture_config.hearing_degradation
+    assert hearing.processors == ["msbg", "whis"]
+    assert hearing.outer_middle_ear == "itu"
+    assert hearing.calibration.presentation_level_range_db_spl == (55.0, 80.0)
+
+
+@pytest.mark.parametrize("guide", ["calibration-simulator-validation.md", "calibration-nn-dataset.md"])
+def test_calibration_guide_config_fragments_validate(tmp_path: Path, guide: str) -> None:
+    text = (Path(__file__).resolve().parents[3] / "docs" / "guides" / guide).read_text(encoding="utf-8")
+    fragments = [
+        yaml.safe_load(block.split("```", 1)[0])
+        for block in text.split("```yaml\n")[1:]
+    ]
+    hearing_fragments = [fragment for fragment in fragments if isinstance(fragment, dict) and "hearing_degradation" in fragment]
+    assert hearing_fragments
+    for fragment in hearing_fragments:
+        config_path = _hearing_config(tmp_path, fragment["hearing_degradation"])
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw["hearing_degradation"]["hearing_profiles_path"] = (tmp_path / "hearing_profiles.yaml").as_posix()
+        raw["experiment"].update(fragment.get("experiment", {}))
+        config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        _write_profiles(tmp_path / "hearing_profiles.yaml", _WHIS_READY_EARS)
+        config = load_config(config_path)
+        validate_config(config)
+        assert config.hearing_degradation.processors == ["msbg", "whis"]

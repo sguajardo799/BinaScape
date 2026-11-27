@@ -107,6 +107,11 @@ class ClarityJobManifestRecord(TypedDict):
     output_dir: str
     expected_output_wav_path: str
     expected_output_metadata_path: str
+    processor: str
+    calibration: dict[str, Any] | None
+    outer_middle_ear: str
+    processor_config: dict[str, Any]
+    processing_signature: dict[str, Any]
 
 
 class ClarityObservedOutputsRecord(TypedDict):
@@ -135,6 +140,7 @@ class ClarityRecord(TypedDict):
     scene_id: str
     output_type: str
     hearing_profile_id: str
+    processor: str | None
     status: ClarityStatus
     resumed: bool
     attempted: bool
@@ -376,6 +382,7 @@ def build_clarity_record(
         "scene_id": job["scene_id"],
         "output_type": job["output_type"],
         "hearing_profile_id": job["hearing_profile_id"],
+        "processor": job["processor"],
         "status": status,
         "resumed": resumed,
         "attempted": attempted,
@@ -545,6 +552,8 @@ def _normalize_clarity_record(record: dict[str, Any]) -> ClarityRecord:
         "scene_id": cast(str, record["scene_id"]),
         "output_type": cast(str, record["output_type"]),
         "hearing_profile_id": cast(str, record.get("hearing_profile_id", "default")),
+        # Records written before per-processor layouts carry no processor (legacy, never resumed).
+        "processor": _pick_string(record.get("processor")),
         "status": cast(ClarityStatus, record.get("status", "planned")),
         "resumed": bool(record.get("resumed", False)),
         "attempted": bool(record.get("attempted", False)),
@@ -807,6 +816,7 @@ def _validate_clarity_result(
         if not observed_outputs["expected_output_wav"]:
             issues.append(f"expected_output_wav_missing: {job['expected_output_wav_path']}")
         issues.extend(_validate_matching_field(result_metadata, "output_wav_path", job["expected_output_wav_path"]))
+        issues.extend(_validate_processing_identity(job, result_metadata))
         degradation_applied = _as_dict(result_metadata.get("degradation_applied"))
         if not degradation_applied:
             issues.append("clarity_result_degradation_applied_missing")
@@ -901,6 +911,29 @@ def _summarize_clarity_batch_status(records: dict[str, ClarityRecord]) -> Clarit
         return "failed"
 
     return "partial"
+
+
+def _validate_processing_identity(job: ClarityJobManifestRecord, result_metadata: dict[str, Any]) -> list[str]:
+    """A completed sidecar must come from the job's processor, signature and render scale K."""
+    issues: list[str] = []
+    observed_processor = _pick_string(_as_dict(result_metadata.get("processor")).get("name"))
+    if observed_processor != job["processor"]:
+        issues.append(f"clarity_result_processor_mismatch: expected {job['processor']} got {observed_processor}")
+    observed_signature = result_metadata.get("processing_signature")
+    if not isinstance(observed_signature, dict):
+        issues.append("clarity_result_processing_signature_missing")
+    elif json.dumps(observed_signature, sort_keys=True) != json.dumps(job["processing_signature"], sort_keys=True):
+        issues.append("clarity_result_processing_signature_mismatch")
+    expected_scale = _as_dict(job["calibration"]).get("effective_scale_db_spl")
+    observed_calibration = result_metadata.get("calibration")
+    if not isinstance(observed_calibration, dict):
+        issues.append("clarity_result_calibration_missing")
+    elif observed_calibration.get("effective_scale_db_spl") != expected_scale:
+        issues.append(
+            "clarity_result_calibration_mismatch: expected effective_scale_db_spl "
+            f"{expected_scale} got {observed_calibration.get('effective_scale_db_spl')}"
+        )
+    return issues
 
 
 def _validate_required_string(payload: dict[str, Any], field_name: str, *, prefix: str) -> list[str]:

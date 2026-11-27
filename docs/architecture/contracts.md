@@ -662,7 +662,21 @@ convención común; ver
 
 `expected_output_wav_path` y `expected_output_metadata_path` son autoritativos. Paths relativos de jobs se resuelven respecto del directorio de trabajo del proceso, no del JSONL. `backend_invocation` sirve al orquestador; no se copia al resultado por el backend. El WAV degradado conserva basename y su sidecar el stem.
 
-El catálogo valida perfiles únicos, dos oídos y pérdidas finitas. MSBG exige exactamente 250, 500, 1000, 2000, 4000 y 8000 Hz por oído, WAV estéreo 44100 Hz; bandas extras o ausentes fallan. El procesamiento preserva longitud, sample rate y subtipo original.
+El catálogo valida perfiles únicos, dos oídos y pérdidas finitas; cada oído puede declarar además la banda `125` y `compression_health` (escalar o por banda en [0, 1]). MSBG exige 250, 500, 1000, 2000, 4000 y 8000 Hz por oído y WAV estéreo 44100 Hz; ignora `125` y `compression_health` y los lista en `ignored_profile_fields`. WHIS acepta 44100 o 48000 Hz, procesa a 48000 Hz, exige `compression_health`, no admite umbrales negativos y copia 250 Hz en 125 Hz si falta (`extrapolated_bands`). El procesamiento preserva longitud y sample rate. Las salidas se escriben en float32 y conservan los valores por encima de 1.0 sin recortar (el pico queda en `processor.output_peak`); solo MSBG con `legacy_active_rescale` conserva el subtipo de entrada y falla si con subtipo entero el pico supera 1.0.
+
+### Calibración, procesador y firma del job
+
+Cada job lleva:
+
+- `processor`: `msbg` o `whis`. Determina el directorio `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/` y el sufijo del `job_id`.
+- `calibration`: el registro del render en `metadata/indexes/level_calibration.jsonl`. Su `effective_scale_db_spl` es K, los dB SPL de RMS digital 1.0. Lo calcula el orquestador una vez por render y el backend no lo recalcula. Cada oído se simula a `K + 20·log10(rms_oído)`.
+- `outer_middle_ear`: `free_field`, `diffuse_field`, `itu` o `eardrum`, común a todos los procesadores de la corrida. En MSBG `eardrum` deja solo la transferencia de oído medio.
+- `processor_config`: `level_handling` (MSBG: `true_level` o `legacy_active_rescale`) o `install_root`, `matlab_executable` y `synth_method` (WHIS).
+- `processing_signature`: el procesador, la calibración configurada, la semilla (solo con rango de nivel), `outer_middle_ear` y `level_handling` o `synth_method`.
+
+El sidecar `completed` repite `calibration` (con `level_handling` en MSBG), `outer_middle_ear`, `processing_signature` e `ignored_profile_fields`, y su bloque `processor` registra `name`, latencia compensada en muestras (`latency_compensation_samples`, `latency_compensated`) y `output_peak`. En WHIS registra además versiones y commits de WHIS/GCFB (o `null`), la release de MATLAB, `synth_method`, `processing_sample_rate_hz` y `resampled`. `degradation_applied` incluye, por oído, la `compression_health` pedida y la aplicada y el reparto de la pérdida en componente activa y pasiva. El sidecar `failed` incluye `processor.name` y la firma.
+
+El orquestador acepta un `completed` solo si `processor.name`, `processing_signature` y `calibration.effective_scale_db_spl` coinciden con el job. Si no coinciden, el resultado es inválido y el job se reprocesa.
 
 Errores de procesamiento/perfil capturados escriben metadata failed y permiten continuar; un lote con fallos sale 1. JSONL malformado, campos estructurales ausentes o problemas al preparar/escribir paths pueden abortar fuera de esa recuperación. No prometer tolerancia universal.
 

@@ -288,6 +288,11 @@ def _group_documents(paths, reader, kind, schema, keys):
         doc = reader.read(path, schema)
         if doc is None:
             continue
+        if kind == "degraded":
+            # Sidecars written before per-processor layouts have no processor.name: MSBG, legacy.
+            name = _nested(doc, "processor", "name")
+            doc["_legacy_layout"] = not (isinstance(name, str) and name.strip())
+            doc["processor_key"] = name if not doc["_legacy_layout"] else "msbg"
         identity = [
             reader.identifier(
                 doc.get("output_type", doc.get(k)) if kind == "variant" and k == "hrtf_id" else doc.get(k),
@@ -634,7 +639,7 @@ def load_run(run_dir: str | Path) -> AnalysisData:
         reader,
         "degraded",
         "1.0",
-        ["variant_id", "hearing_profile_id"],
+        ["variant_id", "hearing_profile_id", "processor_key"],
     )
     indexes = run / "metadata/indexes"
     data.render_index = reader.index(indexes / "render_index.jsonl")
@@ -1086,7 +1091,7 @@ def load_run(run_dir: str | Path) -> AnalysisData:
                 data.rt30_pairs.append(row)
     data.rt30_scene_means = _rt30_scene_means(data)
     _coverage(data, reader, expected, renders)
-    for (variant, profile), doc in degraded.items():
+    for doc in degraded.values():
         data.degraded_records.append(_degraded(doc, reader))
     known_jobs = {r["job_id"] for r in data.degraded_records if r.get("job_id")}
     for row in data.clarity_index:
@@ -1213,7 +1218,7 @@ def _coverage(data, reader, expected, renders):
 
 
 def _degraded(doc, reader):
-    entity = f"degraded:{doc['variant_id']}/{doc['hearing_profile_id']}"
+    entity = f"degraded:{doc['variant_id']}/{doc['hearing_profile_id']}/{doc['processor_key']}"
     for key in ["scene_id", "job_id", "output_type", "status"]:
         doc[key] = reader.identifier(doc.get(key), entity, key, doc["metadata_path"])
     if doc.get("status") not in {"completed", "failed"}:
@@ -1278,7 +1283,16 @@ def _degraded(doc, reader):
             "input_render_metadata_path",
         ]
     }
+    calibration = doc.get("calibration") if isinstance(doc.get("calibration"), dict) else {}
     result.update(
+        processor=doc["processor_key"],
+        legacy=doc["_legacy_layout"],
+        effective_scale_db_spl=_number(calibration.get("effective_scale_db_spl")),
+        presentation_level_db_spl=_number(calibration.get("presentation_level_db_spl")),
+        calibration_mode=calibration.get("mode") if isinstance(calibration.get("mode"), str) else None,
+        left_leq_db_spl=_number(_nested(calibration, "channels", "left", "leq_db_spl")),
+        right_leq_db_spl=_number(_nested(calibration, "channels", "right", "leq_db_spl")),
+        outer_middle_ear=doc.get("outer_middle_ear") if isinstance(doc.get("outer_middle_ear"), str) else None,
         processor_name=_nested(doc, "processor", "name"),
         left_mean_loss_db=_mean(list(bands["left"].values())),
         right_mean_loss_db=_mean(list(bands["right"].values())),
@@ -1410,6 +1424,12 @@ def summary_for(data: AnalysisData) -> JsonObject:
             r.get("hearing_profile_id") for r in data.degraded_records
         ),
         degraded_statuses=_counts(r.get("status") for r in data.degraded_records),
+        degraded_processors=_counts(r.get("processor") for r in data.degraded_records),
+        degraded_statuses_by_processor={
+            processor: _counts(r.get("status") for r in data.degraded_records if r.get("processor") == processor)
+            for processor in sorted({r.get("processor") for r in data.degraded_records if r.get("processor")})
+        },
+        degraded_legacy_count=sum(bool(r.get("legacy")) for r in data.degraded_records),
         incident_counts=_counts(i["category"] for i in data.incidents),
         affected_entity_count=len({i["entity"] for i in data.incidents}),
         populations=populations,

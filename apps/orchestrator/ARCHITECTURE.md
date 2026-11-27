@@ -84,8 +84,9 @@ metadata/manifests/runtime/clarity/clarity_jobs.jsonl
 metadata/indexes/render_index.jsonl
 metadata/indexes/scene_sampling_failures.jsonl
 metadata/indexes/clarity_index.jsonl
+metadata/indexes/level_calibration.jsonl
 output_audio/render/{receiver_output.output_subdir}/
-output_audio/degraded/{output_type}/{hearing_profile_id}/
+output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/
 cropped_audio/    # solo cuando se prepara audio recortado
 ```
 
@@ -97,9 +98,9 @@ Los índices JSONL registran planificación, resultados, validación e intentos 
 
 `hearing_degradation.enabled` habilita la preparación tras render. `runner.auto_submit` controla el envío automático; `clarity-handoff --submit` solicita envío explícito. Sin `--submit`, la CLI de handoff prepara únicamente los trabajos.
 
-El handoff combina variantes elegibles con perfiles del catálogo: exige un render completado y validado, tipo incluido en `input_targets`, WAV y metadatos de entrada presentes. El trabajo incluye identificadores, catálogo, `backend_invocation` y paths de entrada/salida. Los trabajos no elegibles quedan omitidos o bloqueados con su diagnóstico.
+El handoff combina variantes elegibles con perfiles del catálogo y con cada procesador de `hearing_degradation.processors` (`msbg`, `whis`): exige un render completado y validado, tipo incluido en `input_targets`, WAV y metadatos de entrada presentes. Calcula una vez por render la escala efectiva K (`pipeline/level_calibration.py`), la registra en `level_calibration.jsonl` y la copia sin cambios en cada trabajo de ese render. El trabajo incluye identificadores, catálogo, `backend_invocation`, paths de entrada/salida, `processor`, `calibration`, `outer_middle_ear`, `processor_config` y `processing_signature`. Los trabajos no elegibles quedan omitidos o bloqueados con su diagnóstico; los WHIS también se bloquean si falta su instalación o MATLAB, sin bloquear los MSBG.
 
-La salida degradada por defecto es `output_audio/degraded/{output_type}/{hearing_profile_id}/`. Conserva el basename del WAV renderizado y escribe un sidecar `{render_wav_stem}.json`. Los campos `expected_output_wav_path` y `expected_output_metadata_path` de cada trabajo son autoritativos para el backend y la reanudación. Un `hearing_degradation.output_dir` explícito puede cambiar la raíz.
+La salida degradada por defecto es `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/` (layout uniforme para todos los procesadores). Conserva el basename del WAV renderizado y escribe un sidecar `{render_wav_stem}.json`. Un resultado solo se reutiliza si su sidecar declara el mismo procesador, la misma `processing_signature` y el mismo K; las salidas del layout anterior (`{output_type}/{hearing_profile_id}/`) no se reutilizan. Los campos `expected_output_wav_path` y `expected_output_metadata_path` de cada trabajo son autoritativos para el backend y la reanudación. Un `hearing_degradation.output_dir` explícito puede cambiar la raíz.
 
 ## Límites del entorno
 

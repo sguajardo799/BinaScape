@@ -22,7 +22,8 @@ The default destination is `<run-dir>/analysis`. The root must be accessible and
 
 - `metadata/manifests/scene/*.json`
 - `output_audio/render/**/*__render.json` (including MATLAB singleton `sources` objects)
-- `output_audio/degraded/**/*.json`
+- `output_audio/degraded/**/*.json` (current layout `degraded/{processor}/{output_type}/{hearing_profile_id}/`
+  and the previous `degraded/{output_type}/{hearing_profile_id}/`)
 - `metadata/indexes/render_index.jsonl`
 - `metadata/indexes/clarity_index.jsonl`
 - `metadata/indexes/scene_sampling_failures.jsonl`
@@ -33,6 +34,20 @@ Render identity accepts `output_type` with legacy `hrtf_id` fallback. Circular-a
 sidecars and nullable receiver IR index paths are supported without inventing an
 HRTF identity: array rows use `output_type: circular_array`, with HRTF fields empty.
 This is metadata compatibility, not microphone-level analysis or beamforming.
+
+### Degraded records and processors
+
+A degraded record is identified by `variant_id`, `hearing_profile_id` and processor, so the
+`msbg` and `whis` sidecars of the same render and profile are two records, not a duplicate. The
+processor comes from the sidecar's `processor.name`. Sidecars without it (runs produced before
+per-processor directories) are read as `msbg` with `legacy: true`; such runs still produce the same
+degraded charts as before.
+
+Each degraded record exports `processor`, `legacy`, `effective_scale_db_spl` (K, dB SPL of digital
+RMS 1.0), `presentation_level_db_spl`, `calibration_mode`, `left_leq_db_spl`, `right_leq_db_spl` and
+`outer_middle_ear` when the sidecar declares them (null otherwise), besides the existing loss fields.
+`summary.json` adds `degraded_processors`, `degraded_statuses_by_processor` and
+`degraded_legacy_count`.
 
 ## Report and geometry
 
@@ -70,7 +85,7 @@ All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/J
 | `sources` | Unique scene/source identity |
 | `render_scenes` | Unique scene/HRTF render variant; retained historical filename **does not mean unique scenes** |
 | `joined_render_sources` | Source–variant row; retained historical filenames, not unique sources |
-| `degraded_metadata` | Unique degraded record under the current producer contract |
+| `degraded_metadata` | Unique degraded record (variant, hearing profile, processor) under the current producer contract |
 | `rt30_records` | Individual method/frequency values with scene/variant provenance and comparison eligibility |
 | `rt30_consolidated` | One RAVEN scene/frequency estimate, dispersion, variants and exclusion cause; no HRTF weighting |
 | `rt30_comparisons` | All candidate scene/frequency comparisons, including excluded pairs and reasons |
@@ -88,7 +103,7 @@ All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/J
 
 An excluded count refers to the named normalized population and field. Documents rejected before normalization are reported separately in incidents. Category totals may overlap: use the distinct affected-entity total from the summary rather than summing categories. Event absence is excluded from event categories. Unknown expected coverage is unavailable, never 0% or 100%.
 
-The quality section charts materials, sampling attempts and obtained bins, auditory profiles/status/common-band asymmetry and declared background noise (subject to the constant/empty rules), plus incident counts and a bounded incident table; HRTF reconciliation and sampling/batch/failure records are in their exports. Missing metadata displays unavailable coverage; no effective SNR or audio level is inferred.
+The quality section charts materials, sampling attempts and obtained bins, auditory profiles/status/common-band asymmetry (one chart per processor, e.g. `degraded_status_msbg` and `degraded_status_whis`, when a run has more than one; the historical `degraded_*` charts otherwise) and declared background noise (subject to the constant/empty rules), plus incident counts and a bounded incident table; HRTF reconciliation and sampling/batch/failure records are in their exports. Missing metadata displays unavailable coverage; no effective SNR or audio level is inferred.
 
 ## Validation
 

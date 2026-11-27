@@ -356,26 +356,37 @@ def _write_charts(
         "unique scene/frequency pairs",
         "acoustics",
     )
-    for field, key, title, categorical in [
-        ("hearing_profile_id", "degraded_profiles", "Hearing profiles", True),
-        ("status", "degraded_status", "Degradation status", True),
-        (
-            "ear_asymmetry_db",
-            "degraded_asymmetry",
-            "Declared ear asymmetry on common bands",
-            False,
-        ),
-    ]:
-        metric(
-            key,
-            data.degraded_records,
-            field,
-            title,
-            "category" if categorical else "dB",
-            "unique degraded records",
-            "quality",
-            categorical,
-        )
+    processors = sorted({r.get("processor") for r in data.degraded_records if r.get("processor")})
+    # One processor keeps the historical charts; several get one chart per processor.
+    degraded_groups = (
+        [("", "", data.degraded_records)]
+        if len(processors) <= 1
+        else [
+            (f"_{processor}", f" ({processor})", [r for r in data.degraded_records if r.get("processor") == processor])
+            for processor in processors
+        ]
+    )
+    for suffix, title_suffix, records in degraded_groups:
+        for field, key, title, categorical in [
+            ("hearing_profile_id", "degraded_profiles", "Hearing profiles", True),
+            ("status", "degraded_status", "Degradation status", True),
+            (
+                "ear_asymmetry_db",
+                "degraded_asymmetry",
+                "Declared ear asymmetry on common bands",
+                False,
+            ),
+        ]:
+            metric(
+                key + suffix,
+                records,
+                field,
+                title + title_suffix,
+                "category" if categorical else "dB",
+                "unique degraded records",
+                "quality",
+                categorical,
+            )
     for field, title, categorical in [
         ("scene_attempt", "Scene sampling attempt", False),
         ("receiver_attempt", "Receiver sampling attempt", False),

@@ -5,6 +5,7 @@ from render_fixtures import write_variant_fixture
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.clarity_handoff import build_clarity_job_record, get_clarity_job_issues, prepare_clarity_handoff
+from acoustic_orchestrator.pipeline.level_calibration import load_level_calibration_index
 from acoustic_orchestrator.pipeline.output_index import load_clarity_index
 from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
 
@@ -35,7 +36,7 @@ def test_build_clarity_job_record_uses_default_reserved_output_layout(tmp_path: 
         hearing_profile_id="mild_loss",
     )
 
-    assert job["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss"
+    assert job["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"
     assert job["run_id"] == "sim_test"
     assert job["hearing_profile_id"] == "mild_loss"
     assert job["backend_invocation"] == {
@@ -44,11 +45,7 @@ def test_build_clarity_job_record_uses_default_reserved_output_layout(tmp_path: 
         "use_uv": True,
         "backend_project_path": None,
     }
-    assert Path(job["output_dir"]).parts[-2:] == (
-        "binaural_hrtf",
-        "mild_loss",
-    )
-    assert Path(job["output_dir"]).parts[-3] == "degraded"
+    assert Path(job["output_dir"]).parts[-4:] == ("degraded", "msbg", "binaural_hrtf", "mild_loss")
     assert Path(job["expected_output_wav_path"]).name == "scene_static_0001__binaural_hrtf.wav"
     assert Path(job["expected_output_metadata_path"]).name == "scene_static_0001__binaural_hrtf.json"
 
@@ -113,8 +110,8 @@ def test_prepare_clarity_handoff_expands_variant_per_profile_and_skips_invalid_v
     manifest_rows = [json.loads(line) for line in layout["clarity_jobs_path"].read_text(encoding="utf-8").splitlines()]
     assert len(manifest_rows) == 2
     assert {row["job_id"] for row in manifest_rows} == {
-        "clarity__scene_static_0001__binaural_hrtf__mild_loss",
-        "clarity__scene_static_0001__binaural_hrtf__severe_loss",
+        "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg",
+        "clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg",
     }
     for row in manifest_rows:
         assert set(row) == {
@@ -132,7 +129,18 @@ def test_prepare_clarity_handoff_expands_variant_per_profile_and_skips_invalid_v
             "output_dir",
             "expected_output_wav_path",
             "expected_output_metadata_path",
+            "processor",
+            "calibration",
+            "outer_middle_ear",
+            "processor_config",
+            "processing_signature",
         }
+        assert row["processor"] == "msbg"
+        assert row["outer_middle_ear"] == "free_field"
+        assert row["processor_config"] == {"level_handling": "true_level"}
+        assert row["calibration"]["effective_scale_db_spl"] == 90.0
+        assert row["calibration"]["is_default"] is True
+        assert row["processing_signature"]["calibration"]["is_default"] is True
         assert row["schema_version"] == "1.0"
         assert row["run_id"] == "sim_test"
         assert row["variant_id"] == "scene_static_0001__binaural_hrtf"
@@ -147,13 +155,13 @@ def test_prepare_clarity_handoff_expands_variant_per_profile_and_skips_invalid_v
             "use_uv": True,
             "backend_project_path": None,
         }
-        assert Path(row["output_dir"]).parts[-2:] == ("binaural_hrtf", row["hearing_profile_id"])
+        assert Path(row["output_dir"]).parts[-3:] == ("msbg", "binaural_hrtf", row["hearing_profile_id"])
         assert Path(row["expected_output_wav_path"]).name == "scene_static_0001__binaural_hrtf.wav"
         assert Path(row["expected_output_metadata_path"]).name == "scene_static_0001__binaural_hrtf.json"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "planned"
-    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["status"] == "planned"
-    assert records["clarity__scene_static_0002__binaural_hrtf__mild_loss"]["status"] == "skipped"
-    assert records["clarity__scene_static_0002__binaural_hrtf__severe_loss"]["status"] == "skipped"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "planned"
+    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["status"] == "planned"
+    assert records["clarity__scene_static_0002__binaural_hrtf__mild_loss__msbg"]["status"] == "skipped"
+    assert records["clarity__scene_static_0002__binaural_hrtf__severe_loss__msbg"]["status"] == "skipped"
 
 
 def test_prepare_clarity_handoff_blocks_jobs_without_render_metadata(tmp_path: Path) -> None:
@@ -171,8 +179,8 @@ def test_prepare_clarity_handoff_blocks_jobs_without_render_metadata(tmp_path: P
 
     assert summary["planned_jobs"] == 0
     assert summary["blocked_jobs"] == 2
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "blocked"
-    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["status"] == "blocked"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "blocked"
+    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["status"] == "blocked"
 
 
 def test_prepare_clarity_handoff_persists_blocked_records_for_invalid_hearing_profile_catalog(tmp_path: Path) -> None:
@@ -203,13 +211,14 @@ def test_prepare_clarity_handoff_persists_blocked_records_for_invalid_hearing_pr
     assert summary["blocked_jobs"] == 1
     assert summary["batch_status"] == "blocked"
     assert layout["clarity_jobs_path"].read_text(encoding="utf-8") == ""
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"] == {
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"] == {
         "run_id": "sim_test",
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
         "hearing_profile_id": "mild_loss",
+        "processor": "msbg",
         "status": "blocked",
         "resumed": False,
         "attempted": False,
@@ -225,13 +234,14 @@ def test_prepare_clarity_handoff_persists_blocked_records_for_invalid_hearing_pr
             "backend_project_path": None,
         },
         "output_dir": (
-            layout["degraded_output_root"] / "binaural_hrtf" / "mild_loss"
+            layout["degraded_output_root"] / "msbg" / "binaural_hrtf" / "mild_loss"
         ).resolve().as_posix(),
         "expected_output_wav_path": (
-            layout["degraded_output_root"] / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
+            layout["degraded_output_root"] / "msbg" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
         ).resolve().as_posix(),
         "expected_output_metadata_path": (
             layout["degraded_output_root"]
+            / "msbg"
             / "binaural_hrtf"
             / "mild_loss"
             / "scene_static_0001__binaural_hrtf.json"
@@ -247,7 +257,7 @@ def test_prepare_clarity_handoff_persists_blocked_records_for_invalid_hearing_pr
                 "invalid_hearing_profiles_catalog:profiles[1].ears.right debe ser un objeto"
             ],
         },
-        "updated_at": records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["updated_at"],
+        "updated_at": records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["updated_at"],
     }
 
 
@@ -274,10 +284,10 @@ def test_prepare_clarity_handoff_reports_blocked_submission_without_backend(
     assert summary["batch_status"] == "blocked"
     assert summary["blocked_jobs"] == 1
     assert summary["message"] == "backend missing"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "blocked"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "blocked"
 
 
-def _write_config(tmp_path: Path, clarity_output_override: str | None = None) -> Path:
+def _write_config(tmp_path: Path, clarity_output_override: str | None = None, hearing_extra: str = "") -> Path:
     artifact_root = tmp_path / "artifacts"
     hearing_profiles = tmp_path / "hearing_profiles.yaml"
     output_dir_line = f"  output_dir: {clarity_output_override}\n" if clarity_output_override is not None else ""
@@ -362,6 +372,7 @@ def _write_config(tmp_path: Path, clarity_output_override: str | None = None) ->
             "  input_targets: [binaural_hrtf]\n"
             f"  hearing_profiles_path: {hearing_profiles.as_posix()}\n"
             f"{output_dir_line}"
+            f"{hearing_extra}"
             "  runner:\n"
             "    entrypoint: clarity-backend\n"
             "    auto_submit: false\n"
@@ -423,7 +434,7 @@ def _partial_variant_record(layout: dict[str, Path]) -> dict:
     return record
 
 
-def _hearing_profiles_yaml(profile_ids: list[str] | None = None) -> str:
+def _hearing_profiles_yaml(profile_ids: list[str] | None = None, *, compression_health: bool = False) -> str:
     selected_profile_ids = profile_ids or ["mild_loss", "severe_loss"]
     profiles: list[str] = []
     for profile_id, base_loss in {
@@ -441,10 +452,218 @@ def _hearing_profiles_yaml(profile_ids: list[str] | None = None) -> str:
                     "      left:",
                     "        loss_db_by_band:",
                     f"          250: {left_loss}",
+                    *(["        compression_health: 1"] if compression_health else []),
                     "      right:",
                     "        loss_db_by_band:",
                     f"          250: {right_loss}",
+                    *(["        compression_health: 0.5"] if compression_health else []),
                 ]
             )
         )
     return "profiles:\n" + "\n".join(profiles)
+
+
+WHIS_HEARING = (
+    "  processors: [msbg, whis]\n"
+    "  calibration: {mode: presentation_level, presentation_level_range_db_spl: [55, 80]}\n"
+    "  outer_middle_ear: itu\n"
+    "  whis: {install_root: ./whis}\n"
+)
+
+
+def _prepare_whis_run(tmp_path: Path, hearing_extra: str = WHIS_HEARING):
+    config = load_config(_write_config(tmp_path, hearing_extra=hearing_extra))
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
+    layout["render_index_path"].write_text(json.dumps(_completed_variant_record(layout)) + "\n", encoding="utf-8")
+    write_variant_fixture(_completed_variant_record(layout), metadata=True)
+    Path(config.hearing_degradation.hearing_profiles_path).write_text(
+        _hearing_profiles_yaml(compression_health=True), encoding="utf-8",
+    )
+    return config, layout
+
+
+def _manifest_rows(layout) -> list[dict]:
+    return [json.loads(line) for line in layout["clarity_jobs_path"].read_text(encoding="utf-8").splitlines()]
+
+
+def test_prepare_clarity_handoff_plans_one_job_per_profile_and_processor_sharing_k(tmp_path: Path) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+
+    summary = prepare_clarity_handoff(config, submit=False)
+    rows = _manifest_rows(layout)
+
+    assert summary["planned_jobs"] == 4
+    assert {row["job_id"] for row in rows} == {
+        f"clarity__scene_static_0001__binaural_hrtf__{profile}__{processor}"
+        for profile in ("mild_loss", "severe_loss") for processor in ("msbg", "whis")
+    }
+    calibrations = [row["calibration"] for row in rows]
+    assert all(calibration == calibrations[0] for calibration in calibrations)
+    assert 55 <= calibrations[0]["presentation_level_db_spl"] <= 80
+    assert calibrations[0]["effective_scale_db_spl"] is not None
+    assert {row["outer_middle_ear"] for row in rows} == {"itu"}
+    assert len({row["output_dir"] for row in rows}) == 4
+
+    index = load_level_calibration_index(layout["level_calibration_index_path"])
+    assert index == {"scene_static_0001__binaural_hrtf": calibrations[0]}
+
+
+def test_whis_job_carries_processor_config_and_signature(tmp_path: Path) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+
+    prepare_clarity_handoff(config, submit=False)
+    whis_job = next(row for row in _manifest_rows(layout) if row["processor"] == "whis")
+    msbg_job = next(row for row in _manifest_rows(layout) if row["processor"] == "msbg")
+
+    assert whis_job["processor_config"] == {
+        "install_root": (tmp_path / "whis").resolve().as_posix(),
+        "matlab_executable": "matlab",
+        "synth_method": "dtvf",
+    }
+    assert whis_job["processing_signature"] == {
+        "processor": "whis",
+        "calibration": {
+            "mode": "presentation_level",
+            "configured": {"presentation_level_range_db_spl": [55.0, 80.0]},
+            "is_default": False,
+        },
+        "random_seed": 1,
+        "outer_middle_ear": "itu",
+        "whis": {"synth_method": "dtvf"},
+    }
+    assert msbg_job["processing_signature"]["msbg"] == {"level_handling": "true_level"}
+    assert Path(whis_job["output_dir"]).parts[-3:] == ("whis", "binaural_hrtf", whis_job["hearing_profile_id"])
+
+
+def test_silent_render_with_presentation_level_blocks_all_its_jobs(tmp_path: Path) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+    import soundfile as sf
+    import numpy as np
+
+    sf.write(_completed_variant_record(layout)["rendered_wav_path"], np.zeros((200, 2)), 44100, subtype="PCM_16")
+    from acoustic_orchestrator.pipeline import clarity_handoff
+
+    original = clarity_handoff._revalidate_render_input
+    clarity_handoff._revalidate_render_input = lambda *args, **kwargs: []
+    try:
+        summary = prepare_clarity_handoff(config, submit=False)
+    finally:
+        clarity_handoff._revalidate_render_input = original
+    records = load_clarity_index(layout["clarity_index_path"])
+
+    assert summary["planned_jobs"] == 0
+    assert summary["blocked_jobs"] == 4
+    assert all(record["validation"]["issues"] == ["calibration_undefined_silent_input"] for record in records.values())
+    calibration = load_level_calibration_index(layout["level_calibration_index_path"])["scene_static_0001__binaural_hrtf"]
+    assert calibration["status"] == "undefined_silent_input"
+
+
+def _complete_jobs(rows: list[dict]) -> None:
+    for row in rows:
+        Path(row["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(row["expected_output_wav_path"]).write_text("wav", encoding="utf-8")
+        Path(row["expected_output_metadata_path"]).write_text(json.dumps({
+            "schema_version": "1.0",
+            **{key: row[key] for key in ("job_id", "variant_id", "scene_id", "output_type", "hearing_profile_id",
+                                          "input_wav_path", "input_render_metadata_path", "processing_signature",
+                                          "calibration")},
+            "status": "completed",
+            "output_wav_path": row["expected_output_wav_path"],
+            "processor": {"name": row["processor"]},
+            "degradation_applied": {"left": {}, "right": {}},
+        }), encoding="utf-8")
+
+
+def test_adding_whis_to_a_completed_msbg_run_only_plans_whis_jobs(tmp_path: Path) -> None:
+    msbg_only = "  calibration: {mode: presentation_level, presentation_level_range_db_spl: [55, 80]}\n  outer_middle_ear: itu\n"
+    config, layout = _prepare_whis_run(tmp_path, hearing_extra=msbg_only)
+    prepare_clarity_handoff(config, submit=False)
+    _complete_jobs(_manifest_rows(layout))
+
+    config = load_config(_write_config(tmp_path, hearing_extra=WHIS_HEARING))
+    summary = prepare_clarity_handoff(config, submit=False)
+    rows = _manifest_rows(layout)
+
+    assert {row["processor"] for row in rows} == {"whis"}
+    assert summary["planned_jobs"] == 2
+    assert summary["resumed_jobs"] == 2
+
+
+def test_changing_the_seed_with_a_level_range_reuses_nothing(tmp_path: Path) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+    prepare_clarity_handoff(config, submit=False)
+    first_k = _manifest_rows(layout)[0]["calibration"]["effective_scale_db_spl"]
+    _complete_jobs(_manifest_rows(layout))
+
+    config.experiment.random_seed = 2
+    summary = prepare_clarity_handoff(config, submit=False)
+
+    assert summary["planned_jobs"] == 4 and summary["resumed_jobs"] == 0
+    assert _manifest_rows(layout)[0]["calibration"]["effective_scale_db_spl"] != first_k
+
+
+def test_resuming_with_another_outer_middle_ear_reuses_nothing(tmp_path: Path) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+    prepare_clarity_handoff(config, submit=False)
+    _complete_jobs(_manifest_rows(layout))
+
+    assert prepare_clarity_handoff(config, submit=False)["resumed_jobs"] == 4
+    config.hearing_degradation.outer_middle_ear = "free_field"
+    summary = prepare_clarity_handoff(config, submit=False)
+
+    assert summary["planned_jobs"] == 4 and summary["resumed_jobs"] == 0
+
+
+def test_previous_layout_outputs_and_records_are_not_reused(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path))
+    layout = resolve_artifact_layout(config.outputs, config.experiment.experiment_id)
+    layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
+    layout["render_index_path"].write_text(json.dumps(_completed_variant_record(layout)) + "\n", encoding="utf-8")
+    write_variant_fixture(_completed_variant_record(layout), metadata=True)
+    Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(["mild_loss"]), encoding="utf-8")
+    legacy_dir = layout["degraded_output_root"] / "binaural_hrtf" / "mild_loss"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "scene_static_0001__binaural_hrtf.wav").write_text("wav", encoding="utf-8")
+    (legacy_dir / "scene_static_0001__binaural_hrtf.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    legacy_record = {
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss", "variant_id": "scene_static_0001__binaural_hrtf",
+        "scene_id": "scene_static_0001", "output_type": "binaural_hrtf", "hearing_profile_id": "mild_loss",
+        "status": "completed", "manifest_path": "m", "input_wav_path": "i", "hearing_profiles_path": "h",
+        "output_dir": legacy_dir.as_posix(), "expected_output_wav_path": "w", "expected_output_metadata_path": "j",
+    }
+    layout["clarity_index_path"].write_text(json.dumps(legacy_record) + "\n", encoding="utf-8")
+
+    summary = prepare_clarity_handoff(config, submit=False)
+    records = load_clarity_index(layout["clarity_index_path"])
+
+    assert summary["planned_jobs"] == 1 and summary["resumed_jobs"] == 0
+    assert set(records) == {"clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"}
+    assert "/degraded/msbg/" in _manifest_rows(layout)[0]["output_dir"]
+
+
+def test_whis_jobs_withheld_by_preflight_are_blocked_while_msbg_runs(tmp_path: Path, monkeypatch) -> None:
+    config, layout = _prepare_whis_run(tmp_path)
+    submitted: list[list[str]] = []
+
+    def fake_submit(runner, manifest_path, **kwargs):
+        rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+        whis_ids = [row["job_id"] for row in rows if row["processor"] == "whis"]
+        submitted.append([row["job_id"] for row in rows if row["processor"] == "msbg"])
+        return {"status": "submitted", "command": ["backend"], "message": "ok",
+                "blocked_jobs": {job_id: "WHIS no disponible: falta GCFBv234" for job_id in whis_ids}}
+
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_handoff.submit_clarity_manifest", fake_submit)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_handoff._revalidate_render_input", lambda *a, **k: [])
+
+    summary = prepare_clarity_handoff(config, submit=True)
+    records = load_clarity_index(layout["clarity_index_path"])
+
+    assert len(submitted[0]) == 2
+    assert summary["blocked_jobs"] == 2
+    for job_id, record in records.items():
+        if job_id.endswith("__whis"):
+            assert record["status"] == "blocked"
+            assert record["validation"]["issues"] == ["WHIS no disponible: falta GCFBv234"]
+        else:
+            assert record["status"] != "blocked" and record["attempted"] is True
