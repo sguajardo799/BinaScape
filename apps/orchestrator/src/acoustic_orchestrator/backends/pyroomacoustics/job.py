@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+from typing import TypeGuard
 
 import soundfile
 
@@ -48,7 +49,7 @@ class RenderJob:
         return len(self.microphones)
 
 
-def _finite(value: object) -> bool:
+def _finite(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
@@ -97,6 +98,12 @@ def _parameters(render: dict) -> dict:
     return parameters
 
 
+def _microphone_order(item: object) -> int:
+    """Sort key; a missing or non-integer index sorts first and is rejected by the caller."""
+    index = item.get("microphone_index") if isinstance(item, dict) else None
+    return index if isinstance(index, int) and not isinstance(index, bool) else -1
+
+
 def _microphones(receiver: dict) -> list[dict]:
     array = receiver.get("circular_array")
     if not isinstance(array, dict):
@@ -105,7 +112,7 @@ def _microphones(receiver: dict) -> list[dict]:
     count = array.get("num_microphones")
     if type(count) is not int or count < 2 or not isinstance(microphones, list) or len(microphones) != count:
         raise InvalidRenderInput("receiver.circular_array.microphones must list num_microphones (>= 2) entries")
-    ordered = sorted(microphones, key=lambda item: item.get("microphone_index") if isinstance(item, dict) else -1)
+    ordered = sorted(microphones, key=_microphone_order)
     for expected, item in enumerate(ordered):
         if (not isinstance(item, dict) or type(item.get("microphone_index")) is not int
                 or item["microphone_index"] != expected or item.get("channel_index") != expected + 1):
@@ -150,7 +157,8 @@ def load_render_job(manifest: dict) -> RenderJob:
     parameters = _parameters(render)
     microphones = _microphones(receiver)
     room = manifest.get("room")
-    description = build_room_description(room if isinstance(room, dict) else {})
+    room = room if isinstance(room, dict) else {}
+    description = build_room_description(room)
     surfaces = [*description["wall_surface_ids"], description["floor_surface_id"], description["ceiling_surface_id"]]
     materials = convert_surface_materials(room, surfaces)
     translation = description["translation_m"]

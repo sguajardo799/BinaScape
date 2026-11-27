@@ -41,5 +41,10 @@ pythonpath = ["src"]
 module = ["yaml"]
 ignore_missing_imports = true
 
+# Optional pyroomacoustics extra: these packages ship no type information.
+[[tool.mypy.overrides]]
+module = ["pyroomacoustics", "pyroomacoustics.*", "soundfile", "scipy", "scipy.*"]
+ignore_missing_imports = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/acoustic_orchestrator"]

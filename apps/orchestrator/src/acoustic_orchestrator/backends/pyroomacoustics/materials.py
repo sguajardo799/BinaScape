@@ -16,7 +16,7 @@ OCTAVE_CENTER_FREQUENCIES_HZ: tuple[float, ...] = tuple(float(value) for value i
 THIRD_OCTAVE_BAND_COUNT = 31
 
 
-def octave_coefficients(values: Sequence[float], label: str) -> list[float]:
+def octave_coefficients(values: object, label: str) -> list[float]:
     if not isinstance(values, (list, tuple)) or len(values) != THIRD_OCTAVE_BAND_COUNT:
         raise InvalidRenderInput(f"{label} must have {THIRD_OCTAVE_BAND_COUNT} third-octave values")
     for value in values:
