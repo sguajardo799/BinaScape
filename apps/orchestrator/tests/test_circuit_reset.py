@@ -345,3 +345,143 @@ def test_outcome_outside_run_root_blocks(tmp_path, monkeypatch):
     with pytest.raises(RetryBlockedError, match="no pertenece al lote"):
         reset(layout)
     assert files(layout["run_root"]) == before
+
+
+# --- Renewal of exhausted chains (--renew-exhausted) ---------------------------------------------
+
+
+def renew(layout, **kwargs):
+    options = {"apply": True, "confirm_stopped": True, "reason": REASON, "process_probe": lambda: []}
+    options.update(kwargs)
+    return circuit_reset.renew_exhausted_chains(layout["run_root"], **options)
+
+
+def exhausted_batch(tmp_path, monkeypatch):
+    path, layout = latched_batch(tmp_path, monkeypatch, attempts=1)
+    reset(layout)
+    failed_path, failed = chain_by(layout, "unknown_process_failure")
+    assert failed["state"] == "exhausted"
+    return path, layout, failed_path, failed
+
+
+def test_resume_without_renewal_blocks_and_suggests_renewal(tmp_path, monkeypatch):
+    path, layout, _, _ = exhausted_batch(tmp_path, monkeypatch)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run",
+                        lambda *a, **k: pytest.fail("exhausted chain dispatched"))
+    with pytest.raises(RetryBlockedError, match=r"terminal \(exhausted\)") as caught:
+        render_static_scenes(path)
+    assert any("--renew-exhausted" in note for note in caught.value.__notes__)
+
+
+def test_renewal_inspection_reports_plan_without_writes(tmp_path, monkeypatch):
+    _, layout, _, failed = exhausted_batch(tmp_path, monkeypatch)
+    before = files(layout["run_root"])
+    report = circuit_reset.renew_exhausted_chains(layout["run_root"], process_probe=lambda: [])
+    assert report["applied"] is False and report["pending_publication"] is False
+    assert [item["chain_id"] for item in report["chains"]] == [failed["chain_id"]]
+    assert report["chains"][0]["consumed_attempts"] == 1 and report["chains"][0]["max_attempts"] == 1
+    assert files(layout["run_root"]) == before
+
+
+def test_renewal_requires_closed_circuit_and_confirmations(tmp_path, monkeypatch):
+    _, layout = latched_batch(tmp_path, monkeypatch, attempts=1)
+    before = files(layout["run_root"])
+    with pytest.raises(RetryBlockedError, match="sigue abierto"):
+        renew(layout)
+    reset(layout)
+    before = files(layout["run_root"])
+    with pytest.raises(RetryBlockedError, match="requiere"):
+        renew(layout, reason=" ")
+    with pytest.raises(RetryBlockedError, match="escritores"):
+        renew(layout, process_probe=lambda: [{"pid": 1, "name": "MATLAB.exe"}])
+    assert files(layout["run_root"]) == before
+
+
+def test_renewal_supersedes_with_fresh_chain_and_resume_dispatches_it(tmp_path, monkeypatch):
+    path, layout, failed_path, failed = exhausted_batch(tmp_path, monkeypatch)
+    outcome_path = Path(failed["attempts"][-1]["outcome_path"])
+    outcome_bytes = outcome_path.read_bytes()
+
+    report = renew(layout)
+
+    journal = Path(report["renewal_path"])
+    record = read_json_object(journal)
+    assert report["applied"] and record["reason"] == REASON and record["chains"][0]["chain_before"] == failed
+    successor_id = report["chains"][0]["successor_id"]
+    old = read_json_object(failed_path)
+    assert old == {**failed, "superseded_by": successor_id}
+    successor = read_json_object(failed_path.parents[1] / successor_id / "chain.json")
+    assert successor["state"] == "ready" and successor["attempts"] == []
+    assert successor["supersedes"] == [failed["chain_id"]] and successor["input_sha256"] == failed["input_sha256"]
+    assert successor["renewal"]["id"] == record["renewal_id"]
+    assert outcome_path.read_bytes() == outcome_bytes
+
+    launched = []
+
+    def run(command, **kwargs):
+        launched.append(Path(process_manifest(command)["render"]["output_wav_path"]).resolve().as_posix())
+        return successful_process(command, **kwargs)
+
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run", run)
+    _, summary = render_static_scenes(path)
+    assert failed["artifacts"][0]["path"] in launched
+    resumed = read_json_object(failed_path.parents[1] / successor_id / "chain.json")
+    assert [a["classification"] for a in resumed["attempts"]] == ["accepted"]
+    assert summary["planned_variants"] == 0 and summary["failed_variants"] == 0
+    assert renew(layout)["applied"] is False  # Completed renewal is not pending once the successor runs.
+
+
+@pytest.mark.parametrize("fail_at", [2, 3])
+def test_torn_renewal_stays_blocked_and_completes_same_record(tmp_path, monkeypatch, fail_at):
+    path, layout, failed_path, _ = exhausted_batch(tmp_path, monkeypatch)
+    original = circuit_reset._save
+    calls = []
+
+    def flaky(target, record):
+        calls.append(target)
+        if len(calls) == fail_at:
+            raise OSError("disk full")
+        return original(target, record)
+
+    monkeypatch.setattr(circuit_reset, "_save", flaky)
+    with pytest.raises(OSError):
+        renew(layout)
+    monkeypatch.setattr(circuit_reset, "_save", original)
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.matlab_runner.subprocess.run",
+                        lambda *a, **k: pytest.fail("torn renewal authorized dispatch"))
+    if fail_at == 3:  # Successor published, link missing: two active chains block resume.
+        with pytest.raises(RetryBlockedError):
+            render_static_scenes(path)
+    pending = circuit_reset.renew_exhausted_chains(layout["run_root"], process_probe=lambda: [])
+    assert pending["pending_publication"] is True
+    report = renew(layout)
+    records = list((layout["render_index_path"].parent / "chain_renewals").glob("*/record.json"))
+    assert len(records) == 1 and Path(report["renewal_path"]) == records[0]
+    assert read_json_object(failed_path)["superseded_by"] == report["chains"][0]["successor_id"]
+
+
+def test_tampered_renewal_record_blocks(tmp_path, monkeypatch):
+    _, layout, _, _ = exhausted_batch(tmp_path, monkeypatch)
+    journal = Path(renew(layout)["renewal_path"])
+    record = read_json_object(journal)
+    record["chains"][0]["chain_before"]["state"] = "scheduled"
+    journal.write_text(json.dumps(record))
+    with pytest.raises(RetryBlockedError, match="renovación"):
+        circuit_reset.renew_exhausted_chains(layout["run_root"], process_probe=lambda: [])
+
+
+def test_cli_resets_and_renews_in_one_command(tmp_path, monkeypatch):
+    _, layout = latched_batch(tmp_path, monkeypatch, attempts=1)
+    monkeypatch.setattr(circuit_reset, "active_render_writers", lambda: [])
+    runner = CliRunner()
+    root = str(layout["run_root"])
+    before = files(layout["run_root"])
+    result = runner.invoke(app, ["reset-circuit", root, "--renew-exhausted"])
+    assert result.exit_code == 0 and "después de reiniciar" in result.output
+    assert files(layout["run_root"]) == before
+    result = runner.invoke(app, ["reset-circuit", root, "--renew-exhausted", "--apply", "--confirm-stopped",
+                                 "--reason", REASON])
+    assert result.exit_code == 0, result.output
+    assert "Reiniciado" in result.output and "Renovadas: cadenas_agotadas=1" in result.output
+    result = runner.invoke(app, ["reset-circuit", root, "--renew-exhausted"])
+    assert result.exit_code == 0 and "No hay cadenas agotadas renovables" in result.output

@@ -10,7 +10,7 @@ from acoustic_orchestrator.pipeline.render_pipeline import (
     render_static_scenes,
     run_clarity_handoff,
 )
-from acoustic_orchestrator.pipeline.circuit_reset import reset_batch_circuit
+from acoustic_orchestrator.pipeline.circuit_reset import renew_exhausted_chains, reset_batch_circuit
 from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
 from acoustic_orchestrator.pipeline.pool_result_recovery import reconcile_pool_result
 from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
@@ -159,16 +159,55 @@ def reset_circuit(
     apply: bool = typer.Option(False, "--apply", help="Publica el reinicio; por defecto solo inspecciona"),
     confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
     reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+    renew_exhausted: bool = typer.Option(
+        False, "--renew-exhausted",
+        help="Además renueva el presupuesto de las cadenas agotadas (exhausted) por fallos de proceso",
+    ),
 ) -> None:
-    """Reinicia un corte de procesos MATLAB persistido sin renderizar ni renovar presupuestos."""
+    """Reinicia un corte de procesos MATLAB persistido sin renderizar.
+
+    Con --renew-exhausted, las cadenas agotadas por fallos de proceso se sustituyen
+    por cadenas nuevas con presupuesto completo, para que render-static las retome.
+    """
     try:
         result = reset_batch_circuit(run_root, apply=apply, confirm_stopped=confirm_stopped, reason=reason)
     except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
         typer.echo(f"Reinicio bloqueado: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    if not result["circuit_open"]:
-        typer.echo("No hay un corte de procesos MATLAB abierto; no se modificaron archivos.")
+    if result["circuit_open"]:
+        _echo_circuit_reset(result)
+    else:
+        typer.echo("No hay un corte de procesos MATLAB abierto; el corte no se modificó.")
+    if not renew_exhausted:
         return
+    if result["circuit_open"] and not result["applied"]:
+        typer.echo("Renovación de cadenas agotadas: se inspeccionará después de reiniciar el corte con --apply.")
+        return
+    try:
+        renewal = renew_exhausted_chains(run_root, apply=apply, confirm_stopped=confirm_stopped, reason=reason)
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Renovación bloqueada: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not renewal["chains"]:
+        typer.echo("No hay cadenas agotadas renovables; no se modificaron cadenas.")
+        return
+    typer.echo(
+        f"{'Renovadas' if renewal['applied'] else 'Solo lectura'}: cadenas_agotadas={len(renewal['chains'])}"
+        + (" publicacion_pendiente=true" if renewal["pending_publication"] else "")
+    )
+    for chain in renewal["chains"]:
+        typer.echo(
+            f"  cadena={chain['chain_id']} variante={chain.get('variant_id')} intento={chain['attempt_id']} "
+            f"consumidos={chain['consumed_attempts']}/{chain['max_attempts']}"
+            + (f" sucesora={chain['successor_id']}" if "successor_id" in chain else "")
+        )
+    if renewal["applied"]:
+        typer.echo(f"Evidencia: {renewal['renewal_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --confirm-stopped --reason <motivo>.")
+
+
+def _echo_circuit_reset(result: dict) -> None:
     typer.echo(
         f"{'Reiniciado' if result['applied'] else 'Solo lectura'}: limite={result['limit']} "
         f"racha={result['consecutive_failures']} cadenas={len(result['chains'])} "

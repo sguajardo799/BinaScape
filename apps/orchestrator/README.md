@@ -804,6 +804,22 @@ queda en `metadata/indexes/circuit_resets/<reset_id>/` y el circuito anterior se
 como `matlab_process_circuit.<reset_id>.json`. Editar el JSON del circuito a mano no
 basta: la cadena cortada sigue bloqueando la reanudación.
 
+Si la reanudación falla con `same-input retry chain is terminal (exhausted)`, la
+variante agotó sus `max_attempts` por fallos de proceso. Después de corregir la causa
+(p. ej. Smart App Control bloqueando `RavenConsole64.exe`), renueve su presupuesto
+explícitamente. Si el corte sigue abierto, el mismo comando lo reinicia primero:
+
+```powershell
+uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote --renew-exhausted
+uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote --renew-exhausted --apply --confirm-stopped --reason "SAC desactivado; RAVEN vuelve a ejecutarse"
+```
+
+Cada cadena agotada queda intacta y enlazada (`superseded_by`) a una cadena nueva
+`ready` con la misma entrada y política. La evidencia queda en
+`metadata/indexes/chain_renewals/<renewal_id>/`. Solo se renuevan los fallos de proceso
+observados (o las interrupciones confirmadas) cuyo manifiesto no cambió y que no tienen
+salidas públicas.
+
 Las rutas públicas WAV/sidecar no cambian. Antes de repetir se archivan solo restos
 propios del proceso terminado, bajo su intento, con journal de rutas originales,
 destinos, tamaños y SHA-256. Snapshot y constancia permanecen intactos. Un archivo
