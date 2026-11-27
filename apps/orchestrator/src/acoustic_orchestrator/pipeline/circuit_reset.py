@@ -6,6 +6,9 @@ resolved while the cutoff was latched return to their pre-cutoff decision
 other terminal chain stay untouched. An immutable record with exact preimages
 is published first and the closed circuit last, so a torn publication remains
 blocked until the same record is completed. No MATLAB, no budget renewal.
+
+Renewing the budget of exhausted chains is a separate, equally explicit
+operation (``renew_exhausted_chains``) that supersedes them with fresh chains.
 """
 
 from copy import deepcopy
@@ -318,3 +321,222 @@ def reset_batch_circuit(run_root: str | Path, *, apply: bool = False, confirm_st
         _save(circuit_path, closed)  # Closing last keeps a torn reset fail-closed.
         return _report(root, True, circuit, [_entry_summary(entry) for entry, _, _ in projections],
                        list(record.get("untouched_chains", [])), journal, False)
+
+
+# --- Explicit renewal of exhausted retry budgets -------------------------------------------------
+#
+# An exhausted chain is terminal: resuming the batch refuses it as "same-input
+# retry chain is terminal (exhausted)". Once the operator has removed the cause
+# (for example Smart App Control blocking RAVEN) the variant may be retried with
+# a new budget. The old chain and its outcomes are never rewritten beyond linking
+# the successor: a new ``ready`` chain supersedes it. An immutable record with the
+# exact preimage is published first and the supersession link last, so a torn
+# renewal stays blocked (two active chains) until the same command completes it.
+
+RENEW_ACTION = "renew_exhausted_chains"
+
+
+def _renewals_dir(root: Path) -> Path:
+    return root / "metadata" / "indexes" / "chain_renewals"
+
+
+def _renewal_plan(root: Path, chains_dir: Path) -> list[dict[str, Any]]:
+    """Active exhausted chains whose last attempt is an observed process failure."""
+    eligible = []
+    for path in sorted(chains_dir.glob("*/chain.json")):
+        record = read_json_object(path)
+        if record.get("state") != "exhausted" or record.get("superseded_by"):
+            continue
+        chain = RetryChain(path, record)
+        attempts = record["attempts"]
+        latest = attempts[-1] if attempts else None
+        if latest is None or latest.get("retry_decision") != "exhausted":
+            raise RetryBlockedError(f"La cadena {path.parent.name} está agotada sin un intento resuelto como agotado")
+        if not Path(latest["outcome_path"]).resolve().is_relative_to(root):
+            raise RetryBlockedError(f"El outcome de la cadena {path.parent.name} no pertenece al lote: {latest['outcome_path']}")
+        outcome = chain.verify_resolved()
+        classification = latest.get("classification")
+        process_failure = (classification == "unknown_process_failure" and type(outcome.get("exit_code")) is int
+                           and outcome["exit_code"] != 0)
+        if outcome.get("decision") != "abort" or not (process_failure or classification == "confirmed_interruption"):
+            raise RetryBlockedError(
+                f"La cadena {path.parent.name} no es un fallo de proceso renovable ({classification})")
+        manifest = Path(record["manifest_path"])
+        if not manifest.is_file() or sha256_file(manifest) != record["input_sha256"]:
+            raise RetryBlockedError(
+                f"El manifiesto de la cadena {path.parent.name} cambió o no existe; la renovación exige la misma entrada")
+        occupied = [item["path"] for item in record["artifacts"] if Path(item["path"]).exists()]
+        if occupied:
+            raise RetryBlockedError(f"La cadena {path.parent.name} tiene salidas públicas presentes: {occupied}")
+        eligible.append({
+            "chain_id": record["chain_id"], "chain_path": path.as_posix(), "attempt_id": latest["attempt_id"],
+            "consumed_attempts": len(attempts), "max_attempts": chain.policy.max_attempts,
+            "scene_id": outcome.get("scene_id"), "variant_id": outcome.get("variant_id"),
+        })
+    return eligible
+
+
+def _successor(entry: dict[str, Any], marker: dict[str, str]) -> dict[str, Any]:
+    before = entry["chain_before"]
+    return {"schema_version": 1, "chain_id": entry["successor_id"], "manifest_path": before["manifest_path"],
+            "input_sha256": before["input_sha256"], "render_seed": before.get("render_seed"),
+            "policy": deepcopy(before["policy"]), "artifacts": deepcopy(before["artifacts"]),
+            "preexisting_artifacts": [], "state": "ready", "attempts": [], "not_before": 0.0,
+            "supersedes": [before["chain_id"]], "renewal": marker}
+
+
+def _load_renewal(root: Path, journal: Path) -> list[tuple[dict, dict, dict]]:
+    """Verify an immutable renewal record; return (entry, old chain after, successor)."""
+    _, _, chains_dir = _locations(root)
+    record = read_json_object(journal)
+    renewal_id = record.get("renewal_id")
+    if (record.get("schema_version") != 1 or record.get("action") != RENEW_ACTION
+            or not isinstance(renewal_id, str) or re.fullmatch(r"[0-9a-f]{32}", renewal_id) is None
+            or journal != _renewals_dir(root) / renewal_id / "record.json"
+            or record.get("confirmed_stopped") is not True or record.get("active_writers") != []
+            or not isinstance(record.get("reason"), str) or not record["reason"].strip()
+            or not isinstance(record.get("chains"), list)):
+        raise RetryBlockedError(f"Registro de renovación inválido: {journal}")
+    marker = {"id": renewal_id, "path": journal.as_posix(), "sha256": sha256_file(journal)}
+    projections = []
+    for entry in record["chains"]:
+        ids = (str(entry.get("chain_id")), str(entry.get("successor_id")))
+        if (any(re.fullmatch(r"[0-9a-f]{32}", value) is None for value in ids)
+                or Path(entry.get("chain_path", "")) != chains_dir / ids[0] / "chain.json"
+                or Path(entry.get("successor_path", "")) != chains_dir / ids[1] / "chain.json"):
+            raise RetryBlockedError("Registro de renovación con cadenas incoherentes")
+        before = journal.parent / f"{ids[0]}.chain.before.json"
+        if (before.is_symlink() or sha256_file(before) != entry.get("chain_before_sha256")
+                or read_json_object(before) != entry.get("chain_before")):
+            raise RetryBlockedError("La evidencia de la cadena anterior a la renovación fue alterada")
+        chain_before = entry["chain_before"]
+        if (chain_before.get("state") != "exhausted" or chain_before.get("superseded_by")
+                or chain_before.get("chain_id") != ids[0]):
+            raise RetryBlockedError("El registro de renovación no describe una cadena agotada activa")
+        old_after = {**deepcopy(chain_before), "superseded_by": ids[1]}
+        projections.append((entry, old_after, _successor(entry, marker)))
+    return projections
+
+
+def _pending_renewal(root: Path) -> Path | None:
+    """The record whose supersession link is not published yet (linking is the last write)."""
+    pending = []
+    for journal in sorted(_renewals_dir(root).glob("*/record.json")):
+        for entry, _, _ in _load_renewal(root, journal):
+            linked = read_json_object(Path(entry["chain_path"])).get("superseded_by") == entry["successor_id"]
+            if linked and not Path(entry["successor_path"]).is_file():
+                raise RetryBlockedError(f"La cadena sucesora de la renovación desapareció: {entry['successor_path']}")
+            if not linked:
+                pending.append(journal)
+                break
+    if len(pending) > 1:
+        raise RetryBlockedError("Hay varias renovaciones de cadenas a medio publicar")
+    return pending[0] if pending else None
+
+
+def _publish_renewal(root: Path, journal: Path) -> list[tuple[dict, dict, dict]]:
+    projections = _load_renewal(root, journal)
+    for entry, old_after, successor in projections:
+        chain_path, successor_path = Path(entry["chain_path"]), Path(entry["successor_path"])
+        if sha256_file(chain_path) not in {entry["chain_before_sha256"], _sha(_encoded(old_after))}:
+            raise RetryBlockedError(f"Publicación de renovación ambigua: {chain_path}")
+        if successor_path.exists() and read_json_object(successor_path) != successor:
+            raise RetryBlockedError(f"Publicación de renovación ambigua: {successor_path}")
+    for entry, old_after, successor in projections:
+        chain_path, successor_path = Path(entry["chain_path"]), Path(entry["successor_path"])
+        if not successor_path.exists():
+            successor_path.parent.mkdir(parents=True, exist_ok=True)
+            _save(successor_path, successor)
+        RetryChain(successor_path, read_json_object(successor_path))
+        if chain_path.read_bytes() != _encoded(old_after):
+            _save(chain_path, old_after)  # Linking last keeps a torn renewal ambiguous, hence blocked.
+    return projections
+
+
+def _new_renewal(root: Path, eligible: list[dict], reason: str) -> Path:
+    renewal_id = uuid4().hex
+    journal = _renewals_dir(root) / renewal_id / "record.json"
+    journal.parent.mkdir(parents=True, exist_ok=False)
+    _, _, chains_dir = _locations(root)
+    entries = []
+    for item in eligible:
+        chain_bytes = Path(item["chain_path"]).read_bytes()
+        _exclusive(journal.parent / f"{item['chain_id']}.chain.before.json", chain_bytes)
+        successor_id = uuid4().hex
+        entries.append({"chain_id": item["chain_id"], "chain_path": item["chain_path"],
+                        "successor_id": successor_id,
+                        "successor_path": (chains_dir / successor_id / "chain.json").as_posix(),
+                        "chain_before": read_json_object(Path(item["chain_path"])),
+                        "chain_before_sha256": _sha(chain_bytes),
+                        "scene_id": item["scene_id"], "variant_id": item["variant_id"]})
+    now = datetime.now(UTC)
+    _save(journal, {"schema_version": 1, "action": RENEW_ACTION, "renewal_id": renewal_id,
+                    "recorded_at": now.isoformat(), "recorded_unix": now.timestamp(),
+                    "operator": getpass.getuser(), "host": socket.gethostname(), "reason": reason.strip(),
+                    "confirmed_stopped": True, "active_writers": [], "chains": entries})
+    return journal
+
+
+def _renewal_summary(entry: dict, successor: dict) -> dict[str, Any]:
+    before = entry["chain_before"]
+    return {"chain_id": entry["chain_id"], "successor_id": successor["chain_id"],
+            "attempt_id": before["attempts"][-1]["attempt_id"], "consumed_attempts": len(before["attempts"]),
+            "max_attempts": RetryChain(Path(entry["chain_path"]), before).policy.max_attempts,
+            "scene_id": entry.get("scene_id"), "variant_id": entry.get("variant_id")}
+
+
+def renew_exhausted_chains(run_root: str | Path, *, apply: bool = False, confirm_stopped: bool = False,
+                           reason: str = "", process_probe: ProcessProbe | None = None) -> dict[str, Any]:
+    """Inspect by default; explicitly give exhausted process-failure chains a fresh budget.
+
+    Requires a closed (or absent) batch circuit. Each renewed chain is superseded
+    by a new ``ready`` chain with the same input and policy; no MATLAB is launched.
+    """
+    root = Path(run_root).resolve()
+    if not root.is_dir():
+        raise RetryBlockedError("El directorio de ejecución no existe")
+    if apply and (not confirm_stopped or not reason.strip()):
+        raise RetryBlockedError("Aplicar requiere --confirm-stopped y --reason explícitos")
+    circuit_path, _, chains_dir = _locations(root)
+
+    def inspect_and_check() -> tuple[list[dict], Path | None]:
+        try:
+            if circuit_path.is_file() and read_json_object(circuit_path).get("open") is not False:
+                raise RetryBlockedError("El corte de procesos MATLAB sigue abierto; reinícielo antes de renovar")
+            _block_unobserved(chains_dir)
+            journal = _pending_renewal(root)
+            if journal is not None:
+                eligible = [_renewal_summary(entry, successor) for entry, _, successor in _load_renewal(root, journal)]
+            else:
+                eligible = _renewal_plan(root, chains_dir)
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+            raise RetryBlockedError(f"No se pudo verificar la evidencia de las cadenas agotadas: {exc}") from exc
+        try:
+            active = (process_probe or active_render_writers)()
+        except Exception as exc:
+            raise RetryBlockedError(f"No se pudo verificar la ausencia de escritores: {exc}") from exc
+        if not isinstance(active, list):
+            raise RetryBlockedError("La inspección de procesos no devolvió un inventario válido")
+        if active:
+            raise RetryBlockedError(f"Hay procesos escritores activos o no verificables: {active}")
+        return eligible, journal
+
+    def report(applied: bool, chains: list[dict], journal: Path | None, pending: bool) -> dict[str, Any]:
+        return {"applied": applied, "run_root": root.as_posix(), "chains": chains,
+                "renewal_path": journal.as_posix() if journal else None, "pending_publication": pending}
+
+    if not apply:
+        if (root / "metadata" / "indexes" / "static_writer.lock").exists():
+            raise RetryBlockedError("Existe static_writer.lock; no se retira automáticamente")
+        eligible, journal = inspect_and_check()
+        return report(False, eligible, journal, journal is not None)
+
+    with static_writer_lock(root):
+        eligible, journal = inspect_and_check()
+        if journal is None:
+            if not eligible:
+                return report(False, [], None, False)
+            journal = _new_renewal(root, eligible, reason)
+        projections = _publish_renewal(root, journal)
+        return report(True, [_renewal_summary(entry, successor) for entry, _, successor in projections],
+                      journal, False)

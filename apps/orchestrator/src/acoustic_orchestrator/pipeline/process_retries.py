@@ -536,7 +536,11 @@ def preflight_chain(manifest_path: Path, chains_dir: Path, *, input_sha256: str,
         absent_outputs = not any(Path(item["path"]).exists() for item in chain.record["artifacts"])
         if state == "not_retryable" and accepted and (overwrite_existing or absent_outputs):
             return None
-        raise RetryBlockedError(f"same-input retry chain is terminal ({state}): {chain.path}")
+        error = RetryBlockedError(f"same-input retry chain is terminal ({state}): {chain.path}")
+        if state == "exhausted":
+            error.add_note("Tras corregir la causa, renueve el presupuesto con: reset-circuit "
+                           f"{chain.path.parents[3]} --renew-exhausted --apply --confirm-stopped --reason <motivo>")
+        raise error
     if state == "not_retryable" and (accepted or acoustic_rejection):
         return None
     if overwrite_existing:

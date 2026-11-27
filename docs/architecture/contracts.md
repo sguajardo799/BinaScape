@@ -378,6 +378,20 @@ mantiene el circuito abierto y repetir el comando completa el mismo registro. La
 reanudación rechaza un `circuit_reset` cuyo registro, preimágenes o proyección no
 concuerden. La reconciliación de interrupciones sigue sin reiniciar el circuito.
 
+`reset-circuit <run_root> --renew-exhausted` renueva además, de forma explícita, el
+presupuesto de las cadenas `exhausted` activas cuyo último intento es
+`unknown_process_failure` con código de salida distinto de cero o
+`confirmed_interruption`, para fallos de causa externa ya corregida (p. ej. Smart App
+Control bloqueando RAVEN). Exige el circuito cerrado: con `--apply` reinicia primero el
+corte, si está abierto, y luego renueva. También exige el mismo manifiesto de runtime
+(sha256) y ninguna salida pública presente; cualquier otra forma bloquea. No reescribe la cadena agotada
+ni sus outcomes: publica primero `metadata/indexes/chain_renewals/<renewal_id>/record.json`
+(con `<chain_id>.chain.before.json` como bytes exactos), luego una cadena sucesora
+`ready` sin intentos, con la misma entrada y política y con `supersedes` y `renewal`
+(id, ruta y sha256 del registro), y al final enlaza `superseded_by` en la cadena agotada. Una publicación
+interrumpida deja dos cadenas activas, lo que bloquea la reanudación; repetir el comando
+completa el mismo registro. No lanza MATLAB.
+
 `execution.matlab_process_retry` admite defaults `max_attempts=3`,
 `initial_delay_s=2.0`, `max_delay_s=30.0`, `max_consecutive_failures=5`, también
 cuando el YAML anterior omite el bloque. Los presupuestos son enteros positivos
