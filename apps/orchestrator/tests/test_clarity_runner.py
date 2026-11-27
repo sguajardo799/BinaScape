@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import sys
 
 import pytest
 
@@ -29,6 +30,23 @@ def test_build_clarity_command_prefers_uv_project_execution(tmp_path: Path) -> N
 
     assert command[:4] == ["uv", "run", "--project", (tmp_path / "clarity-backend").resolve().as_posix()]
     assert command[-2:] == ["run-manifest", (tmp_path / "clarity_jobs.jsonl").resolve().as_posix()]
+
+
+def test_build_clarity_command_supports_module_entrypoint_with_uv(tmp_path: Path) -> None:
+    runner = ClarityRunnerConfig(backend_project_path=tmp_path / "clarity-backend", use_uv=True)
+
+    command = build_clarity_command(runner, tmp_path / "clarity_jobs.jsonl")
+
+    assert command[4:9] == ["python", "-m", "clarity_backend", "run-manifest",
+                            (tmp_path / "clarity_jobs.jsonl").resolve().as_posix()]
+
+
+def test_build_clarity_command_direct_module_entrypoint_uses_own_interpreter(tmp_path: Path) -> None:
+    runner = ClarityRunnerConfig(entrypoint="python -m clarity_backend", use_uv=False)
+
+    command = build_clarity_command(runner, tmp_path / "clarity_jobs.jsonl")
+
+    assert command[:3] == [sys.executable, "-m", "clarity_backend"]
 
 
 def test_submit_clarity_manifest_returns_blocked_when_backend_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,8 @@
 import shutil
+import shlex
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -18,8 +20,24 @@ class ClaritySubmissionResult(TypedDict):
     message: str
 
 
+def entrypoint_argv(entrypoint: str, *, use_uv: bool) -> list[str]:
+    """Split ``runner.entrypoint`` into argv tokens.
+
+    ``entrypoint`` is either a console script (``clarity-backend``) or a module
+    invocation (``python -m clarity_backend``). The module form runs through the
+    signed ``python.exe`` instead of the unsigned console-script launcher, which
+    Windows Smart App Control blocks. Without uv, a bare ``python`` means the
+    orchestrator's own interpreter, which shares the workspace environment.
+    """
+    argv = shlex.split(entrypoint)
+    if not use_uv and argv and argv[0] == "python":
+        argv[0] = sys.executable
+    return argv
+
+
 def build_clarity_command(runner: ClarityRunnerConfig, manifest_path: Path, *, no_progress: bool = False) -> list[str]:
     manifest_path = manifest_path.resolve()
+    entrypoint = entrypoint_argv(runner.entrypoint, use_uv=runner.use_uv)
     if runner.use_uv:
         if runner.backend_project_path is None:
             raise ValueError("backend_project_path es obligatorio para invocar con uv")
@@ -28,13 +46,13 @@ def build_clarity_command(runner: ClarityRunnerConfig, manifest_path: Path, *, n
             "run",
             "--project",
             runner.backend_project_path.resolve().as_posix(),
-            runner.entrypoint,
+            *entrypoint,
             "run-manifest",
             manifest_path.as_posix(),
         ]
 
     else:
-        command = [runner.entrypoint, "run-manifest", manifest_path.as_posix()]
+        command = [*entrypoint, "run-manifest", manifest_path.as_posix()]
     if no_progress:
         command.append("--no-progress")
     return command

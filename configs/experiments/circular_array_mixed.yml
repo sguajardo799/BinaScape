@@ -102,6 +102,6 @@ hearing_degradation:
   hearing_profiles_path: ../hearing/example_profile.yaml
   runner:
     backend_project_path: ../../apps/clarity-backend
-    entrypoint: clarity-backend
+    entrypoint: python -m clarity_backend
     auto_submit: false
     use_uv: true

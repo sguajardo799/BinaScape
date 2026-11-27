@@ -45,6 +45,13 @@ Check the CLI:
 uv run --project apps/clarity-backend clarity-backend --help
 ```
 
+On Windows with Smart App Control, the unsigned `clarity-backend.exe` launcher
+is blocked; use the module form instead (the orchestrator does this by default):
+
+```sh
+uv run --project apps/clarity-backend python -m clarity_backend --help
+```
+
 ## Relationship With The Pipeline
 
 - `apps/orchestrator` decides which Clarity jobs exist and writes

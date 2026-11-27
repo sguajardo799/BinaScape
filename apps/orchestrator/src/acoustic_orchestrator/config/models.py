@@ -348,7 +348,7 @@ class OutputsConfig(StrictConfigModel):
 
 class ClarityRunnerConfig(StrictConfigModel):
     backend_project_path: Path | None = None
-    entrypoint: str = "clarity-backend"
+    entrypoint: str = "python -m clarity_backend"
     auto_submit: bool = False
     force_rerun: bool = False
     use_uv: bool = True
