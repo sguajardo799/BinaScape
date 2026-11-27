@@ -51,8 +51,9 @@ def test_example_is_tracked_not_ignored() -> None:
 
 
 def _cli() -> list[str]:
-    script = Path(sys.executable).with_name("acoustic-orchestrator")
-    return [script.as_posix()] if script.is_file() else [sys.executable, "-m", "acoustic_orchestrator.cli"]
+    # The package ``__main__`` runs the CLI on every platform; ``acoustic_orchestrator.cli`` has no
+    # main guard, and the console-script launcher is an ``.exe`` that Smart App Control may block.
+    return [sys.executable, "-m", "acoustic_orchestrator"]
 
 
 def test_render_static_end_to_end_without_matlab(tmp_path: Path) -> None:
