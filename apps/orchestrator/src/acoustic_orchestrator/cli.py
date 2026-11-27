@@ -1,14 +1,21 @@
 from pathlib import Path
 
 import typer
+from acoustic_orchestrator.terminal_progress import TerminalProgress
 
 from acoustic_orchestrator.pipeline.render_pipeline import (
     RenderSummary,
     RenderStaticRunError,
-    generate_static_manifests,
+    generate_static_manifests_with_summary,
     render_static_scenes,
     run_clarity_handoff,
 )
+from acoustic_orchestrator.pipeline.circuit_reset import reset_batch_circuit
+from acoustic_orchestrator.pipeline.interruption_recovery import reconcile_interrupted_chain
+from acoustic_orchestrator.pipeline.pool_result_recovery import reconcile_pool_result
+from acoustic_orchestrator.pipeline.presentation_export import export_presentation
+from acoustic_orchestrator.pipeline.process_retries import RetryBlockedError
+from acoustic_orchestrator.pipeline.static_plan import StaticPlanConflict
 
 
 app = typer.Typer(help="CLI del orquestador acústico")
@@ -20,28 +27,58 @@ def callback() -> None:
 
 
 @app.command("generate-manifests")
-def generate_manifests(config: Path) -> None:
-    manifest_paths = generate_static_manifests(config)
-    typer.echo(f"Generados {len(manifest_paths)} manifiestos en {manifest_paths[0].parent if manifest_paths else config}")
+def generate_manifests(
+    config: Path,
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr"),
+) -> None:
+    with TerminalProgress(enabled=not no_progress) as terminal:
+        manifest_paths, sampling = generate_static_manifests_with_summary(
+            config, progress=terminal if not no_progress else None,
+        )
+    typer.echo(
+        " ".join(
+            [
+                f"Generados {len(manifest_paths)} manifiestos en {manifest_paths[0].parent if manifest_paths else config}.",
+                f"muestreo_solicitadas={sampling['requested_scenes']}",
+                f"muestreo_generadas={sampling['generated_scenes']}",
+                f"fallidos={sampling['failed_scene_indices']}",
+                f"diagnóstico={sampling['failures_path']}",
+            ]
+        )
+    )
+    if sampling["status"] == "partial":
+        raise typer.Exit(code=2)
+    if sampling["status"] == "failed":
+        raise typer.Exit(code=1)
 
 
 @app.command("render-static")
-def render_static(config: Path) -> None:
+def render_static(
+    config: Path,
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr"),
+) -> None:
     try:
-        manifest_paths, summary = render_static_scenes(config)
+        with TerminalProgress(enabled=not no_progress) as terminal:
+            manifest_paths, summary = render_static_scenes(config, progress=terminal if not no_progress else None)
     except RenderStaticRunError as exc:
         _echo_render_summary(exc.manifest_paths, exc.summary, config)
         raise typer.Exit(code=1) from exc
 
     _echo_render_summary(manifest_paths, summary, config)
+    if summary["sampling"]["status"] == "partial":
+        raise typer.Exit(code=2)
+    if summary["sampling"]["status"] == "failed":
+        raise typer.Exit(code=1)
 
 
 @app.command("clarity-handoff")
 def clarity_handoff(
     config: Path,
     submit: bool = typer.Option(False, "--submit", help="Ejecuta el backend de Clarity después de preparar el manifiesto"),
+    no_progress: bool = typer.Option(False, "--no-progress", help="Desactiva el progreso en stderr, incluido Clarity"),
 ) -> None:
-    summary = run_clarity_handoff(config, submit=submit)
+    with TerminalProgress(enabled=not no_progress) as terminal:
+        summary = run_clarity_handoff(config, submit=submit, progress=terminal if not no_progress else None)
     typer.echo(
         " ".join(
             [
@@ -58,6 +95,121 @@ def clarity_handoff(
     )
 
 
+@app.command("export-presentation")
+def export_presentation_command(
+    run_root: Path,
+    playback: Path = typer.Option(..., "--playback", help="YAML con playback_id, k_play_db.left/right y max_spl_db"),
+) -> None:
+    """Exporta cada render y sus versiones degradadas con la misma ganancia K - k_play_db por canal."""
+    try:
+        summary = export_presentation(run_root, playback)
+    except ValueError as exc:
+        typer.echo(f"Calibración de reproducción inválida: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    reasons: dict[str, int] = {}
+    for reason in summary["skipped_renders"].values():
+        reasons[reason] = reasons.get(reason, 0) + 1
+    typer.echo(
+        f"Exportación {summary['playback_id']}: renders={summary['exported_renders']} "
+        f"archivos={summary['exported_files']} omitidos={reasons or 0} "
+        f"renders_con_degradados_ausentes={len(summary['missing_degraded'])} destino={summary['export_root']}"
+    )
+
+
+@app.command("reconcile-static")
+def reconcile_static(
+    run_root: Path,
+    chain: str = typer.Option(..., "--chain", help="UUID de la cadena interrumpida"),
+    attempt: str | None = typer.Option(None, "--attempt", help="UUID exacto del intento que se autoriza reconciliar"),
+    apply: bool = typer.Option(False, "--apply", help="Publica la reconciliación; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Reconcilia una interrupción sin inventar un código de salida ni renderizar."""
+    try:
+        result = reconcile_interrupted_chain(
+            run_root, chain, apply=apply, confirm_stopped=confirm_stopped,
+            expected_attempt=attempt, reason=reason,
+        )
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reconciliación bloqueada: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"{'Reconciliado' if apply else 'Solo lectura'}: escena={result['scene_id']} "
+        f"cadena={chain} intento={result['attempt_id']} consumidos={result['consumed_attempts']} "
+        f"restantes={result['remaining_attempts']} siguiente_estado={result['next_state']} "
+        "exit_code=null termination_observed=false"
+    )
+    if apply:
+        typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --attempt <UUID> --confirm-stopped --reason <motivo>.")
+
+
+@app.command("reconcile-pool-result")
+def reconcile_pool_result_command(
+    run_root: Path,
+    chain: str = typer.Option(..., "--chain", help="UUID de la cadena del intento sin resultado leído"),
+    attempt: str | None = typer.Option(None, "--attempt", help="UUID exacto del intento que se autoriza reconciliar"),
+    apply: bool = typer.Option(False, "--apply", help="Publica la reconciliación; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Acepta un intento del pool cuyo resultado publicado (exit 0) no pudo leerse, sin renderizar."""
+    try:
+        result = reconcile_pool_result(
+            run_root, chain, apply=apply, confirm_stopped=confirm_stopped,
+            expected_attempt=attempt, reason=reason,
+        )
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reconciliación bloqueada: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"{'Reconciliado' if apply else 'Solo lectura'}: variante={result['variant_id']} "
+        f"cadena={chain} intento={result['attempt_id']} sesion_pool={result['pool_session_id']} "
+        f"worker={result['worker_id']} exit_code={result['pool_exit_code']}"
+    )
+    if apply:
+        typer.echo(f"Evidencia: {result['reconciliation_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --attempt <UUID> --confirm-stopped --reason <motivo>.")
+
+
+@app.command("reset-circuit")
+def reset_circuit(
+    run_root: Path,
+    apply: bool = typer.Option(False, "--apply", help="Publica el reinicio; por defecto solo inspecciona"),
+    confirm_stopped: bool = typer.Option(False, "--confirm-stopped", help="Confirma que no quedan escritores asociados"),
+    reason: str = typer.Option("", "--reason", help="Motivo de la intervención manual, obligatorio al aplicar"),
+) -> None:
+    """Reinicia un corte de procesos MATLAB persistido sin renderizar ni renovar presupuestos."""
+    try:
+        result = reset_batch_circuit(run_root, apply=apply, confirm_stopped=confirm_stopped, reason=reason)
+    except (RetryBlockedError, StaticPlanConflict, OSError, ValueError) as exc:
+        typer.echo(f"Reinicio bloqueado: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not result["circuit_open"]:
+        typer.echo("No hay un corte de procesos MATLAB abierto; no se modificaron archivos.")
+        return
+    typer.echo(
+        f"{'Reiniciado' if result['applied'] else 'Solo lectura'}: limite={result['limit']} "
+        f"racha={result['consecutive_failures']} cadenas={len(result['chains'])} "
+        f"aceptadas_sin_cambios={len(result['untouched_chains'])}"
+        + (" publicacion_pendiente=true" if result["pending_publication"] else "")
+    )
+    for failure in result["recent_failures"]:
+        typer.echo(f"  fallo reciente: intento={failure['attempt_id']} clasificacion={failure['classification']}")
+    for chain in result["chains"]:
+        typer.echo(
+            f"  cadena={chain['chain_id']} variante={chain.get('variant_id')} intento={chain['attempt_id']} "
+            f"consumidos={chain['consumed_attempts']}/{chain['max_attempts']} siguiente_estado={chain['next_state']}"
+        )
+    if result["applied"]:
+        typer.echo(f"Evidencia: {result['reset_path']}. No se ha lanzado MATLAB; reanude render-static por separado.")
+    else:
+        typer.echo("No se modificaron archivos. Para aplicar indique --apply --confirm-stopped --reason <motivo>.")
+
+
 def main() -> None:
     app()
 
@@ -70,10 +222,14 @@ def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, con
             "Clarity "
             f"total={clarity['total_jobs']} "
             f"planificados={clarity['planned_jobs']} "
+            f"enviados={clarity['submitted_jobs']} "
             f"completados={clarity['completed_jobs']} "
             f"bloqueados={clarity['blocked_jobs']} "
             f"omitidos={clarity['skipped_jobs']} "
-            f"manifest={clarity['manifest_path']}"
+            f"auto_submit={clarity['auto_submit']} "
+            f"submitted={clarity['submitted']} "
+            f"manifest={clarity['manifest_path']} "
+            f"mensaje={clarity['message']}"
         ]
 
     typer.echo(
@@ -91,6 +247,26 @@ def _echo_render_summary(manifest_paths: list[Path], summary: RenderSummary, con
                     f"fallidas={summary['failed_variants']} "
                     f"reanudadas={summary['resumed_variants']} "
                     f"inconsistencias={summary['inconsistent_variants']}"
+                ),
+                (
+                    "MATLAB "
+                    f"procesos_fallidos={summary.get('failed_matlab_processes', 0)} "
+                    f"recuperados={summary.get('recovered_matlab_processes', 0)} "
+                    f"recuperaciones_reanudadas={summary.get('resumed_recovered_variants', 0)}"
+                ),
+                (
+                    "Proceso "
+                    f"invocaciones={summary.get('matlab_invocations', summary['render_jobs'])} "
+                    f"reintentos={summary.get('process_retries', 0)} "
+                    f"variantes_tras_reintento={summary.get('variants_completed_after_retry', 0)} "
+                    f"corte={summary.get('circuit_open', False)}"
+                ),
+                (
+                    "Muestreo "
+                    f"solicitadas={summary['sampling']['requested_scenes']} "
+                    f"muestreo_generadas={summary['sampling']['generated_scenes']} "
+                    f"muestreo_fallidos={summary['sampling']['failed_scene_indices']} "
+                    f"diagnóstico={summary['sampling']['failures_path']}"
                 ),
                 *clarity_bits,
             ]

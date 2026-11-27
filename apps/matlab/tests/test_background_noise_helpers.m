@@ -41,6 +41,27 @@ function testFitNoiseLoopsTrimsAndAdaptsChannels(testCase)
     verifyEqual(testCase, info.channel_mode, 'channel_to_channel');
 end
 
+function testArrayNoiseReplicationMappingAndSnr(testCase)
+    mono = (1:8).';
+    [replicated, info] = fit_noise_to_audio_shape(mono, 8, 8);
+    verifyEqual(testCase, replicated, repmat(mono, 1, 8));
+    verifyEqual(testCase, info.channel_mode, 'mono_replicated');
+    multichannel = reshape(1:64, 8, 8);
+    [exact, info] = fit_noise_to_audio_shape(multichannel, 8, 8);
+    verifyEqual(testCase, exact, multichannel);
+    verifyEqual(testCase, info.channel_mode, 'channel_to_channel');
+    verifyThrowsAny(testCase, @() fit_noise_to_audio_shape(ones(8,2), 8, 8));
+    signal = 0.1 * ones(2048,8);
+    cfg = struct('enabled', true, 'layers', struct('strategy', 'colored', ...
+        'color', 'white', 'snr_db', 20));
+    [out, meta] = apply_background_noise(signal, 44100, cfg, struct('effective_seed', 42));
+    noise = out - signal;
+    verifyEqual(testCase, noise(:,1), noise(:,8), 'AbsTol', 1e-12);
+    verifyEqual(testCase, 20*log10(sqrt(mean(signal(:).^2))/sqrt(mean(noise(:).^2))), 20, 'AbsTol', 1e-10);
+    verifyEqual(testCase, meta.layers.channel_mode, 'mono_replicated');
+    verifyEqual(testCase, meta.layers.target_num_channels, 8);
+end
+
 function testFitNoiseRejectsIncompatibleChannels(testCase)
     verifyThrowsAny(testCase, @() fit_noise_to_audio_shape(randn(8, 3), 8, 2));
 end

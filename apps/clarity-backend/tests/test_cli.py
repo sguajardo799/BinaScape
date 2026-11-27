@@ -45,6 +45,10 @@ def test_run_manifest_writes_success_metadata_with_resolved_profile(tmp_path: Pa
             "sample_rate_hz": 44100,
             "channels": 2,
         },
+        "calibration": {**job["calibration"], "level_handling": "true_level"},
+        "outer_middle_ear": "free_field",
+        "processing_signature": job["processing_signature"],
+        "ignored_profile_fields": {"left": [], "right": []},
         "degradation_applied": {
             "left": {
                 "loss_db_by_band": {
@@ -118,7 +122,7 @@ def test_run_manifest_honors_non_fixed_output_filenames_in_shared_profile_dir(
     hearing_profiles_path.write_text(_hearing_profiles_yaml(), encoding="utf-8")
     monkeypatch.setattr(msbg, "process_wav", _fake_process_wav)
 
-    shared_output_dir = tmp_path / "degraded" / "binaural_hrtf" / "mild_loss"
+    shared_output_dir = tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss"
     first_job = _build_job(
         tmp_path,
         first_input_wav_path,
@@ -190,6 +194,8 @@ def test_run_manifest_writes_failure_metadata_for_missing_input(tmp_path: Path, 
         "input_render_metadata_path": render_metadata_path.resolve().as_posix(),
         "output_wav_path": None,
         "status": "failed",
+        "processor": {"name": "msbg"},
+        "processing_signature": job["processing_signature"],
         "error": metadata["error"],
     }
     assert metadata["error"]["type"] == "FileNotFoundError"
@@ -469,13 +475,13 @@ def _build_job(
     output_metadata_name: str | None = None,
 ) -> dict[str, object]:
     suffix = output_suffix or hearing_profile_id
-    resolved_output_dir = output_dir or (tmp_path / "degraded" / "binaural_hrtf" / suffix)
+    resolved_output_dir = output_dir or (tmp_path / "degraded" / "msbg" / "binaural_hrtf" / suffix)
     resolved_output_wav_name = output_wav_name or "scene_static_0001__binaural_hrtf.wav"
     resolved_output_metadata_name = output_metadata_name or "scene_static_0001__binaural_hrtf.json"
     return {
         "schema_version": "1.0",
         "run_id": "sim_test",
-        "job_id": f"clarity__scene_static_0001__binaural_hrtf__{hearing_profile_id}",
+        "job_id": f"clarity__scene_static_0001__binaural_hrtf__{hearing_profile_id}__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -492,6 +498,32 @@ def _build_job(
         "output_dir": str(resolved_output_dir),
         "expected_output_wav_path": str(resolved_output_dir / resolved_output_wav_name),
         "expected_output_metadata_path": str(resolved_output_dir / resolved_output_metadata_name),
+        "processor": "msbg",
+        "calibration": {
+            "variant_id": "scene_static_0001__binaural_hrtf",
+            "mode": "fixed_scale",
+            "configured": {"digital_rms1_spl_db": 90.0},
+            "is_default": True,
+            "random_seed": None,
+            "presentation_level_db_spl": None,
+            "effective_scale_db_spl": 90.0,
+            "channels": {
+                "left": {"mean_square": 0.005, "leq_db_spl": 66.99, "silent": False},
+                "right": {"mean_square": 0.005, "leq_db_spl": 66.99, "silent": False},
+            },
+            "silent_channels": [],
+            "level_measure": "rms_unweighted_full_file",
+            "status": "ok",
+        },
+        "outer_middle_ear": "free_field",
+        "processor_config": {"level_handling": "true_level"},
+        "processing_signature": {
+            "processor": "msbg",
+            "calibration": {"mode": "fixed_scale", "configured": {"digital_rms1_spl_db": 90.0}, "is_default": True},
+            "random_seed": None,
+            "outer_middle_ear": "free_field",
+            "msbg": {"level_handling": "true_level"},
+        },
     }
 
 

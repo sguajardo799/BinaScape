@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 
 from acoustic_orchestrator.config.models import AppConfig
 from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_config, resolve_output_paths
@@ -7,7 +8,8 @@ from acoustic_orchestrator.pipeline.output_paths import get_receiver_output_conf
 def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: int, manifest_path: Path) -> dict:
     sequence = scene_index + 1
     scene_id = f"{config.outputs.naming.scene_id_prefix}_{sequence:04d}"
-    primary_hrtf_id = sampled_scene["receiver"]["hrtfs"][0]["hrtf_id"]
+    receiver_hrtfs = sampled_scene["receiver"]["hrtfs"]
+    primary_hrtf_id = receiver_hrtfs[0]["hrtf_id"] if receiver_hrtfs else "circular_array"
     primary_output = get_receiver_output_config(config, primary_hrtf_id)
     resolved_paths = resolve_output_paths(
         scene_id,
@@ -24,21 +26,31 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
     }
     if config.source_sampling.timing.total_duration_s is not None:
         render["target_duration_s"] = config.source_sampling.timing.total_duration_s
+    # RAVEN manifests stay byte-identical; other backends record identity and
+    # effective parameters so the runtime snapshot alone determines the simulation.
+    if config.render.backend != "raven":
+        render["backend"] = config.render.backend
+        render["backend_parameters"] = config.pyroomacoustics.model_dump(mode="json")
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "3.0",
         "scene_type": config.experiment.scene_type,
-        "base_rpf_file": config.raven.base_rpf_file.as_posix(),
+        "base_rpf_file": config.raven.base_rpf_file.as_posix() if config.render.backend == "raven" else None,
         "project_name": config.experiment.experiment_id,
         "scene_id": scene_id,
         "job_id": f"render_job_static_{sequence:04d}",
         "room": {
             "room_id": sampled_scene["room"]["room_id"],
-            "dimensions_m": [
-                sampled_scene["room"]["dimensions"]["length"],
-                sampled_scene["room"]["dimensions"]["width"],
-                sampled_scene["room"]["dimensions"]["height"],
-            ],
+            "geometry": {
+                "type": sampled_scene["room"]["geometry"]["type"],
+                "height_m": sampled_scene["room"]["geometry"]["height_m"],
+                "footprint_vertices_m": [
+                    list(vertex)
+                    for vertex in sampled_scene["room"]["geometry"]["footprint_vertices_m"]
+                ],
+                "wall_ids": list(sampled_scene["room"]["geometry"]["wall_ids"]),
+                "generated_from": dict(sampled_scene["room"]["geometry"]["generated_from"]),
+            },
             "materials": sampled_scene["room"]["materials"],
             "material_files": {
                 surface_id: {
@@ -47,15 +59,30 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
                 }
                 for surface_id, material_file in sampled_scene["room"]["material_files"].items()
             },
+            "acoustic_surfaces": {
+                surface_id: {
+                    **surface,
+                    "base_material": {
+                        **surface["base_material"],
+                        "material_path": _absolute_path(surface["base_material"]["material_path"]),
+                    },
+                }
+                for surface_id, surface in sampled_scene["room"]["acoustic_surfaces"].items()
+            },
         },
         "receiver": {
             "receiver_id": sampled_scene["receiver"]["receiver_id"],
             "position_m": sampled_scene["receiver"]["position_m"],
             "orientation_deg": sampled_scene["receiver"]["orientation_deg"],
+            **(
+                {"circular_array": deepcopy(sampled_scene["receiver"]["circular_array"])}
+                if "circular_array" in sampled_scene["receiver"] else {}
+            ),
             "hrtfs": [
                 {
                     "hrtf_id": hrtf["hrtf_id"],
                     "hrtf_path": _absolute_path(hrtf["hrtf_path"]),
+                    **({"subject_id": hrtf["subject_id"]} if "subject_id" in hrtf else {}),
                 }
                 for hrtf in sampled_scene["receiver"]["hrtfs"]
             ],
@@ -64,6 +91,8 @@ def build_static_manifest(config: AppConfig, sampled_scene: dict, scene_index: i
             _build_source_manifest(source)
             for source in sampled_scene["sources"]
         ],
+        "reverberation_sampling": dict(sampled_scene["reverberation_sampling"]),
+        "sampling": dict(sampled_scene["sampling"]),
         "background_noise": _build_background_noise_manifest(sampled_scene.get("background_noise")),
         "render": render,
     }
@@ -74,6 +103,8 @@ def _build_source_manifest(source: dict) -> dict:
         "source_id": source["source_id"],
         "event_type": source["event_type"],
         "audio_path": _absolute_path(source["audio_path"]),
+        "identity_id": source.get("identity_id", ""),
+        "audio_relpath": source.get("audio_relpath", ""),
         "position_m": source["position_m"],
         "orientation_deg": source["orientation_deg"],
         "gain_db": source["gain_db"],
@@ -81,6 +112,8 @@ def _build_source_manifest(source: dict) -> dict:
     }
     if "directivity" in source:
         manifest_source["directivity_path"] = _absolute_path(source["directivity"])
+    if "target_wall_id" in source:
+        manifest_source["target_wall_id"] = source["target_wall_id"]
     return manifest_source
 
 

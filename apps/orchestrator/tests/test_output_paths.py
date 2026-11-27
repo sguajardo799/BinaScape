@@ -1,12 +1,30 @@
 from pathlib import Path
 
+import pytest
+
 from acoustic_orchestrator.config.models import NamingConfig, OutputsConfig, ReceiverOutputConfig
 from acoustic_orchestrator.pipeline.output_paths import (
     build_clarity_job_id,
+    is_safe_output_subdir,
     resolve_artifact_layout,
     resolve_clarity_job_paths,
     resolve_output_paths,
+    resolve_render_attempts_dir,
 )
+
+
+@pytest.mark.parametrize(
+    "subdir", ["", ".", "..", "../escape", "nested/../escape", r"nested\..\escape",
+               "/absolute", r"\absolute", "C:/absolute", r"C:\absolute", "C:relative",
+               r"\\server\share\output"]
+)
+def test_output_subdir_rejects_rooted_or_unsafe_paths(subdir: str) -> None:
+    assert not is_safe_output_subdir(subdir)
+
+
+@pytest.mark.parametrize("subdir", ["circular_array", "receivers/array", r"receivers\array"])
+def test_output_subdir_accepts_relative_paths(subdir: str) -> None:
+    assert is_safe_output_subdir(subdir)
 
 
 def test_resolve_output_paths_applies_templates_and_subdirectories(tmp_path: Path) -> None:
@@ -32,16 +50,26 @@ def test_resolve_output_paths_applies_templates_and_subdirectories(tmp_path: Pat
     resolved = resolve_output_paths("scene_static_0001", "bte_rear_hartf", outputs, receiver_output, "sim_test")
 
     assert resolved["variant_id"] == "scene_static_0001__bte_rear_hartf"
-    assert layout["scene_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "scene"
-    assert layout["runtime_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "runtime" / "render"
-    assert layout["prepared_audio_dir"] == tmp_path / "artifacts" / "run_a" / "audio" / "prepared"
-    assert layout["render_index_path"] == tmp_path / "artifacts" / "run_a" / "indexes" / "render_index.jsonl"
+    assert layout["scene_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "scene"
+    assert layout["runtime_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "runtime" / "render"
+    assert layout["prepared_audio_dir"] == tmp_path / "artifacts" / "run_a" / "cropped_audio"
+    assert layout["render_index_path"] == tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "render_index.jsonl"
+    assert layout["render_attempts_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "render_attempts"
+    assert not layout["render_attempts_dir"].is_relative_to(layout["matlab_diagnostics_dir"])
     assert Path(resolved["wav_path"]).parts[-2:] == ("bte_rear_hartf", "scene_static_0001__bte_rear_hartf.wav")
     assert Path(resolved["metadata_path"]).parts[-2:] == (
         "bte_rear_hartf",
         "scene_static_0001__bte_rear_hartf__render.json",
     )
     assert resolved["output_subdir"] == "bte_rear_hartf"
+
+
+def test_render_attempts_fallback_and_explicit_root(tmp_path: Path) -> None:
+    manifest = tmp_path / "runtime" / "scene__binaural_hrtf.json"
+    assert resolve_render_attempts_dir(manifest) == tmp_path / "runtime" / "render_attempts"
+    explicit = tmp_path / "run" / "metadata" / "render_attempts"
+    assert resolve_render_attempts_dir(manifest, explicit) == explicit
+    assert not explicit.exists()  # Resolving paths has no filesystem side effects.
 
 
 def test_resolve_output_paths_keeps_variant_id_stable_when_public_names_change(tmp_path: Path) -> None:
@@ -68,7 +96,7 @@ def test_resolve_output_paths_keeps_variant_id_stable_when_public_names_change(t
     assert resolved["variant_id"] == "scene_static_0001__binaural_hrtf"
     assert Path(resolved["wav_path"]).name == "wav-binaural_hrtf-scene_static_0001.wav"
     assert Path(resolved["metadata_path"]).name == "meta-binaural_hrtf-scene_static_0001.json"
-    assert Path(resolved["wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "outputs", "render")
+    assert Path(resolved["wav_path"]).parts[-6:-2] == ("artifacts", "sim_test", "output_audio", "render")
 
 
 def test_resolve_artifact_layout_includes_clarity_manifest_and_index_paths(tmp_path: Path) -> None:
@@ -84,23 +112,30 @@ def test_resolve_artifact_layout_includes_clarity_manifest_and_index_paths(tmp_p
 
     layout = resolve_artifact_layout(outputs, "sim_test")
 
-    assert layout["clarity_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "manifests" / "runtime" / "clarity"
+    assert layout["clarity_manifest_dir"] == tmp_path / "artifacts" / "run_a" / "metadata" / "manifests" / "runtime" / "clarity"
     assert layout["clarity_jobs_path"] == layout["clarity_manifest_dir"] / "clarity_jobs.jsonl"
-    assert layout["clarity_index_path"] == tmp_path / "artifacts" / "run_a" / "indexes" / "clarity_index.jsonl"
-    assert layout["degraded_output_root"] == tmp_path / "artifacts" / "run_a" / "outputs" / "degraded"
+    assert layout["clarity_index_path"] == tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "clarity_index.jsonl"
+    assert layout["degraded_output_root"] == tmp_path / "artifacts" / "run_a" / "output_audio" / "degraded"
+    assert layout["level_calibration_index_path"] == (
+        tmp_path / "artifacts" / "run_a" / "metadata" / "indexes" / "level_calibration.jsonl"
+    )
 
 
 def test_resolve_clarity_job_paths_is_deterministic_per_variant(tmp_path: Path) -> None:
     paths = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
+        processor="msbg",
         output_type="binaural_hrtf",
         variant_id="scene_static_0001__binaural_hrtf",
         hearing_profile_id="mild_loss",
         input_wav_path=tmp_path / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav",
     )
 
-    assert paths["job_id"] == build_clarity_job_id("scene_static_0001__binaural_hrtf", "mild_loss")
-    assert Path(paths["output_dir"]).parts[-2:] == (
+    assert paths["job_id"] == build_clarity_job_id("scene_static_0001__binaural_hrtf", "mild_loss", "msbg")
+    assert paths["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"
+    assert Path(paths["output_dir"]).parts[-4:] == (
+        "degraded",
+        "msbg",
         "binaural_hrtf",
         "mild_loss",
     )
@@ -110,14 +145,16 @@ def test_resolve_clarity_job_paths_is_deterministic_per_variant(tmp_path: Path) 
 
 def test_resolve_clarity_job_paths_keeps_multiple_sources_distinct_in_shared_profile_dir(tmp_path: Path) -> None:
     first = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
+        processor="msbg",
         output_type="binaural_hrtf",
         variant_id="scene_static_0001__binaural_hrtf",
         hearing_profile_id="mild_loss",
         input_wav_path=tmp_path / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav",
     )
     second = resolve_clarity_job_paths(
-        output_root=tmp_path / "outputs" / "degraded",
+        output_root=tmp_path / "output_audio" / "degraded",
+        processor="msbg",
         output_type="binaural_hrtf",
         variant_id="scene_static_0002__binaural_hrtf",
         hearing_profile_id="mild_loss",
@@ -127,3 +164,23 @@ def test_resolve_clarity_job_paths_keeps_multiple_sources_distinct_in_shared_pro
     assert first["output_dir"] == second["output_dir"]
     assert first["expected_output_wav_path"] != second["expected_output_wav_path"]
     assert first["expected_output_metadata_path"] != second["expected_output_metadata_path"]
+
+
+def test_resolve_clarity_job_paths_separates_processors_with_same_basename(tmp_path: Path) -> None:
+    common = dict(
+        output_root=tmp_path / "output_audio" / "degraded",
+        output_type="binaural_hrtf",
+        variant_id="scene_static_0001__binaural_hrtf",
+        hearing_profile_id="mild_loss",
+        input_wav_path=tmp_path / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav",
+    )
+    msbg = resolve_clarity_job_paths(processor="msbg", **common)
+    whis = resolve_clarity_job_paths(processor="whis", **common)
+
+    assert msbg["job_id"] != whis["job_id"]
+    assert whis["job_id"].endswith("__mild_loss__whis")
+    assert msbg["output_dir"] != whis["output_dir"]
+    assert Path(whis["output_dir"]).parts[-4:] == ("degraded", "whis", "binaural_hrtf", "mild_loss")
+    assert Path(msbg["expected_output_wav_path"]).name == Path(whis["expected_output_wav_path"]).name
+    assert msbg["expected_output_wav_path"] != whis["expected_output_wav_path"]
+    assert msbg["expected_output_metadata_path"] != whis["expected_output_metadata_path"]

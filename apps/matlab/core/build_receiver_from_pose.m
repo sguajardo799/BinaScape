@@ -8,11 +8,28 @@ function ctx = build_receiver_from_pose(ctx)
 
     hrtf_path = fullfile(dir(receiver.active_hrtf.hrtf_path).folder, dir(receiver.active_hrtf.hrtf_path).name);
 
-    rpf.setReceiverHRTF(string(hrtf_path));
-    rpf.setReceiverPositions(receiver.position_m(:).');
-
-    [viewVec, upVec] = orientation_deg_to_vectors(receiver.orientation_deg.pitch, receiver.orientation_deg.yaw);
-
+    % IniConfig de ITA serializa char, no MATLAB string; un string deja el
+    % campo vacío y RAVEN sustituye silenciosamente su HRTF predeterminado.
+    rpf.setReceiverHRTF(char(hrtf_path));
+    stored_path = char(rpf.getReceiverHRTF());
+    if ~strcmpi(strrep(stored_path, '\', '/'), strrep(char(hrtf_path), '\', '/'))
+        error('BinaScape:Matlab:ReceiverIRPathNotStored', ...
+            'RAVEN no conservó el archivo IR seleccionado: %s', char(hrtf_path));
+    end
+    if uses_polygon_coordinate_contract(ctx.manifest)
+        [position, viewVec, ~] = transform_schema2_pose_to_raven( ...
+            receiver.position_m, receiver.orientation_deg);
+    else
+        position = double(receiver.position_m(:).');
+        [viewVec, ~] = orientation_deg_to_vectors( ...
+            receiver.orientation_deg.pitch, receiver.orientation_deg.yaw);
+    end
+    rpf.setReceiverPositions(position);
     rpf.setReceiverViewVectors(viewVec);
 
+end
+
+function tf = uses_polygon_coordinate_contract(manifest)
+    tf = isfield(manifest, 'schema_version') && ...
+        any(strcmp(char(string(manifest.schema_version)), {'2.0', '3.0'}));
 end

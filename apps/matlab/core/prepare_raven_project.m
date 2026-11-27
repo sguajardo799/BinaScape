@@ -33,8 +33,13 @@ function ctx = prepare_raven_project(manifest, run_ctx)
         seed_info.seed_source = char(string(run_ctx.seed_source));
     end
 
+    % Materiales y modelo de sala en carpetas privadas del proyecto: los
+    % renders concurrentes no comparten archivos mutables de RAVEN.
+    workspace = configure_raven_workspace(rpf, project_name);
+
     ctx = struct();
     ctx.rpf = rpf;
+    ctx.workspace = workspace;
     ctx.project_name = project_name;
     ctx.output_rpf = output_rpf;
     ctx.manifest = manifest;

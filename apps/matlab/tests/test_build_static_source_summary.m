@@ -29,7 +29,30 @@ function testBuildsPerSourceSummaryWithoutOptionalFields(testCase)
 
     verifyEqual(testCase, summary.source_end_time_s, 1.75, 'AbsTol', 1e-12);
     verifyEqual(testCase, summary.directivity_path, '');
+    verifyEqual(testCase, summary.identity_id, '');
+    verifyEqual(testCase, summary.audio_relpath, '');
     verifyFalse(testCase, isfield(summary, 'reverberation'));
+end
+
+function testPreservesProvenanceWithIndependentMissingDefaults(testCase)
+    variants = {
+        struct('identity_id', 'ID02', 'audio_relpath', 'ID02/long.wav'), ...
+        struct('identity_id', 'ID02'), ...
+        struct('audio_relpath', 'flat.wav'), ...
+        struct('identity_id', '', 'audio_relpath', 'flat.wav')};
+    expected_ids = {'ID02', 'ID02', '', ''};
+    expected_paths = {'ID02/long.wav', '', 'flat.wav', 'flat.wav'};
+    entries = preallocate_static_source_summaries(numel(variants));
+    for i = 1:numel(variants)
+        src = variants{i};
+        src.source_id = sprintf('src_%d', i);
+        src.audio_path = 'C:/prepared/src__trim_1.wav';
+        entries(i) = build_static_source_summary( ...
+            src, src.source_id, [1 2 3], [1 0 0], [0 1 0], 0, 1);
+        verifyEqual(testCase, entries(i).identity_id, expected_ids{i});
+        verifyEqual(testCase, entries(i).audio_relpath, expected_paths{i});
+        verifyEqual(testCase, entries(i).audio_path, src.audio_path);
+    end
 end
 
 function testPreallocatedSourceSummariesAcceptBuiltEntries(testCase)

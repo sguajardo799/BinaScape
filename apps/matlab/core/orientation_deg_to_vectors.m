@@ -3,12 +3,11 @@ function [viewVec, upVec] = orientation_deg_to_vectors(pitch, yaw)
     %   - vector de vista
     %   - vector up
     %
-    % Convención usada:
-    %   x = frontal
-    %   y = vertical
-    %   z = profundidad
-    %
-    % Ajusta esta convención si tu escena usa otro eje como "forward".
+    % Uso exclusivo del camino heredado (manifiestos sin esquema 2.0/3.0):
+    % devuelve (cos p cos y, sin p, +cos p sin y) directamente en
+    % coordenadas RAVEN. Los esquemas 2.0/3.0 usan
+    % transform_schema2_pose_to_raven, que aplica la convención pública
+    % canónica (spatial-pose-convention) antes de reflejar Z.
 
     yaw = deg2rad(double(yaw));
     pitch = deg2rad(double(pitch));

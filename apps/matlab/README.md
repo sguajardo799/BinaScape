@@ -8,16 +8,26 @@ The supported flow is static rendering through `run_raven_static_render.m`.
 Dynamic rendering is not supported yet: `run_raven_dynamic_render.m` exists as
 an entrypoint, but `dynamic/render_dynamic_scene.m` is still a placeholder.
 
+See the [documentation index](../../docs/README.md),
+[shared contracts](../../docs/architecture/contracts.md),
+[data flow](../../docs/architecture/data-flow.md),
+[setup](../../docs/development/setup.md), and
+[testing guide](../../docs/development/testing.md).
+
 ## Requirements
 
-- MATLAB
+- MATLAB configured for a 44100 Hz static render
 - ITA Toolbox
 - RAVEN
 - Local RAVEN project files, HRTF/DAFF files, source audio, directivity files,
   and material files referenced by the input scene manifest
 
 For root-first end-to-end runs, `matlab` must also be available on `PATH` so the
-orchestrator can invoke it by subprocess.
+orchestrator can invoke it by subprocess. `core/prepare_raven_project.m`
+currently writes RPF projects under the fixed local Windows path
+`C:\ITASoftware\Raven\RavenInput\`; verify that this installation path is
+available before a full render. Portability to other installations is not
+established by the unit tests.
 
 ## Directory Layout
 
@@ -56,6 +66,148 @@ run_raven_static_render('example/scene_static_0001.json')
 Before running directly, review the scene manifest paths for source WAV files,
 HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 
+Los catálogos DAFF deben usar una versión compatible con el RAVEN instalado;
+el nombre/extensión por sí solo no garantiza compatibilidad. El adaptador pasa
+las rutas IR como `char` y comprueba que el RPF conserva el archivo seleccionado,
+evitando una sustitución silenciosa por el HRTF predeterminado al serializar.
+Los archivos v1.7 rechazados por el backend deben reemplazarse o convertirse
+fuera de esta ruta; no se convierten automáticamente ni se omiten errores.
+
+## Diagnóstico opcional del render estático
+
+El entrypoint sigue aceptando solo el manifiesto. Para emitir eventos incrementales
+JSONL, puede recibir un segundo argumento (el directorio destino debe existir):
+
+```matlab
+diagnostics = struct('attempt_id', 'identificador-unico-del-intento', ...
+    'events_path', 'D:/outputs/run/metadata/diagnostics/matlab/intento/events.jsonl');
+run_raven_static_render('example/scene_static_0001.json', diagnostics)
+```
+
+El orquestador asigna el UUID y crea el contexto automáticamente por invocación.
+`render_static_scene(cfg, diagnostics)` también acepta contexto opcional; sin él,
+ambas funciones conservan sus llamadas anteriores y no crean archivos de eventos.
+Este diagnóstico no habilita el render dinámico, que continúa sin soporte.
+
+`emit_render_event` escribe una línea UTF-8 completa y cierra el archivo por evento.
+Los campos base son `schema_version: 1`, `attempt_id`, `sequence`, `timestamp` UTC,
+`type` y `stage`. Las etapas `initialization`, `simulation` y `artifact_writing`
+emiten `stage_started`/`stage_completed`. Dentro de `simulation` se emiten
+`step_started`/`step_completed` con `step=raven_run` alrededor de `rpf.run()` y
+`step=audio_postprocessing` para respuestas, reverberación, convolución, mezcla y ruido.
+Son cuatro eventos ligeros por variante, sin instrumentación interna de RAVEN.
+
+Cada escritor que retorna correctamente emite `artifact_written` con `kind`, `path`
+y `output_type`; si falla la exportación de metadatos después del WAV, solo el WAV
+queda confirmado. Un fallo emite `error` con identificador, mensaje y stack y se
+relanza la excepción original. Las variantes múltiples conservan identidad de salida
+en sus eventos; no se colapsan sus secuencias.
+
+`entrypoint_completed` confirma únicamente que el entrypoint terminó sus escrituras.
+**No confirma que MATLAB haya cerrado correctamente** ni establece `process_status`:
+el orquestador registra ese resultado aparte, a partir del código de salida observado.
+Una caída puede dejar incompleta la última etapa o línea de eventos. Los fallos
+exclusivos del diagnóstico (incluidas advertencias configuradas como errores) no
+deben cambiar las excepciones ni resultados funcionales. La persistencia depende
+del almacenamiento disponible; no hay recuperación automática ni limpieza de logs.
+
+Pruebas sin simulación RAVEN real:
+
+```matlab
+addpath(genpath('apps/matlab'));
+results = runtests({'apps/matlab/tests/test_emit_render_event.m', ...
+    'apps/matlab/tests/test_render_diagnostics.m'});
+assertSuccess(results);
+```
+
+## Constancia funcional opcional de finalización
+
+La firma compatible del entrypoint es:
+
+`run_raven_static_render(config_path, diagnostics, completion_context)`
+
+El tercer argumento es opcional y no se mezcla con los eventos diagnósticos. Una
+llamada con solo manifiesto, o manifiesto y diagnóstico, mantiene su contrato
+anterior y no crea constancia. Para emitirla sin diagnóstico, usar `[]` como segundo
+argumento. Ejemplo de preparación manual (revisar antes las rutas acústicas del
+manifiesto y usar un directorio nuevo):
+
+```matlab
+addpath(genpath('apps/matlab'));
+attempt_id = lower(reshape(dec2hex(randi([0 255], 1, 16), 2).', 1, []));
+attempt_root = fullfile('D:/outputs/run/metadata/render_attempts', attempt_id);
+mkdir(attempt_root);
+snapshot_path = fullfile(attempt_root, 'input_manifest.json');
+copyfile('example/scene_static_0001.json', snapshot_path);
+completion_context = struct('attempt_id', attempt_id, ...
+    'variant_id', 'scene_static_0001__binaural_hrtf', ...
+    'manifest_sha256', sha256_file(snapshot_path), ...
+    'completion_path', fullfile(attempt_root, 'completion.json'), ...
+    'failure_path', fullfile(attempt_root, 'failure.json'));
+run_raven_static_render(snapshot_path, [], completion_context);
+```
+
+El productor comprueba el SHA-256 de los bytes exactos del manifiesto, escribe y
+cierra todos los WAV y metadatos y publica `completion.json` como última operación
+funcional. Sus campos versión 1 son `schema_version`, `attempt_id`, `scene_id`,
+`variant_id`, `output_type`, `manifest_sha256` y `artifacts`. Cada artefacto incluye
+`kind`, `path` absoluta normalizada, `size_bytes` y `sha256`. Para varias salidas,
+inventaría todas y usa `output_type=batch`; el orquestador selecciona una variante
+por invocación. Los hashes se calculan por bloques mediante Java, sin comandos de
+shell; no se reserializa el manifiesto para calcular su huella.
+
+La publicación usa temporal UTF-8 y renombrado atómico del mismo directorio mediante
+Java NIO. Si la plataforma no ofrece esa operación, se propaga el error: no se
+degrada a copiar y borrar. Un temporal remanente no es evidencia de finalización y
+una constancia final existente no se reemplaza. Se presupone un único escritor por
+intento y rutas públicas distintas para variantes concurrentes; no se garantiza
+durabilidad ante pérdida eléctrica ni semántica de sistemas de archivos de red no
+ensayados. El directorio funcional debe existir antes del render.
+
+Los errores de escritura, cierre, hash o publicación son funcionales y se propagan;
+los fallos exclusivos de diagnóstico siguen siendo de mejor esfuerzo. La constancia
+no acredita fidelidad física, validez del WAV o T30, ni demuestra que MATLAB cerró
+correctamente. El pipeline del orquestador exige además validación independiente
+completa antes de continuar con advertencia tras un código no cero. El render
+dinámico continúa sin soporte.
+
+Pruebas de contrato y fallos de escritura sin RAVEN:
+
+```matlab
+results = runtests({'apps/matlab/tests/test_render_completion.m', ...
+    'apps/matlab/tests/test_render_diagnostics.m', ...
+    'apps/matlab/tests/test_export_render_metadata.m'});
+assertSuccess(results);
+```
+
+## Informe funcional opcional de entrada inválida
+
+El mismo tercer argumento admite aditivamente `failure_path`. Solo un error de
+`load_scene_config` o de `validate_static_scene_config` intenta publicar
+`failure.json`; un fallo posterior de inicialización, simulación o escritura no
+se clasifica como entrada inválida. Las firmas de uno/dos argumentos y los
+contextos anteriores sin `failure_path` no requieren ni generan este informe.
+
+El esquema 1 contiene `schema_version`, `attempt_id`, `variant_id`,
+`manifest_sha256`, `category=invalid_input` y `error` con `identifier` y `message`
+originales. `scene_id` y `output_type` se incluyen solo si el contexto los aporta:
+no se deducen de una entrada rechazada. Antes de publicar se comprueba el hash de
+los bytes del snapshot. El directorio debe existir; se escribe/cierra un temporal
+UTF-8 y se renombra atómicamente sin reemplazar evidencia previa ni degradar a
+copia/borrado. Un error al guardar el informe (incluso si la advertencia también
+falla) conserva y relanza la excepción de entrada original.
+
+Este archivo **no es éxito ni finalización**: `completion.json` acredita otro
+hecho funcional y los eventos JSONL siguen siendo diagnóstico de mejor esfuerzo.
+Su ausencia no prueba transitoriedad ni identifica la causa de un fallo desconocido.
+Python verifica esquema estricto, identidad y hash contra el snapshot independiente;
+un informe corrupto/ajeno o la coexistencia con una constancia, incluso corrupta,
+es conflicto de integridad. El clasificador debe consultar esta verificación antes
+de aceptar recuperación o programar otro intento; no interpreta la consola.
+
+Prueba aislada sin RAVEN: `runtests('apps/matlab/tests/test_render_failure.m')`
+desde la raíz, después de `addpath(genpath('apps/matlab'))`.
+
 ## Important Files
 
 - `run_raven_static_render.m`: entrypoint for supported static rendering.
@@ -66,6 +218,9 @@ HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 - `core/apply_background_noise.m`: applies post-render additive background
   noise.
 - `core/export_render_metadata.m`: writes render metadata.
+- `core/transform_schema2_pose_to_raven.m`: shared position/vector reflection
+  for schema 2.0/3.0.
+- `core/build_room_reverberation_summary.m`: measured T30 summary and validity.
 - `run_raven_dynamic_render.m`: dynamic entrypoint placeholder.
 - `dynamic/render_dynamic_scene.m`: dynamic implementation placeholder.
 
@@ -73,23 +228,114 @@ HRTFs, material files, the base `.rpf`, output WAV paths, and metadata paths.
 
 The current static manifest contract includes these fields and behaviors:
 
-- `receiver.hrtfs` is the canonical receiver format. It is a non-empty list of
-  HRTF variants with `hrtf_id` and `hrtf_path`.
+- `receiver.hrtfs` describes catalog-backed variants with `hrtf_id` and
+  `hrtf_path`. It may be empty when `receiver.circular_array` is present.
 - The legacy singular `receiver.hrtf` field is accepted and normalized as a
   one-variant batch.
 - `render.seed` is the preferred seed location. A legacy top-level `seed` is
   accepted when `render.seed` is absent.
 - Each source may optionally define `directivity_path`.
-- `room.materials` and `room.material_files` are required for the static flow.
-- `room.material_files` must explicitly define `north_wall`, `south_wall`,
-  `east_wall`, `west_wall`, `floor`, and `ceiling`.
-- Each material file entry must include `material_id` and an absolute
-  `material_path`.
-- The validator checks consistency between `room.materials.<surface>` and
-  `room.material_files.<surface>.material_id`.
-- Material absorption and scattering coefficients are loaded from explicit
-  material files and applied to RAVEN using the wall order `north`, `south`,
-  `east`, `west`.
+- `schema_version` accepts `1.0`, `2.0`, and `3.0`; missing version defaults
+  to `1.0`. The orchestrator currently generates schema `3.0`.
+- Schema 1.0 keeps the legacy shoebox dimensions and six named material
+  surfaces: `north_wall`, `south_wall`, `east_wall`, `west_wall`, `floor`,
+  and `ceiling`. Explicit material files supply absorption and scattering.
+  Their RAVEN slots are `matShoebox1=floor`, `2=ceiling`, `3=south`,
+  `4=west`, `5=north`, and `6=east`, independent of API enumeration order.
+- Schemas 2.0/3.0 use `room.geometry` with `height_m`, ordered footprint
+  vertices in the public XZ plane and `wall_ids`. Supported generated shapes
+  are shoebox, trapezoid and L-shaped rooms. Material maps contain every
+  `wall_id`, plus `floor` and `ceiling`, with no extra surfaces.
+- `room.materials` and `room.material_files` remain required. Every file entry
+  carries `material_id` and absolute `material_path`, consistent with the
+  semantic material map.
+- Schema 3.0 additionally requires `room.acoustic_surfaces` and
+  `reverberation_sampling`. Effective absorption/scattering vectors are
+  authoritative for rendering; treatment v1 preserves base scattering and
+  leaves the floor untreated. See the shared contract for treatment metadata.
+- Scene and runtime JSON retain public `[x, y, z]` coordinates, with Y as
+  height. The MATLAB adapter reflects Z for positions and orientation vectors
+  in schemas 2.0/3.0. Render metadata source positions/vectors are exported
+  from this adapted RAVEN frame, not copied from the public manifest.
+- `render.sample_rate_hz` must equal `44100`; the renderer rejects other rates.
+- Render metadata reports `t30_s` from `rpf.getT30` with octave centers
+  `[31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]` Hz when the
+  returned vector has ten values. `mean_t30_s` is available only when all ten
+  bands are finite and positive; otherwise it is empty and status is
+  `unavailable`. This ten-band measured mean differs from the seven-band
+  Sabine sampling estimate over 125–8000 Hz.
+
+## Render de arrays circulares estáticos
+
+El entrypoint MATLAB soporta `receiver.circular_array` además de HRTF/HARTF.
+El orquestador genera variantes de array y comprueba su indexación/procedencia.
+El descriptor contiene `output_type: circular_array`, `num_microphones` entero
+>=2, `radius_m` finito positivo, `center_m`, `yaw_deg` y `microphones` ordenados.
+Cada micrófono lleva `microphone_index` (desde cero), `channel_index` (desde uno)
+y `position_m`. El centro/yaw debe coincidir con la pose del receptor.
+
+La geometría permanece horizontal en XZ (Y vertical), sin cabeza ni carcasa.
+Con yaw cero, el canal 1 está en +X; los siguientes avanzan hacia −Z (derecha del oyente en el render; ver la convención en `docs/architecture/contracts.md`). Pitch/roll
+no inclinan el array. Las posiciones públicas se reflejan una vez en Z al
+construir los receptores RAVEN. El runtime puede seleccionar exclusivamente
+un descriptor mediante `render.active_output_type`; sin selección se procesan
+todas las variantes declaradas. Un array no requiere `active_hrtf` ni un
+catálogo IR propio.
+
+El WAV contiene N canales sincronizados a 44100 Hz. Cada fuente multicanal se
+reduce a mono por media aritmética antes de normalización/gain; HRTF/HARTF
+conserva su tratamiento anterior. No se alinean inicios ni se normalizan
+canales de micrófonos individualmente. El sidecar identifica `output_type`,
+incluye geometría/canales en `receiver.circular_array`, marca coordenadas como
+`public_xyz_y_up` y conserva T30 y política de downmix en los resúmenes.
+
+El ruido posterior a la mezcla admite capas mono replicadas o exactamente
+N canales. Un WAV de ruido estéreo no se convierte automáticamente a ocho
+canales: se rechaza. La replicación mono es ruido correlacionado, no un campo
+difuso espacial. El array nunca es entrada Clarity, incluso con N=2.
+El render dinámico sigue sin soporte.
+
+Tras generar un manifiesto completo de array con rutas válidas, se usa el
+mismo entrypoint estático:
+
+```matlab
+run_raven_static_render('ruta/al/scene_array.json');
+```
+
+Los ejemplos de configuración están en
+`configs/experiments/circular_array_only.yml` y `circular_array_mixed.yml`;
+los extractos de receptor y el orden de canales se documentan en
+`apps/orchestrator/examples/circular_array_scenes.md`.
+
+## Verificación del contrato RIR para arrays
+
+La verificación del contrato RIR se mantiene separada de los tests de
+orquestación/indexación y requiere un backend real.
+La adaptación seleccionada usa receptores en lote y
+`rpf.getImpulseResponseItaAudio()`: devuelve una matriz `itaAudio`
+`[n_fuentes, n_micrófonos]`, con una respuesta mono a 44100 Hz por par.
+El orden de columnas corresponde al orden de `setReceiverPositions` y
+`setReceiverNames`. No se deben alinear ni normalizar los canales por separado.
+
+La verificación real con dos fuentes asimétricas y cuatro micrófonos comprueba
+orden, tiempo absoluto de llegada y diferencias de nivel del sonido directo:
+
+```matlab
+addpath('tests');
+verify_raven_array_response_contract( ...
+    'C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf', ...
+    fullfile(tempdir, 'binascape_array_contract'));
+```
+
+El fixture copia el RPF base, conserva resultados y escribe
+`array_contract_report.json` en el directorio indicado; no modifica el RPF base.
+Requiere un modelo shoebox de 4.2 x 3.6 x 2.8 m con materiales y el backend
+RAVEN/ITA instalado, no solamente mocks. No es un test unitario automático.
+En esta versión, `getT30()` devuelve una celda por receptor;
+`getT30(true, false)` devuelve el promedio entre receptores en diez bandas,
+sin promediar frecuencias. El RPF base puede cargar su HRIR heredado incluso
+con BRIR desactivado; las respuestas recuperadas por este fixture son RIR mono,
+no BRIR ni canales filtrados por cabeza.
 
 ## Outputs Per HRTF
 
@@ -101,6 +347,12 @@ The current static manifest contract includes these fields and behaviors:
 - Multi-HRTF output filenames receive a safe `__<hrtf_id>` suffix before the
   file extension.
 - Each HRTF variant writes its own WAV file and metadata JSON.
+- Each JSON keeps scene and output identifiers at the top level. `summary`
+  contains the simulation results for that variant, such as source details and
+  room reverberation. `batch` contains `n_variants` and, when applicable,
+  `other_variants` with the HRTF ID and output paths of each sibling variant.
+  The current variant is identified by the top-level fields and is not repeated
+  in `batch`.
 - `render.trim_reverb_tail` is optional and defaults to `false`. When `true`,
   each rendered source is trimmed before mixing.
 
@@ -172,6 +424,74 @@ channel adaptation, and clipping-guard information.
 - The code does not currently verify that the RAVEN API exposes a compatible
   seed mechanism for complete BRIR reproducibility. Metadata documents that
   limitation explicitly.
+
+## Workspace privado de RAVEN por render
+
+`itaRavenProject.setMaterial` escribe cada material como `<slot>.mat` en la base
+de materiales del proyecto, y `setModelToFaces` escribe la geometría como
+`room_<N>_faces`. Por defecto ambas rutas son globales
+(`RavenDatabase\MaterialDatabase` y `RavenModels`), y los nombres de slot y la
+cantidad de caras se repiten entre escenas. Con `execution.num_workers > 1`,
+renders concurrentes de escenas distintas se sobrescribían materiales y
+geometría, lo que invalidaba audio y T30 (incidentes `rt30_conflict` en el
+analyzer).
+
+Cada render usa ahora un workspace privado derivado de su `project_name`:
+
+```text
+C:\ITASoftware\Raven\RavenInput\binascape_ws\<project_name>\
+  MaterialDatabase\   <- setPathMaterials del proyecto
+  RavenModels\        <- room_<N>_faces de salas poligonales (schema 2.0/3.0)
+```
+
+- `core/configure_raven_workspace.m` crea el workspace (descartando restos de un
+  intento anterior) y apunta la base de materiales a él.
+- `core/build_room_from_config.m` apunta el modelo al workspace antes de
+  `setModelToFaces` y falla con `BinaScape:Matlab:RavenModelOutsideWorkspace` si
+  la geometría termina fuera de él.
+- `core/cleanup_raven_workspace.m` elimina el workspace al terminar el render,
+  con éxito o con error. Un fallo de limpieza solo emite
+  `BinaScape:Matlab:RavenWorkspaceCleanupFailed`.
+- El metadata registra las rutas usadas en `summary.raven_workspace`
+  (`material_database_path`, `model_path`).
+
+Limitación: el modelo de la sala shoebox legacy (`setModelToShoebox`) sigue en
+la carpeta global; su nombre depende solo de las dimensiones, por lo que salas
+iguales escriben el mismo contenido. Sus materiales sí usan el workspace.
+Corridas renderizadas en paralelo antes de este cambio deben re-renderizarse.
+
+## Trazabilidad de las fuentes en el metadata
+
+El render estático conserva dos campos de texto del manifiesto en cada entrada
+de `summary.sources` del JSON exportado:
+
+- `identity_id`: nombre exacto de la carpeta ID inmediata bajo `audio_dir`.
+  Es una identidad opaca de esa base de datos, no el identificador de instancia
+  `source_id` ni necesariamente una persona.
+- `audio_relpath`: ruta de la grabación original relativa a `audio_dir`, con `/`.
+
+Ejemplo parcial de una entrada después de recortar el audio de entrada:
+
+```json
+{
+  "source_id": "src_0001",
+  "identity_id": "ID02",
+  "audio_relpath": "ID02/long.wav",
+  "audio_path": "C:/run/cropped_audio/scene_static_0001/src_0001__trim_1.wav"
+}
+```
+
+El orquestador deriva la identidad antes del recorte. MATLAB no la reconstruye
+a partir de la ruta temporal. Para un WAV directamente en `audio_dir`, la
+identidad es `""` y la ruta relativa es su nombre de archivo; no se extraen IDs
+del nombre. Los manifiestos anteriores que omiten uno o ambos campos siguen
+aceptándose: cada valor ausente se exporta como `""`.
+
+La extensión es aditiva para las salidas estáticas HRTF, HARTF y array circular
+cuando se guarda metadata. No cambia versiones de esquema, nombres de salida,
+procesamiento acústico ni selección de fuentes. Varias fuentes pueden compartir
+identidad; no hay balanceo ni restricciones de unicidad por ID. Los sidecars de
+Clarity mantienen su enlace al metadata de render, sin duplicar estos campos.
 
 ## Tests
 

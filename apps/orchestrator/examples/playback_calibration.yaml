@@ -1,0 +1,14 @@
+# Calibración de la cadena de reproducción para `export-presentation`.
+#
+# k_play_db.<canal>: dB SPL que produce RMS digital 1.0 en ese canal de la cadena medida
+# (interfaz + amplificador + audífonos + acoplador/oído artificial). Se obtiene
+# reproduciendo un tono de 1 kHz a -26 dBFS RMS por cada canal y midiendo su nivel:
+#     k_play_db = L_medido + 26
+# Ejemplo: el tono mide 74.0 dB SPL en el izquierdo y 72.0 en el derecho -> 100.0 y 98.0.
+# Repetir la medición si cambia el volumen, la interfaz o los audífonos.
+playback_id: lab_hd650
+k_play_db:
+  left: 100.0
+  right: 98.0
+# Ninguna versión de un render se exporta si algún canal superaría este nivel (dB SPL).
+max_spl_db: 85.0

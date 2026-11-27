@@ -1,15 +1,83 @@
 import json
+import wave
+from render_fixtures import simulate_matlab_process, write_render_metadata, write_render_wav, write_variant_fixture
 from pathlib import Path
 
 import pytest
 
+from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.output_index import load_clarity_index
 from acoustic_orchestrator.pipeline.output_paths import resolve_artifact_layout
-from acoustic_orchestrator.pipeline.render_pipeline import run_clarity_handoff
+from acoustic_orchestrator.pipeline.render_pipeline import render_static_scenes, run_clarity_handoff
 
 
 def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
+    layout = _prepare_completed_render_variant(config_path)
+
+    progress_events = []
+    first_summary = run_clarity_handoff(config_path, submit=False, progress=progress_events.append)
+    assert "ejecucion pendiente" in progress_events[-1].outcome
+    assert progress_events[-1].counters["planificados"] == 1
+    assert not any(e.stage == "Degradado" for e in progress_events)
+    first_manifest_rows = _read_jsonl(layout["clarity_jobs_path"])
+    assert not layout["degraded_output_root"].exists()
+
+    Path(first_manifest_rows[0]["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(first_manifest_rows[0]["expected_output_wav_path"]).write_text("wav", encoding="utf-8")
+    Path(first_manifest_rows[0]["expected_output_metadata_path"]).write_text(
+        _completed_clarity_result(first_manifest_rows[0]),
+        encoding="utf-8",
+    )
+
+    progress_events.clear()
+    second_summary = run_clarity_handoff(config_path, submit=False, progress=progress_events.append)
+    assert "No hay jobs" in progress_events[-1].outcome
+    assert progress_events[-1].counters["reutilizados"] == 1
+    records = load_clarity_index(layout["clarity_index_path"])
+
+    assert first_summary["planned_jobs"] == 1
+    assert len(first_manifest_rows) == 1
+    assert second_summary["planned_jobs"] == 0
+    assert second_summary["resumed_jobs"] == 1
+    assert second_summary["skipped_jobs"] == 1
+    assert second_summary["batch_status"] == "completed"
+    assert layout["clarity_jobs_path"].read_text(encoding="utf-8") == ""
+    assert len(records) == 1
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "skipped"
+    assert json.loads(Path(first_manifest_rows[0]["expected_output_metadata_path"]).read_text(encoding="utf-8")) == {
+        "schema_version": "1.0",
+        "job_id": first_manifest_rows[0]["job_id"],
+        "variant_id": first_manifest_rows[0]["variant_id"],
+        "scene_id": first_manifest_rows[0]["scene_id"],
+        "output_type": first_manifest_rows[0]["output_type"],
+        "hearing_profile_id": first_manifest_rows[0]["hearing_profile_id"],
+        "status": "completed",
+        "input_wav_path": first_manifest_rows[0]["input_wav_path"],
+        "input_render_metadata_path": first_manifest_rows[0]["input_render_metadata_path"],
+        "output_wav_path": first_manifest_rows[0]["expected_output_wav_path"],
+        "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+        **_processing_identity(first_manifest_rows[0]),
+    }
+
+
+@pytest.mark.parametrize(
+    ("resume_if_possible", "force_rerun"),
+    [
+        (False, False),
+        (True, True),
+    ],
+)
+def test_run_clarity_handoff_can_force_rerun_completed_outputs(
+    tmp_path: Path,
+    resume_if_possible: bool,
+    force_rerun: bool,
+) -> None:
+    config_path = _write_config(
+        tmp_path,
+        resume_if_possible=resume_if_possible,
+        force_rerun=force_rerun,
+    )
     layout = _prepare_completed_render_variant(config_path)
 
     first_summary = run_clarity_handoff(config_path, submit=False)
@@ -23,30 +91,76 @@ def test_run_clarity_handoff_prepare_then_resume_without_duplicate_jobs(tmp_path
     )
 
     second_summary = run_clarity_handoff(config_path, submit=False)
+    second_manifest_rows = _read_jsonl(layout["clarity_jobs_path"])
     records = load_clarity_index(layout["clarity_index_path"])
 
     assert first_summary["planned_jobs"] == 1
     assert len(first_manifest_rows) == 1
-    assert second_summary["planned_jobs"] == 0
-    assert second_summary["resumed_jobs"] == 1
-    assert second_summary["skipped_jobs"] == 1
-    assert second_summary["batch_status"] == "completed"
-    assert layout["clarity_jobs_path"].read_text(encoding="utf-8") == ""
+    assert second_summary["planned_jobs"] == 1
+    assert second_summary["resumed_jobs"] == 0
+    assert second_summary["batch_status"] == "planned"
+    assert len(second_manifest_rows) == 1
+    assert second_manifest_rows[0]["job_id"] == first_manifest_rows[0]["job_id"]
     assert len(records) == 1
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "skipped"
-    assert json.loads(Path(first_manifest_rows[0]["expected_output_metadata_path"]).read_text(encoding="utf-8")) == {
-        "schema_version": "1.0",
-        "job_id": first_manifest_rows[0]["job_id"],
-        "variant_id": first_manifest_rows[0]["variant_id"],
-        "scene_id": first_manifest_rows[0]["scene_id"],
-        "output_type": first_manifest_rows[0]["output_type"],
-        "hearing_profile_id": first_manifest_rows[0]["hearing_profile_id"],
-        "status": "completed",
-        "input_wav_path": first_manifest_rows[0]["input_wav_path"],
-        "input_render_metadata_path": first_manifest_rows[0]["input_render_metadata_path"],
-        "output_wav_path": first_manifest_rows[0]["expected_output_wav_path"],
-        "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
-    }
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "planned"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["resumed"] is False
+
+
+def test_render_static_scenes_auto_submits_clarity_for_enabled_static_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _write_config(
+        tmp_path,
+        backend_project_path="./clarity-backend",
+        resume_if_possible=False,
+        force_rerun=True,
+        auto_submit=True,
+        save_render_metadata=True,
+    )
+    layout = resolve_artifact_layout(
+        load_config(config_path).outputs,
+        "sim_test",
+    )
+    (tmp_path / "hearing_profiles.yaml").write_text(_hearing_profiles_yaml(), encoding="utf-8")
+    submissions: list[list[dict[str, object]]] = []
+
+    def fake_render(manifest_path: Path, matlab_executable: str = "matlab", **kwargs) -> None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        write_render_wav(manifest)
+        write_render_metadata(manifest)
+
+    def fake_submit(runner, manifest_path: Path, **kwargs):
+        jobs = _read_jsonl(manifest_path)
+        submissions.append(jobs)
+        job = jobs[0]
+        Path(job["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(job["expected_output_wav_path"]).write_text("wav", encoding="utf-8")
+        Path(job["expected_output_metadata_path"]).write_text(
+            _completed_clarity_result(job),
+            encoding="utf-8",
+        )
+        return {
+            "status": "submitted",
+            "command": ["uv", "run", "--project", str(runner.backend_project_path), runner.entrypoint, "run-manifest", manifest_path.as_posix()],
+            "message": "submitted",
+        }
+
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.render_pipeline.render_manifest_with_matlab", simulate_matlab_process(fake_render))
+    monkeypatch.setattr("acoustic_orchestrator.pipeline.clarity_handoff.submit_clarity_manifest", fake_submit)
+
+    _, summary = render_static_scenes(config_path)
+    records = load_clarity_index(layout["clarity_index_path"])
+
+    assert len(submissions) == 1
+    assert len(submissions[0]) == 1
+    assert submissions[0][0]["job_id"] == "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"
+    assert summary["clarity"] is not None
+    assert summary["clarity"]["auto_submit"] is True
+    assert summary["clarity"]["submitted"] is True
+    assert summary["clarity"]["completed_jobs"] == 1
+    assert summary["clarity"]["resumed_jobs"] == 0
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
 
 
 def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
@@ -57,7 +171,7 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
     layout = _prepare_completed_render_variant(config_path)
     attempts = {"count": 0}
 
-    def fake_submit(runner, manifest_path: Path):
+    def fake_submit(runner, manifest_path: Path, **kwargs):
         attempts["count"] += 1
         jobs = _read_jsonl(manifest_path)
         if attempts["count"] == 1:
@@ -102,6 +216,7 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
                     "input_render_metadata_path": jobs[0]["input_render_metadata_path"],
                     "output_wav_path": jobs[0]["expected_output_wav_path"],
                     "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                    **_processing_identity(jobs[0]),
                 }
             ),
             encoding="utf-8",
@@ -123,12 +238,12 @@ def test_run_clarity_handoff_retry_reuses_same_job_without_duplicate_records(
     assert first_summary["failed_jobs"] == 1
     assert first_summary["batch_status"] == "failed"
     assert len(first_records) == 1
-    assert first_records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "failed"
+    assert first_records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "failed"
     assert second_summary["submitted"] is True
     assert second_summary["completed_jobs"] == 1
     assert second_summary["batch_status"] == "completed"
     assert len(second_records) == 1
-    assert second_records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "completed"
+    assert second_records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
     assert attempts["count"] == 2
 
 
@@ -143,7 +258,7 @@ def test_run_clarity_handoff_marks_mixed_backend_results_as_partial_batch(
         encoding="utf-8",
     )
 
-    def fake_submit(runner, manifest_path: Path):
+    def fake_submit(runner, manifest_path: Path, **kwargs):
         jobs = _read_jsonl(manifest_path)
         completed_job = next(job for job in jobs if job["hearing_profile_id"] == "mild_loss")
         failed_job = next(job for job in jobs if job["hearing_profile_id"] == "severe_loss")
@@ -188,18 +303,18 @@ def test_run_clarity_handoff_marks_mixed_backend_results_as_partial_batch(
     assert summary["completed_jobs"] == 1
     assert summary["failed_jobs"] == 1
     assert summary["batch_status"] == "partial"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["status"] == "completed"
-    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["status"] == "failed"
-    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["output_dir"] != records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["output_dir"]
-    assert Path(records["clarity__scene_static_0001__binaural_hrtf__mild_loss"]["output_dir"]).parts[-2:] == ("binaural_hrtf", "mild_loss")
-    assert Path(records["clarity__scene_static_0001__binaural_hrtf__severe_loss"]["output_dir"]).parts[-2:] == ("binaural_hrtf", "severe_loss")
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["status"] == "completed"
+    assert records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["status"] == "failed"
+    assert records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["output_dir"] != records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["output_dir"]
+    assert Path(records["clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg"]["output_dir"]).parts[-3:] == ("msbg", "binaural_hrtf", "mild_loss")
+    assert Path(records["clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg"]["output_dir"]).parts[-3:] == ("msbg", "binaural_hrtf", "severe_loss")
     assert json.loads(
-        Path(layout["degraded_output_root"] / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.json").read_text(
+        Path(layout["degraded_output_root"] / "msbg" / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.json").read_text(
             encoding="utf-8"
         )
     ) == {
         "schema_version": "1.0",
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -222,10 +337,7 @@ def _prepare_completed_render_variant(config_path: Path) -> dict[str, Path]:
     layout["render_index_path"].parent.mkdir(parents=True, exist_ok=True)
     variant_record = _completed_variant_record(layout)
     layout["render_index_path"].write_text(json.dumps(variant_record) + "\n", encoding="utf-8")
-    Path(variant_record["rendered_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(variant_record["rendered_wav_path"]).write_text("wav", encoding="utf-8")
-    Path(variant_record["render_metadata_path"]).parent.mkdir(parents=True, exist_ok=True)
-    Path(variant_record["render_metadata_path"]).write_text("{}", encoding="utf-8")
+    write_variant_fixture(variant_record, metadata=True)
     Path(config.hearing_degradation.hearing_profiles_path).write_text(_hearing_profiles_yaml(), encoding="utf-8")
     return layout
 
@@ -235,7 +347,15 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Path:
+def _write_config(
+    tmp_path: Path,
+    backend_project_path: str | None = None,
+    *,
+    resume_if_possible: bool = True,
+    force_rerun: bool = False,
+    auto_submit: bool = False,
+    save_render_metadata: bool = False,
+) -> Path:
     artifact_root = tmp_path / "artifacts"
     assets_root = tmp_path / "assets"
     hearing_profiles = tmp_path / "hearing_profiles.yaml"
@@ -254,9 +374,9 @@ def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Pa
             "  num_simulations: 1\n"
             "  num_workers: 1\n"
             "  overwrite_existing: true\n"
-            "  resume_if_possible: true\n"
+            f"  resume_if_possible: {str(resume_if_possible).lower()}\n"
             "  save_scene_manifest: true\n"
-            "  save_render_metadata: false\n"
+            f"  save_render_metadata: {str(save_render_metadata).lower()}\n"
             "raven:\n"
             f"  base_rpf_file: {tmp_path.as_posix()}/base_room.rpf\n"
             "render:\n"
@@ -265,7 +385,7 @@ def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Pa
             "  one_receiver_per_scene: true\n"
             "  position_strategy:\n"
             "    type: random_uniform_inside_room\n"
-            "    margin_m: {x: 0.1, y: 0.1, z: 0.1}\n"
+            "    margin_m: {x: 0.5, y: 0.1, z: 0.5}\n"
             "    fixed_height_m: {min: 1.2, max: 1.3}\n"
             "  orientation_strategy:\n"
             "    type: random_yaw\n"
@@ -275,6 +395,11 @@ def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Pa
             "receiver_outputs:\n"
             f"  binaural_hrtf:\n    enabled: true\n    ir_catalog_path: {assets_root.as_posix()}/hrtf\n    file_pattern: '*.daff'\n    output_subdir: binaural_hrtf\n    num_channels: 2\n    required: true\n"
             "room_sampling:\n"
+            "  reverberation:\n"
+            "    metric: estimated_rt30_s\n    estimator: sabine\n    estimator_version: sabine_polygon_octaves_v4\n    aggregation: arithmetic_mean\n"
+            "    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]\n"
+            "    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}\n"
+            "    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}\n"
             "  dimensions_m:\n"
             "    length: {min: 4.0, max: 4.5}\n"
             "    width: {min: 3.0, max: 3.5}\n"
@@ -320,7 +445,8 @@ def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Pa
             "  runner:\n"
             f"{backend_project_line}"
             "    entrypoint: clarity-backend\n"
-            "    auto_submit: false\n"
+            f"    auto_submit: {str(auto_submit).lower()}\n"
+            f"    force_rerun: {str(force_rerun).lower()}\n"
             "    use_uv: true\n"
         ),
         encoding="utf-8",
@@ -329,7 +455,11 @@ def _write_config(tmp_path: Path, backend_project_path: str | None = None) -> Pa
     (assets_root / "hrtf").mkdir(parents=True, exist_ok=True)
     (assets_root / "hrtf" / "sample.daff").write_text("daff", encoding="utf-8")
     (assets_root / "audio").mkdir(parents=True, exist_ok=True)
-    (assets_root / "audio" / "sample.wav").write_text("wav", encoding="utf-8")
+    with wave.open(str(assets_root / "audio" / "sample.wav"), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(44100)
+        audio.writeframes(bytes(200 * 2))
     for material_id in ["brick", "wood", "plaster"]:
         material_dir = assets_root / "materials" / material_id
         material_dir.mkdir(parents=True, exist_ok=True)
@@ -404,5 +534,14 @@ def _completed_clarity_result(job: dict[str, object]) -> str:
             "input_render_metadata_path": job["input_render_metadata_path"],
             "output_wav_path": job["expected_output_wav_path"],
             "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+            **_processing_identity(job),
         }
     )
+
+
+def _processing_identity(job: dict) -> dict:
+    return {
+        "processor": {"name": job["processor"]},
+        "processing_signature": job["processing_signature"],
+        "calibration": job["calibration"],
+    }

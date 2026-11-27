@@ -26,6 +26,8 @@ function ctx = build_sources_from_config(ctx)
         'source_id', '', ...
         'event_type', '', ...
         'audio_path', '', ...
+        'identity_id', '', ...
+        'audio_relpath', '', ...
         'directivity_path', '', ...
         'position_m', [], ...
         'orientation_deg', struct('yaw', 0, 'pitch', 0, 'roll', 0), ...
@@ -41,11 +43,15 @@ function ctx = build_sources_from_config(ctx)
         src_cfg = cfg.sources(i);
 
         % Posición
-        pos = double(src_cfg.position_m(:)).';
-
-        % Orientación -> vectores
         ori = src_cfg.orientation_deg;
-        [viewVec, upVec] = orientation_deg_to_vectors(src_cfg.orientation_deg.pitch, src_cfg.orientation_deg.yaw);
+        if isfield(cfg, 'schema_version') && ...
+                any(strcmp(char(string(cfg.schema_version)), {'2.0', '3.0'}))
+            [pos, viewVec, upVec] = transform_schema2_pose_to_raven( ...
+                src_cfg.position_m, ori);
+        else
+            pos = double(src_cfg.position_m(:)).';
+            [viewVec, upVec] = orientation_deg_to_vectors(ori.pitch, ori.yaw);
+        end
 
         % Nombre visible en RAVEN
         src_name = char(string(src_cfg.source_id));
@@ -80,6 +86,8 @@ function ctx = build_sources_from_config(ctx)
         sources(i).source_id = char(string(src_cfg.source_id));
         sources(i).event_type = char(event_type);
         sources(i).audio_path = char(audio_path);
+        sources(i).identity_id = optional_source_string(src_cfg, 'identity_id');
+        sources(i).audio_relpath = optional_source_string(src_cfg, 'audio_relpath');
         sources(i).directivity_path = char(directivity_path);
         sources(i).position_m = pos;
         sources(i).orientation_deg = ori;
@@ -117,4 +125,11 @@ function ctx = build_sources_from_config(ctx)
     ctx.sourceUpVectors = sourceUpVectors;
     ctx.sourceDirectivityPaths = sourceDirectivityPaths;
     ctx.n_sources = n_sources;
+end
+
+function value = optional_source_string(source, field_name)
+    value = '';
+    if isfield(source, field_name) && ~isempty(source.(field_name))
+        value = char(string(source.(field_name)));
+    end
 end

@@ -1,0 +1,5 @@
+[
+  "matlab",
+  "-batch",
+  "addpath(genpath('<REPO>/apps/matlab')); run_raven_static_render('<TMP>/attempts/<ATTEMPT_ID>/input_manifest.json', struct('attempt_id', '<ATTEMPT_ID>', 'events_path', '<TMP>/diag/<ATTEMPT_ID>/events.jsonl'), struct('attempt_id', '<ATTEMPT_ID>', 'variant_id', 'scene_static_0001__circular_array', 'manifest_sha256', '<MANIFEST_SHA256>', 'completion_path', '<TMP>/attempts/<ATTEMPT_ID>/completion.json', 'failure_path', '<TMP>/attempts/<ATTEMPT_ID>/failure.json'));"
+]

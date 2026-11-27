@@ -1,0 +1,136 @@
+# Output Analyzer
+
+> Revision scope: this guide describes the implemented analyzer in
+> `update-fix-output-analyzer` at `1a3b1c1`. The requested audit baseline is
+> `develop` at `05f9b27`, whose analyzer does not yet contain the same schema
+> checks, unique populations, per-frequency RT30 analysis or embedded SVG report.
+> See the [documentation audit](../../docs/maintenance/documentation-audit.md)
+> for the revision comparison. These differences do not reopen historical PRDs.
+
+`output-analyzer` generates an auditable metadata-only report for a run directory. It supports **exactly schema 3.0** for scene manifests and render sidecars. Explicit older/future versions are excluded, and missing versions are incidents. Degraded metadata supports its producer schema 1.0. Index rows have no scene schema requirement; their fields follow their own current producers.
+
+## Usage
+
+```powershell
+uv run --project apps/output-analyzer output-analyzer analyze outputs/sim_001
+uv run --project apps/output-analyzer output-analyzer analyze outputs/sim_001 --output-dir outputs/sim_001/analysis
+```
+
+The default destination is `<run-dir>/analysis`. The root must be accessible and the destination writable. Malformed/incomplete metadata yields a partial report; no valid observations yields a report with incidents and an unavailable-data state. Infrastructure failures remain operational errors.
+
+## Inputs and limits
+
+- `metadata/manifests/scene/*.json`
+- `output_audio/render/**/*__render.json` (including MATLAB singleton `sources` objects)
+- `output_audio/degraded/**/*.json` (current layout `degraded/{processor}/{output_type}/{hearing_profile_id}/`
+  and the previous `degraded/{output_type}/{hearing_profile_id}/`)
+- `metadata/indexes/render_index.jsonl`
+- `metadata/indexes/clarity_index.jsonl`
+- `metadata/indexes/scene_sampling_failures.jsonl`
+
+Only metadata files are opened. WAV contents and referenced audio, material and HRTF assets are never opened. A metadata-only copy of a run is sufficient. Missing optional indexes do not imply zero failures or complete coverage. Expected totals are available only when supplied by authoritative configuration/indexes.
+
+Render identity accepts `output_type` with legacy `hrtf_id` fallback. Circular-array
+sidecars and nullable receiver IR index paths are supported without inventing an
+HRTF identity: array rows use `output_type: circular_array`, with HRTF fields empty.
+This is metadata compatibility, not microphone-level analysis or beamforming.
+
+### Degraded records and processors
+
+A degraded record is identified by `variant_id`, `hearing_profile_id` and processor, so the
+`msbg` and `whis` sidecars of the same render and profile are two records, not a duplicate. The
+processor comes from the sidecar's `processor.name`. Sidecars without it (runs produced before
+per-processor directories) are read as `msbg` with `legacy: true`; such runs still produce the same
+degraded charts as before.
+
+Each degraded record exports `processor`, `legacy`, `effective_scale_db_spl` (K, dB SPL of digital
+RMS 1.0), `presentation_level_db_spl`, `calibration_mode`, `left_leq_db_spl`, `right_leq_db_spl` and
+`outer_middle_ear` when the sidecar declares them (null otherwise), besides the existing loss fields.
+`summary.json` adds `degraded_processors`, `degraded_statuses_by_processor` and
+`degraded_legacy_count`.
+
+## Report and geometry
+
+`report.html` is self-contained: all charts are inline SVG and no network or sibling images are required. Separate SVG files remain available under `images/`.
+
+The report has one general-parameters section, three spatial groups (`shoebox`, `l_shape`, `trapezoid`), global acoustics/source analysis, and metadata coverage/quality. General parameters retain distinct observed values and their frequencies. Each geometry has an independent manual carousel with one exact floor plan per scene, including concavity and offsets and equal axis scales. Previous/Next, direct scene selection and Left/Right/Home/End keyboard controls navigate without autoplay or wrapping. Empty and single-scene groups disable navigation. Cards show the scene identity, its associated HRTF/variant identities as one inline list, the floor plan, the RT30 per-band table and a compact table of receiver/source positions (m), without duplicating scenes. A square marks the receiver and colored circles mark sources/events. Full pose provenance and declared margins are in the `scenes` and `sources` exports.
+
+### What the report shows
+
+The report is a reading document; record-level audit data lives only in the exports listed in its Data exports section.
+
+- **Hidden charts**: `hist_room_length`, `hist_room_width` (bounding extents), `rt30_sabine_estimate`, `rt30_raven_rpf_gett30` (all bands pooled; superseded by the RT30 scene-mean charts), `sampling_attempts` (duplicates `scene_attempt`), `sampling_requested_bin` (shown as target marks on the scene-mean histograms), `surface_area` and `hist_employed_hrtf` (replaced by an HRTF coverage table sorted by variant count). Their `metrics.json` rows are unchanged.
+- **Constant metrics** (one distinct observed value) are shown as a single summary line with value, unit and n; no SVG is written.
+- **Empty metrics** (n=0) are listed as Not available with their excluded count; no SVG is written. RT30 scene-mean charts are exempt and keep their explicit No data SVG.
+- **No raw record tables**: RT30 records, consolidated values, comparisons, pairs, matched means, coverage, materials, sampling and render-variant records are not embedded. Incidents are capped at 50 rows with the total count and a pointer to `incidents.jsonl`.
+- Charts not drawn are removed from `images/` when the output directory is reused.
+
+Public coordinates are `[x,y,z]`, with Y vertical and `[x,z]` in the floor plane. Manifest poses take precedence. Documented RAVEN fallback converts `[x,y,z]` to public `[x,y,-z]`; unknown frames are excluded. Area is computed from the actual polygon and volume is area × height. X/Z dimensions are bounding extents, never a substitute for real area. Missing yaw does not become zero; coincident poses retain distance zero and have undefined angles.
+
+RT30 Sabine estimates and RAVEN reported T30 are metadata, not WAV measurements. Comparisons join explicit central frequencies per scene. Differences are RAVEN minus Sabine; pair summaries use the same bands. Extra RAVEN bands remain in method distributions and exports. Equivalent variants are averaged once per scene/frequency. A conflict excludes only the affected RAVEN band and its comparison; other bands and independent Sabine estimates remain available. Raw variant/frequency records and consolidated scene/frequency means, extrema, spread, standard deviation, contributing/excluded variant counts and provenance remain auditable. No interpolation or array-index pairing is performed.
+
+## Export observation units
+
+Complete scene means use each manifest's explicit `mean_bands_hz`, not all reported bands or render-variant weighting. `rt30_scene_means` contains one row per unique scene with selected frequencies, per-method complete means, valid-band counts, unavailable frequencies, exclusion reasons and metadata provenance. Every selected band must be finite and positive. Missing/invalid/duplicate selections make both means unavailable; a missing or conflicted RAVEN band does not suppress an independently complete Sabine mean. Extra bands never enter these means. Existing `summary.json` → `rt30_matched_means` and room-card means still use available matched pairs and can be partial; their semantics are unchanged.
+
+Scene-distribution metrics group identical selected-frequency sets without pooling different mean definitions. Shared interval edges and planned targets come from a single unambiguous sampling batch only when its manifest coverage and accepted scene count match the whole population and there is one valid frequency group. Targets are validated separately from edges. Missing targets keep valid configured edges; unavailable/ambiguous edges use 12 deterministic intervals covering the union of both method populations (constant values receive symmetric padding). No usable means produces an unavailable state, not an invented distribution. Multiple batches/groups suppress unsupported sampling references rather than inferring membership or rereading current YAML.
+
+For example, eight intervals from 0.2 to 1.0 s with a planned quota of 125 scenes per interval describe a **Sabine sampling target**, not observed counts and not a RAVEN acceptance limit. Observed counts are recomputed from scene means. The first seven intervals are left-closed/right-open; the last includes its maximum. Explicit underflow/overflow counts preserve every valid mean outside configured boundaries. New `rt30_scene_mean_` metrics retain observations, exclusions, interval edges/closure/counts, edge source and target provenance for reconstruction.
+
+All tabular populations below have `.json`, `.jsonl`, and `.csv` exports. JSON/JSONL preserve nested fields and nulls; CSV is a flat transport with serialized nested values. Null/missing values mean unavailable, never an imputed zero.
+
+| File stem | Observation unit |
+|---|---|
+| `scenes` | Unique scene (`scene_id`), independent of HRTF count |
+| `sources` | Unique scene/source identity |
+| `render_scenes` | Unique scene/HRTF render variant; retained historical filename **does not mean unique scenes** |
+| `joined_render_sources` | Source–variant row; retained historical filenames, not unique sources |
+| `degraded_metadata` | Unique degraded record (variant, hearing profile, processor) under the current producer contract |
+| `rt30_records` | Individual method/frequency values with scene/variant provenance and comparison eligibility |
+| `rt30_consolidated` | One RAVEN scene/frequency estimate, dispersion, variants and exclusion cause; no HRTF weighting |
+| `rt30_comparisons` | All candidate scene/frequency comparisons, including excluded pairs and reasons |
+| `rt30_pairs` | Consolidated scene/frequency pair, with Sabine, RAVEN and difference in seconds |
+| `rt30_scene_means` | Unique scene, complete selected-band means per method, exclusions and provenance; also retained in summary.json |
+| `materials` | Scene/surface material and area, walls identified by `wall_ids` |
+| `sampling_records` | Available sampling metadata/failure observations |
+| `sampling_failures` | Parsed rows from the optional sampling failure index |
+| `sampling_batches` | Unique batches, not one repeated batch per manifest |
+| `coverage` | Scene/HRTF coverage and available authoritative expectations |
+| `incidents` | Category/entity/field/path/detail for an affected observation |
+| `metrics` | Chart metric, unit, population, valid/excluded counts and contributing values/identities |
+
+`summary.json` contains run status, distinct populations, incidents and chart denominators. `general_parameters.json` contains the available grouped configuration and observed parameter distributions. Chart observations in `metrics.json` allow recomputing distributions without reading HTML; original normalized records retain full provenance.
+
+An excluded count refers to the named normalized population and field. Documents rejected before normalization are reported separately in incidents. Category totals may overlap: use the distinct affected-entity total from the summary rather than summing categories. Event absence is excluded from event categories. Unknown expected coverage is unavailable, never 0% or 100%.
+
+The quality section charts materials, sampling attempts and obtained bins, auditory profiles/status/common-band asymmetry (one chart per processor, e.g. `degraded_status_msbg` and `degraded_status_whis`, when a run has more than one; the historical `degraded_*` charts otherwise) and declared background noise (subject to the constant/empty rules), plus incident counts and a bounded incident table; HRTF reconciliation and sampling/batch/failure records are in their exports. Missing metadata displays unavailable coverage; no effective SNR or audio level is inferred.
+
+## Validation
+
+```powershell
+uv run --project apps/output-analyzer --extra dev pytest apps/output-analyzer/tests
+```
+
+Tests use small current-contract fixtures and do not require MATLAB, RAVEN or WAV files. The optional real integration reference `outputs/e2e_raven_rt30_binaural_20260924` should report 100 unique scenes, 200 render variants and 32/32/36 scenes by geometry; those numbers are not hardcoded expectations for other runs.
+
+Generic geometry/identity equivalence retains tolerance 1e-8. RT30 uses separate shared constants `RT30_ABS_TOL_S = 1e-6` seconds and `RT30_REL_TOL = 1e-6` (dimensionless): every valid variant pair must satisfy `abs(a-b) <= max(RT30_ABS_TOL_S, RT30_REL_TOL * max(abs(a), abs(b)))`. This numerical resolution (one microsecond/one part per million) is not certified simulator precision or an acoustically meaningful threshold. It is fixed, not fitted per run. Constants and units are included in summary/general-parameter exports and consolidated rows. Numerical equivalence does not prove determinism. Sabine comparison eligibility follows explicit mean_bands_hz; method distributions retain all available explicit bands, including additional RAVEN bands.
+
+Every exported/embedded SVG includes a visible legend: room contour and actor/event shapes/colors, histogram series and observation counts, categorical colors, RT30 frequencies/method/sign, or (scene-mean charts only) an unavailable-data state with valid/excluded counts and units. Legends wrap inside the SVG canvas.
+
+The verbose `render_configuration` block is omitted entirely from HTML presentation; other general parameters are shown as readable text (`value (n=count)` or `key: value`). It remains intact in `general_parameters.json` and audit exports. No population changes follow from hiding this field.
+
+CLI quality diagnostics summarize categories, affected scenes/pairs and a bounded identity sample. Consult `incidents.jsonl` and `rt30_comparisons.jsonl` for complete causal details; derived exclusions are not independent failures.
+
+Each room card in Positions by geometry includes a frequency table for Sabine RT30 and consolidated RAVEN T30 (seconds). Comparable arithmetic means reuse the same valid selected frequency pairs, with the frequency list and valid/excluded counts. Additional bands remain visible but never enter those means. Missing or conflicted values show Not available with a reason, preserving the other method. Original values, variant support, spread, causes and provenance are in the `rt30_records`, `rt30_consolidated`, `rt30_comparisons` and `incidents` exports. The table moves with its room card using every carousel control.
+
+## Documentation and pipeline context
+
+This is an optional analysis application after artifact generation. It can read
+existing run metadata without invoking the renderer or hearing-loss backend.
+
+- [Documentation index](../../docs/README.md)
+- [Shared artifact contracts](../../docs/architecture/contracts.md)
+- [Development and testing](../../docs/development/testing.md)
+- [Orchestrator](../orchestrator/README.md)
+- [MATLAB renderer](../matlab/README.md)
+- [Clarity backend](../clarity-backend/README.md)

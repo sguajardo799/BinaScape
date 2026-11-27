@@ -2,6 +2,76 @@ function tests = test_validate_static_scene_config
     tests = functiontests(localfunctions);
 end
 
+function testArrayOnlyAndMixedOutputSelection(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.position_m = [2 1.5 1.5];
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver = rmfield(cfg.receiver, 'hrtf');
+    cfg.receiver.hrtfs = struct([]);
+    normalized = validate_static_scene_config(cfg);
+    verifyEmpty(testCase, normalized.receiver.hrtfs);
+    verifyEqual(testCase, normalized.render.outputs.output_type, 'circular_array');
+    verifyEmpty(testCase, normalized.render.outputs.hrtf_id);
+    cfg.receiver.hrtfs = struct('hrtf_id', 'binaural_hrtf', 'hrtf_path', 'a.daff');
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, {normalized.render.outputs.output_type}, {'binaural_hrtf', 'circular_array'});
+    verifyEqual(testCase, normalized.render.outputs(2).wav_path, 'out__circular_array.wav');
+    cfg.render.active_output_type = 'circular_array';
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, numel(normalized.render.outputs), 1);
+    verifyEqual(testCase, normalized.render.outputs.wav_path, 'out.wav');
+    cfg.render.active_output_type = 'missing';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testArrayMicrophonesRequireContainmentWithoutCenterWallMargin(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.position_m = [2 1.5 0.51];
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, normalized.receiver.circular_array.microphones(2).position_m(3), 0.46, 'AbsTol', 1e-10);
+
+    % The receiver center and sources still require the existing 0.5 m margin.
+    too_close = cfg;
+    too_close.receiver.position_m(3) = 0.49;
+    too_close.receiver.circular_array = make_array(too_close.receiver.position_m);
+    verifyThrowsAny(testCase, @() validate_static_scene_config(too_close));
+    too_close = cfg;
+    too_close.sources.position_m = [2 1 0.49];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(too_close));
+
+    % A valid center must not permit a microphone outside the room.
+    cfg.receiver.circular_array.radius_m = 0.6;
+    for k = 1:4
+        cfg.receiver.circular_array.microphones(k).position_m = cfg.receiver.position_m + ...
+            0.6 * [cosd(90*(k-1)), 0, -sind(90*(k-1))];
+    end
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testRejectsInvalidArrayGeometryAndOrder(testCase)
+    cfg = make_schema3_cfg();
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.microphones(1).channel_index = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.microphones(1).position_m(2) = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+    cfg.receiver.circular_array = make_array(cfg.receiver.position_m);
+    cfg.receiver.circular_array.radius_m = NaN;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function array = make_array(center)
+    microphones = repmat(struct('microphone_index', 0, 'channel_index', 0, 'position_m', []), 1, 4);
+    for k = 1:4
+        microphones(k) = struct('microphone_index', k-1, 'channel_index', k, ...
+            'position_m', center + 0.05 * [cosd(90*(k-1)), 0, -sind(90*(k-1))]);
+    end
+    array = struct('output_type', 'circular_array', 'num_microphones', 4, 'radius_m', 0.05, ...
+        'center_m', center, 'yaw_deg', 0, 'microphones', microphones);
+end
+
 function testCanonicalPluralList(testCase)
     cfg = make_base_cfg();
     cfg.receiver = rmfield(cfg.receiver, 'hrtf');
@@ -97,6 +167,105 @@ function testNormalizesRoomMaterialFiles(testCase)
     verifyTrue(testCase, isfile(normalized.room.material_files.ceiling.material_path));
 end
 
+function testNormalizesSchema2PolygonRoom(testCase)
+    cfg = make_schema2_cfg();
+
+    normalized = validate_static_scene_config(cfg);
+
+    verifyEqual(testCase, normalized.schema_version, '2.0');
+    verifyEqual(testCase, normalized.room.geometry.type, 'trapezoid');
+    verifyEqual(testCase, normalized.room.geometry.height_m, 3.0);
+    verifyEqual(testCase, normalized.room.geometry.footprint_vertices_m, ...
+        [0 0; 5 0; 4 3; 1 3]);
+    verifyEqual(testCase, normalized.room.geometry.wall_ids, ...
+        {'wall_001', 'wall_002', 'wall_003', 'wall_004'});
+    verifyFalse(testCase, isfield(normalized.room, 'dimensions_m'));
+end
+
+function testSchema2RejectsMixedLegacyDimensionsAndInvalidGeometry(testCase)
+    cfg = make_schema2_cfg();
+    cfg.room.dimensions_m = [4 3 3];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.geometry.footprint_vertices_m = [0 0; 4 3; 4 0; 0 3];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.geometry.wall_ids{4} = 'wall_003';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema2RejectsMissingOrExtraMaterialSurface(testCase)
+    cfg = make_schema2_cfg();
+    cfg.room.materials = rmfield(cfg.room.materials, 'wall_004');
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.room.material_files.unexpected = cfg.room.material_files.floor;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema2RejectsReceiverOrSourceOutsideFootprint(testCase)
+    cfg = make_schema2_cfg();
+    cfg.receiver.position_m = [0.25 1.5 1.5];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema2_cfg();
+    cfg.sources.position_m = [4.8 1.0 2.8];
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testNormalizesSchema3AcousticAndReverberationContract(testCase)
+    cfg = make_schema3_cfg();
+
+    normalized = validate_static_scene_config(cfg);
+
+    verifyEqual(testCase, normalized.schema_version, '3.0');
+    verifyEqual(testCase, normalized.reverberation_sampling.estimator_version, ...
+        'sabine_polygon_octaves_v4');
+    verifyEqual(testCase, normalized.reverberation_sampling.mean_bands_hz, ...
+        [125 250 500 1000 2000 4000 8000]);
+    verifyEqual(testCase, ...
+        normalized.room.acoustic_surfaces.wall_001.treatment.catalog_version, 1);
+end
+
+function testSchema3RequiresReverberationSampling(testCase)
+    cfg = make_schema3_cfg();
+    cfg = rmfield(cfg, 'reverberation_sampling');
+
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema3RejectsUnsupportedReverberationContract(testCase)
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.estimator_version = 'sabine_polygon_octaves_v5';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.absorption_mix_model = 'nonlinear';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.reverberation_sampling.proposal_strategy_version = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
+function testSchema3RejectsUnsupportedOrIncompleteSurfaceTreatment(testCase)
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.wall_001.treatment.catalog_version = 2;
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.wall_001.treatment = ...
+        rmfield(cfg.room.acoustic_surfaces.wall_001.treatment, 'coverage');
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+
+    cfg = make_schema3_cfg();
+    cfg.room.acoustic_surfaces.floor.treatment.preset_id = 'broadband_light';
+    verifyThrowsAny(testCase, @() validate_static_scene_config(cfg));
+end
+
 function testNormalizesOptionalSourceDirectivityPath(testCase)
     cfg = make_base_cfg();
     cfg.sources.directivity_path = "C:/directivity/source-pattern.daff";
@@ -131,6 +300,28 @@ function testNormalizesTargetDuration(testCase)
     normalized = validate_static_scene_config(cfg);
 
     verifyEqual(testCase, normalized.render.target_duration_s, 10);
+end
+
+function testNormalizesMixedSourceProvenanceAndLegacyDefaults(testCase)
+    cfg = make_base_cfg();
+    grouped = cfg.sources;
+    grouped.identity_id = "ID02";
+    grouped.audio_relpath = "ID02/long.wav";
+    flat = cfg.sources;
+    flat.source_id = 'src_flat';
+    flat.identity_id = '';
+    flat.audio_relpath = "clip_ID13.wav";
+    legacy = cfg.sources;
+    legacy.source_id = 'src_legacy';
+    cfg.sources = {grouped, flat, legacy};
+    normalized = validate_static_scene_config(cfg);
+    verifyEqual(testCase, normalized.sources(1).identity_id, 'ID02');
+    verifyEqual(testCase, normalized.sources(1).audio_relpath, 'ID02/long.wav');
+    verifyEqual(testCase, normalized.sources(2).identity_id, '');
+    verifyEqual(testCase, normalized.sources(2).audio_relpath, 'clip_ID13.wav');
+    verifyEqual(testCase, normalized.sources(3).identity_id, '');
+    verifyEqual(testCase, normalized.sources(3).audio_relpath, '');
+    verifyEqual(testCase, normalized.schema_version, cfg.schema_version);
 end
 
 function testDefaultsTrimReverbTailToFalse(testCase)
@@ -245,6 +436,77 @@ function cfg = make_base_cfg()
         'orientation_deg', struct('yaw', 0.0, 'pitch', 0.0, 'roll', 0.0));
     cfg.render = struct('sample_rate_hz', 44100, 'output_wav_path', 'out.wav', ...
         'output_metadata_path', 'out.json', 'seed', 123);
+end
+
+function cfg = make_schema2_cfg()
+    cfg = make_base_cfg();
+    cfg.schema_version = '2.0';
+    legacy_room = cfg.room;
+    wall_ids = {'wall_001', 'wall_002', 'wall_003', 'wall_004'};
+    legacy_surfaces = {'north_wall', 'south_wall', 'east_wall', 'west_wall'};
+    room = struct();
+    room.geometry = struct( ...
+        'type', 'trapezoid', ...
+        'height_m', 3.0, ...
+        'footprint_vertices_m', [0 0; 5 0; 4 3; 1 3], ...
+        'wall_ids', {wall_ids}, ...
+        'generated_from', struct('base_a_m', 5.0, 'base_b_m', 3.0));
+    room.materials = struct();
+    room.material_files = struct();
+    for iWall = 1:numel(wall_ids)
+        room.materials.(wall_ids{iWall}) = legacy_room.materials.(legacy_surfaces{iWall});
+        room.material_files.(wall_ids{iWall}) = legacy_room.material_files.(legacy_surfaces{iWall});
+    end
+    room.materials.floor = legacy_room.materials.floor;
+    room.materials.ceiling = legacy_room.materials.ceiling;
+    room.material_files.floor = legacy_room.material_files.floor;
+    room.material_files.ceiling = legacy_room.material_files.ceiling;
+    cfg.room = room;
+    cfg.sources.position_m = [2.0 1.0 1.5];
+end
+
+function cfg = make_schema3_cfg()
+    cfg = make_schema2_cfg();
+    cfg.schema_version = '3.0';
+    surface_ids = [cfg.room.geometry.wall_ids, {'floor', 'ceiling'}];
+    acoustic_surfaces = struct();
+    for iSurface = 1:numel(surface_ids)
+        surface_id = surface_ids{iSurface};
+        scattering = repmat(0.05, 1, 31);
+        absorption = repmat(0.10, 1, 31);
+        coverage = 0.25;
+        preset_id = 'broadband_light';
+        if strcmp(surface_id, 'floor')
+            coverage = 0.0;
+            preset_id = 'none';
+        end
+        surface_area_m2 = 10.0;
+        acoustic_surfaces.(surface_id) = struct( ...
+            'surface_area_m2', surface_area_m2, ...
+            'base_material', struct( ...
+                'material_id', cfg.room.materials.(surface_id), ...
+                'material_path', cfg.room.material_files.(surface_id).material_path, ...
+                'absorption', absorption, ...
+                'scattering', scattering), ...
+            'treatment', struct( ...
+                'preset_id', preset_id, ...
+                'catalog_version', 1, ...
+                'coverage', coverage, ...
+                'treated_area_m2', surface_area_m2 * coverage, ...
+                'absorption', repmat(0.18, 1, 31)), ...
+            'effective_absorption', repmat(0.12, 1, 31), ...
+            'effective_scattering', scattering);
+    end
+    cfg.room.acoustic_surfaces = acoustic_surfaces;
+    cfg.reverberation_sampling = struct( ...
+        'estimator', 'sabine', ...
+        'estimator_version', 'sabine_polygon_octaves_v4', ...
+        'aggregation', 'arithmetic_mean', ...
+        'mean_bands_hz', [125 250 500 1000 2000 4000 8000], ...
+        'treatment_catalog_version', 1, ...
+        'absorption_mix_model', 'area_weighted_linear', ...
+        'absorption_mix_model_version', 1, ...
+        'proposal_strategy_version', 1);
 end
 
 function room = make_room_cfg(repo_root)

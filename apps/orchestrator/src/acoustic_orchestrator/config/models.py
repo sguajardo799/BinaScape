@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictConfigModel(BaseModel):
@@ -15,6 +15,25 @@ class ExperimentConfig(StrictConfigModel):
     random_seed: int
 
 
+class MatlabProcessRetryConfig(StrictConfigModel):
+    max_attempts: Annotated[int, Field(strict=True, ge=1)] = 3
+    initial_delay_s: Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)] = 2.0
+    max_delay_s: Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)] = 30.0
+    max_consecutive_failures: Annotated[int, Field(strict=True, ge=1)] = 5
+
+    @model_validator(mode="after")
+    def validate_delays(self) -> "MatlabProcessRetryConfig":
+        if self.max_delay_s < self.initial_delay_s:
+            raise ValueError("max_delay_s must be at least initial_delay_s")
+        return self
+
+
+class MatlabPoolConfig(StrictConfigModel):
+    """Timeouts of the shared MATLAB pool session (`execution.matlab_runner: pool`)."""
+    startup_timeout_s: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)] = 600.0
+    heartbeat_timeout_s: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)] = 300.0
+
+
 class ExecutionConfig(StrictConfigModel):
     num_simulations: int
     num_workers: int
@@ -22,6 +41,11 @@ class ExecutionConfig(StrictConfigModel):
     resume_if_possible: bool = True
     save_scene_manifest: bool = True
     save_render_metadata: bool = True
+    matlab_process_retry: MatlabProcessRetryConfig = Field(default_factory=MatlabProcessRetryConfig)
+    # "process": one `matlab -batch` per attempt. "pool": one MATLAB session per run
+    # rendering attempts on a local parallel pool (one license checkout).
+    matlab_runner: Literal["process", "pool"] = "process"
+    matlab_pool: MatlabPoolConfig = Field(default_factory=MatlabPoolConfig)
 
 
 class RavenConfig(StrictConfigModel):
@@ -29,6 +53,7 @@ class RavenConfig(StrictConfigModel):
 
 
 class RenderConfig(StrictConfigModel):
+    backend: Literal["raven", "pyroomacoustics"] = "raven"
     sample_rate_hz: int
     generate_rir: bool = False
     generate_brir: bool = True
@@ -36,6 +61,24 @@ class RenderConfig(StrictConfigModel):
     simulation_type_is: bool = True
     num_particles: int = 60000
     is_order_ps: int = 2
+
+
+class PyroomacousticsConfig(StrictConfigModel):
+    """Image-source parameters of the Pyroomacoustics backend; no hidden defaults."""
+
+    max_order: Annotated[int, Field(strict=True, ge=0)]
+    max_order_non_shoebox: Annotated[int, Field(strict=True, ge=0)] | None = None
+    air_absorption: Annotated[bool, Field(strict=True)]
+    temperature_c: Annotated[float, Field(allow_inf_nan=False)] | None = None
+    humidity_pct: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)] | None = None
+
+    @model_validator(mode="after")
+    def validate_atmosphere(self) -> "PyroomacousticsConfig":
+        if (self.temperature_c is None) != (self.humidity_pct is None):
+            raise ValueError("temperature_c y humidity_pct deben configurarse juntos")
+        if self.max_order_non_shoebox is None:
+            self.max_order_non_shoebox = self.max_order
+        return self
 
 
 class ColoredNoiseStrategyConfig(StrictConfigModel):
@@ -81,11 +124,24 @@ class ReceiverPositionStrategy(StrictConfigModel):
     fixed_height_m: RangeFloat
 
 
-class ReceiverOrientationStrategy(StrictConfigModel):
+class ReceiverRandomYawOrientationStrategy(StrictConfigModel):
     type: Literal["random_yaw"]
     yaw_deg: RangeFloat
     pitch_deg: FixedFloat
     roll_deg: FixedFloat
+
+
+class ReceiverRandomYawPitchOrientationStrategy(StrictConfigModel):
+    type: Literal["random_yaw_pitch"]
+    yaw_deg: RangeFloat
+    pitch_deg: RangeFloat
+    roll_deg: RangeFloat
+
+
+ReceiverOrientationStrategy = Annotated[
+    ReceiverRandomYawOrientationStrategy | ReceiverRandomYawPitchOrientationStrategy,
+    Field(discriminator="type"),
+]
 
 
 class ReceiverSamplingConfig(StrictConfigModel):
@@ -98,21 +154,75 @@ class ReceiverOutputConfig(StrictConfigModel):
     enabled: bool
     ir_catalog_path: Path
     file_pattern: str
+    num_hrtfs: int = 1
     output_subdir: str
     num_channels: int
     required: bool = False
 
 
+class CircularArrayOutputConfig(StrictConfigModel):
+    enabled: bool = False
+    num_microphones: Annotated[int, Field(strict=True, ge=2)] | None = None
+    radius_m: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    output_subdir: str = "circular_array"
+    required: bool = False
+
+    @model_validator(mode="after")
+    def require_enabled_geometry(self) -> "CircularArrayOutputConfig":
+        if self.enabled and (self.num_microphones is None or self.radius_m is None):
+            raise ValueError("circular_array enabled=true requiere num_microphones y radius_m")
+        return self
+
+    @property
+    def num_channels(self) -> int | None:
+        return self.num_microphones
+
+
 class ReceiverOutputsConfig(StrictConfigModel):
-    binaural_hrtf: ReceiverOutputConfig
+    binaural_hrtf: ReceiverOutputConfig | None = None
     bte_rear_hartf: ReceiverOutputConfig | None = None
     bte_front_hartf: ReceiverOutputConfig | None = None
+    circular_array: CircularArrayOutputConfig | None = None
+    subject_pairing: Literal["independent", "shared"] = "independent"
 
 
-class RoomDimensionsConfig(StrictConfigModel):
-    length: RangeFloat
-    width: RangeFloat
-    height: RangeFloat
+class ShoeboxGeometryConfig(StrictConfigModel):
+    type: Literal["shoebox"]
+    probability: float
+    length_m: RangeFloat
+    width_m: RangeFloat
+
+
+class TrapezoidGeometryConfig(StrictConfigModel):
+    type: Literal["trapezoid"]
+    probability: float
+    base_a_m: RangeFloat
+    base_b_m: RangeFloat
+    depth_m: RangeFloat
+    top_offset_m: RangeFloat
+
+
+class LShapeGeometryConfig(StrictConfigModel):
+    type: Literal["l_shape"]
+    probability: float
+    outer_length_m: RangeFloat
+    outer_width_m: RangeFloat
+    cutout_length_m: RangeFloat
+    cutout_width_m: RangeFloat
+    removed_corners: list[
+        Literal["north_east", "north_west", "south_east", "south_west"]
+    ]
+
+
+RoomShapeConfig = Annotated[
+    ShoeboxGeometryConfig | TrapezoidGeometryConfig | LShapeGeometryConfig,
+    Field(discriminator="type"),
+]
+
+
+class RoomGeometryConfig(StrictConfigModel):
+    height_m: RangeFloat
+    shape_mix: list[RoomShapeConfig]
 
 
 class RoomMaterialsConfig(StrictConfigModel):
@@ -121,16 +231,50 @@ class RoomMaterialsConfig(StrictConfigModel):
     ceiling: list[str]
 
 
-class SemanticSurfacesConfig(StrictConfigModel):
-    enable_walls: bool = True
-    enable_floor: bool = True
-    enable_ceiling: bool = True
+class ReverberationRangeConfig(StrictConfigModel):
+    min: float
+    max: float
+
+
+class ReverberationDistributionConfig(StrictConfigModel):
+    type: Literal["uniform"]
+    scope: Literal["global"]
+    range_s: ReverberationRangeConfig
+    bin_width_s: float
+    quota_tolerance_fraction: float = 0.10
+
+
+class TreatmentCoverageConfig(StrictConfigModel):
+    min: float
+    max: float
+
+
+class ReverberationTreatmentConfig(StrictConfigModel):
+    catalog_version: Literal[1]
+    mix_model: Literal["area_weighted_linear"]
+    mix_model_version: Literal[1]
+    eligible_surface_types: list[Literal["wall", "ceiling"]]
+    max_treatments_per_surface: Literal[1]
+    preserve_base_scattering: Literal[True]
+    allow_none: bool
+    wall_coverage: TreatmentCoverageConfig
+    ceiling_coverage: TreatmentCoverageConfig
+
+
+class ReverberationSamplingConfig(StrictConfigModel):
+    metric: Literal["estimated_rt30_s"]
+    estimator: Literal["sabine"]
+    estimator_version: Literal["sabine_polygon_octaves_v4"]
+    aggregation: Literal["arithmetic_mean"]
+    mean_bands_hz: list[int]
+    distribution: ReverberationDistributionConfig
+    treatment: ReverberationTreatmentConfig
 
 
 class RoomSamplingConfig(StrictConfigModel):
-    dimensions_m: RoomDimensionsConfig
+    reverberation: ReverberationSamplingConfig
+    geometry: RoomGeometryConfig
     materials: RoomMaterialsConfig
-    semantic_surfaces: SemanticSurfacesConfig
 
 
 class TimingConfig(StrictConfigModel):
@@ -155,6 +299,9 @@ class SpatialPolicyConfig(StrictConfigModel):
     type: str
     targets: dict[str, float] | None = None
     min_radius_from_receiver_m: float | None = None
+    azimuths_deg: list[float] | None = None
+    elevations_deg: list[float] | None = None
+    distances_m: list[float] | None = None
 
 
 class SourceTypeConfig(StrictConfigModel):
@@ -183,7 +330,8 @@ class SceneValidationConfig(StrictConfigModel):
     min_distance_between_sources_m: float
     require_sources_inside_room: bool = True
     require_receiver_inside_room: bool = True
-    max_sampling_attempts_per_scene: int = 50
+    max_scene_attempts: int = 50
+    max_receiver_attempts: int = 50
 
 
 class NamingConfig(StrictConfigModel):
@@ -202,7 +350,30 @@ class ClarityRunnerConfig(StrictConfigModel):
     backend_project_path: Path | None = None
     entrypoint: str = "clarity-backend"
     auto_submit: bool = False
+    force_rerun: bool = False
     use_uv: bool = True
+
+
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+HearingProcessorName = Literal["msbg", "whis"]
+OuterMiddleEar = Literal["free_field", "diffuse_field", "itu", "eardrum"]
+
+
+class LevelCalibrationConfig(StrictConfigModel):
+    mode: Literal["fixed_scale", "presentation_level"]
+    digital_rms1_spl_db: FiniteFloat | None = None
+    presentation_level_db_spl: FiniteFloat | None = None
+    presentation_level_range_db_spl: tuple[FiniteFloat, FiniteFloat] | None = None
+
+
+class MsbgProcessorConfig(StrictConfigModel):
+    level_handling: Literal["true_level", "legacy_active_rescale"] = "true_level"
+
+
+class WhisProcessorConfig(StrictConfigModel):
+    install_root: Path
+    matlab_executable: str = "matlab"
+    synth_method: Literal["dtvf", "fbanasyn"] = "dtvf"
 
 
 class HearingDegradationConfig(StrictConfigModel):
@@ -211,13 +382,26 @@ class HearingDegradationConfig(StrictConfigModel):
     hearing_profiles_path: Path
     output_dir: Path | None = None
     runner: ClarityRunnerConfig = ClarityRunnerConfig()
+    processors: list[HearingProcessorName] = Field(default_factory=lambda: ["msbg"], min_length=1)
+    calibration: LevelCalibrationConfig | None = None
+    outer_middle_ear: OuterMiddleEar | None = None
+    msbg: MsbgProcessorConfig | None = None
+    whis: WhisProcessorConfig | None = None
+
+    @model_validator(mode="after")
+    def _reject_repeated_processors(self) -> "HearingDegradationConfig":
+        repeated = sorted({name for name in self.processors if self.processors.count(name) > 1})
+        if repeated:
+            raise ValueError(f"hearing_degradation.processors no admite repetidos: {', '.join(repeated)}")
+        return self
 
 
 class AppConfig(StrictConfigModel):
     experiment: ExperimentConfig
     execution: ExecutionConfig
-    raven: RavenConfig
+    raven: RavenConfig | None = None
     render: RenderConfig
+    pyroomacoustics: PyroomacousticsConfig | None = None
     background_noise: BackgroundNoiseConfig = Field(default_factory=BackgroundNoiseConfig)
     receiver_sampling: ReceiverSamplingConfig
     receiver_outputs: ReceiverOutputsConfig

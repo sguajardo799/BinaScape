@@ -1,19 +1,25 @@
 experiment:
-  experiment_id: sim_001_wo_noise
+  experiment_id: e2e_1_worker_s{seed}
   description: >
-    Ejemplo canonico root-first del pipeline estatico con una sola salida
-    habilitada: binaural_hrtf. El runtime sigue soportando salidas HARTF
-    adicionales, pero no forman parte del ejemplo principal.
+    Validacion E2E pequena de RAVEN estatico y Clarity: dos escenas,
+    dos HRTF binaurales por escena, dos fuentes y perfil symmetric_moderate_loss.
+    HARTF queda deshabilitado por defecto en este ejemplo.
   scene_type: static
   random_seed: 42
 
 execution:
-  num_simulations: 30
-  num_workers: 2
-  overwrite_existing: true
-  resume_if_possible: true
+  num_simulations: 100
+  # Pool size: one MATLAB session (one license) runs a parallel pool with this
+  # many workers. 3 is what a 14 GB machine holds (~1.8 GB per MATLAB process).
+  num_workers: 3
+  overwrite_existing: false
+  resume_if_possible: false
   save_scene_manifest: true
   save_render_metadata: true
+  matlab_runner: pool
+  matlab_pool:
+    startup_timeout_s: 600
+    heartbeat_timeout_s: 300
 
 raven:
   base_rpf_file: C:/ITASoftware/Raven/RavenInput/Classroom/Classroom.rpf
@@ -28,12 +34,9 @@ render:
   is_order_ps: 2
 
 background_noise:
-  enabled: true
-  snr_db: 40.0
+  enabled: false
   allow_multiple_layers: false
-  strategies:
-    - type: colored
-      colors: [white, pink]
+  strategies: []
 
 receiver_sampling:
   one_receiver_per_scene: true
@@ -63,39 +66,47 @@ receiver_outputs:
     enabled: true
     ir_catalog_path: ../../assets/hrtf/
     file_pattern: "*.daff"
+    num_hrtfs: 1
     output_subdir: binaural_hrtf
     num_channels: 2
     required: true
 
-  # Multi-output. Descomenta salidas adicionales para usar
-  # variantes HARTF, pero `binaural_hrtf` es el ejemplo canonico del contrato.
-  # bte_rear_hartf:
-  #   enabled: true
-  #   ir_catalog_path: ../../assets/hrtf/
-  #   file_pattern: "*.daff"
-  #   output_subdir: bte_rear_hartf
-  #   num_channels: 2
-  #   required: false
-
-  # bte_front_hartf:
-  #   enabled: true
-  #   ir_catalog_path: ../../assets/hrtf/
-  #   file_pattern: "*.daff"
-  #   output_subdir: bte_front_hartf
-  #   num_channels: 2
-  #   required: false
+  # HARTF deshabilitado por defecto: requiere DAFF compatibles en assets/hartf/.
+  # Para cubrir tres salidas, aportar DAFF HARTF reales, configurar ambas
+  # salidas con esos catalogos. Clarity solo admite binaural_hrtf como target.
 
 room_sampling:
-  dimensions_m:
-    length:
-      min: 3.5
-      max: 6.5
-    width:
-      min: 3.5
-      max: 6.5
-    height:
-      min: 1.8
-      max: 2.5
+  reverberation: &uniform_rt30
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution: {type: uniform, scope: global, range_s: {min: 0.2, max: 0.8}, bin_width_s: 0.1, quota_tolerance_fraction: 0.15}
+    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}
+  geometry:
+    height_m:
+      min: 2.4
+      max: 3.0
+    # La mezcla determinista cubre las tres geometrías en este ejemplo.
+    shape_mix:
+      - type: shoebox
+        probability: 0.34
+        length_m: {min: 4.0, max: 5.0}
+        width_m: {min: 3.0, max: 4.0}
+      - type: trapezoid
+        probability: 0.33
+        base_a_m: {min: 4.0, max: 5.0}
+        base_b_m: {min: 3.0, max: 4.0}
+        depth_m: {min: 3.0, max: 4.0}
+        top_offset_m: {min: -0.5, max: 0.5}
+      - type: l_shape
+        probability: 0.33
+        outer_length_m: {min: 5.0, max: 6.0}
+        outer_width_m: {min: 4.0, max: 5.0}
+        cutout_length_m: {min: 1.0, max: 2.0}
+        cutout_width_m: {min: 1.0, max: 2.0}
+        removed_corners: [north_east]
 
   materials:
     walls:
@@ -110,26 +121,18 @@ room_sampling:
       - wood
       - plaster
 
-  semantic_surfaces:
-    enable_walls: true
-    enable_floor: true
-    enable_ceiling: true
-
 source_sampling:
-  min_sources: 3
-  max_sources: 6
-
+  min_sources: 2
+  max_sources: 5
   timing:
     allow_offsets: true
     start_time_s:
       min: 0.1
-      max: 3.0
-    total_duration_s: 10
-
+      max: 5.5
+    total_duration_s: 10.0
   gain_db:
-    min: -0.5
-    max: 0.1
-
+    min: -6.0
+    max: 0.0
   default_orientation_strategy:
     type: random_yaw
     yaw_deg:
@@ -139,74 +142,57 @@ source_sampling:
       fixed: 0.0
     roll_deg:
       fixed: 0.0
-
   source_types:
     - event_type: speech
       role: base
       min_count: 1
-      max_count: 2
+      max_count: 1
       probability: 1.0
-      audio_dir: ../../assets/events/speech/
+      audio_dir: ../../assets/events/train/speech/
       directivity: ../../assets/directivity/Singer_2011_FWE_TLE_norm.daff
       spatial_policy:
         type: random_valid
 
-    - event_type: snoring
+    - event_type: keyboard_typing
       role: base
       min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/snoring/
-      spatial_policy:
-        type: random_valid_away_from_receiver
-        min_radius_from_receiver_m: 2.5
-
-    - event_type: breathing
-      role: base
-      min_count: 0
-      max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/breathing/
+      max_count: 2
+      probability: 0.5
+      audio_dir: ../../assets/events/train/keyboard_typing/
       spatial_policy:
         type: random_valid
 
-    - event_type: clapping
+    - event_type: cough
       role: optional
       min_count: 0
       max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/clapping/
+      probability: 0.15
+      audio_dir: ../../assets/events/train/cough/
       spatial_policy:
         type: random_valid_away_from_receiver
-        min_radius_from_receiver_m: 3.1
+        min_radius_from_receiver_m: 1.5
 
-    - event_type: door_knocking
+    - event_type: sneeze
       role: optional
       min_count: 0
       max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/door_knocking/
+      probability: 0.15
+      audio_dir: ../../assets/events/train/sneeze/
       spatial_policy:
-        type: weighted_targets
-        targets:
-          wall: 0.95
-          random_valid: 0.05
-      orientation_strategy:
-        type: facing_surface_normal
+        type: random_valid_away_from_receiver
+        min_radius_from_receiver_m: 1.5
 
-    - event_type: glass_breaking
+    - event_type: clock_alarm
       role: optional
       min_count: 0
       max_count: 1
-      probability: 0.1
-      audio_dir: ../../assets/events/glass_breaking/
+      probability: 0.3
+      audio_dir: ../../assets/events/train/clock_alarm/
       spatial_policy:
         type: weighted_targets
         targets:
-          wall: 0.95
-          random_valid: 0.05
-      orientation_strategy:
-        type: facing_surface_normal
+          wall: 0.90
+          random_valid: 0.10
 
 scene_validation:
   min_distance_source_to_receiver_m: 0.5
@@ -217,8 +203,7 @@ scene_validation:
 
 outputs:
   artifact_root: ../../outputs/
-  # run_name es opcional. Si se omite, el loader usa experiment.experiment_id.
-  # El layout nuevo escribe solo dentro de {artifact_root}/{run_name}/...
+  run_name: e2e_1_worker_s{seed}
 
   naming:
     scene_id_prefix: scene_static
@@ -226,12 +211,13 @@ outputs:
     metadata_pattern: "{scene_id}__{output_type}__render.json"
 
 hearing_degradation:
-  enabled: false
+  enabled: true
   input_targets:
     - binaural_hrtf
-  hearing_profiles_path: ../hearing/hearing_profiles.yaml
+  hearing_profiles_path: ../hearing/example_profile.yaml
   runner:
     backend_project_path: ../../apps/clarity-backend
     entrypoint: clarity-backend
-    auto_submit: false
+    auto_submit: true
     use_uv: true
+    force_rerun: false

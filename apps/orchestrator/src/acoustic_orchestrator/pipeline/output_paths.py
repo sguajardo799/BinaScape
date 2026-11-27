@@ -1,8 +1,8 @@
-from pathlib import Path, PurePath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from string import Formatter
 from typing import TypedDict
 
-from acoustic_orchestrator.config.models import AppConfig, OutputsConfig, ReceiverOutputConfig
+from acoustic_orchestrator.config.models import AppConfig, CircularArrayOutputConfig, OutputsConfig, ReceiverOutputConfig
 
 
 SUPPORTED_NAMING_FIELDS = {"scene_id", "output_type"}
@@ -23,7 +23,11 @@ class ArtifactLayout(TypedDict):
     clarity_manifest_dir: Path
     clarity_jobs_path: Path
     render_index_path: Path
+    matlab_diagnostics_dir: Path
+    render_attempts_dir: Path
+    sampling_failures_path: Path
     clarity_index_path: Path
+    level_calibration_index_path: Path
     render_outputs_root: Path
     degraded_output_root: Path
 
@@ -40,23 +44,32 @@ def resolve_artifact_layout(outputs: OutputsConfig, experiment_id: str) -> Artif
     run_root = (outputs.artifact_root / run_name).resolve()
     return {
         "run_root": run_root,
-        "scene_manifest_dir": run_root / "manifests" / "scene",
-        "runtime_manifest_dir": run_root / "manifests" / "runtime" / "render",
-        "prepared_audio_dir": run_root / "audio" / "prepared",
-        "clarity_manifest_dir": run_root / "manifests" / "runtime" / "clarity",
-        "clarity_jobs_path": run_root / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
-        "render_index_path": run_root / "indexes" / "render_index.jsonl",
-        "clarity_index_path": run_root / "indexes" / "clarity_index.jsonl",
-        "render_outputs_root": run_root / "outputs" / "render",
-        "degraded_output_root": run_root / "outputs" / "degraded",
+        "scene_manifest_dir": run_root / "metadata" / "manifests" / "scene",
+        "runtime_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "render",
+        "prepared_audio_dir": run_root / "cropped_audio",
+        "clarity_manifest_dir": run_root / "metadata" / "manifests" / "runtime" / "clarity",
+        "clarity_jobs_path": run_root / "metadata" / "manifests" / "runtime" / "clarity" / "clarity_jobs.jsonl",
+        "render_index_path": run_root / "metadata" / "indexes" / "render_index.jsonl",
+        "matlab_diagnostics_dir": run_root / "metadata" / "diagnostics" / "matlab",
+        "render_attempts_dir": run_root / "metadata" / "render_attempts",
+        "sampling_failures_path": run_root / "metadata" / "indexes" / "scene_sampling_failures.jsonl",
+        "clarity_index_path": run_root / "metadata" / "indexes" / "clarity_index.jsonl",
+        "level_calibration_index_path": run_root / "metadata" / "indexes" / "level_calibration.jsonl",
+        "render_outputs_root": run_root / "output_audio" / "render",
+        "degraded_output_root": run_root / "output_audio" / "degraded",
     }
+
+
+def resolve_render_attempts_dir(manifest_path: Path, attempts_dir: Path | None = None) -> Path:
+    """Resolve functional storage independently of best-effort diagnostics."""
+    return (attempts_dir if attempts_dir is not None else manifest_path.parent / "render_attempts").resolve()
 
 
 def resolve_output_paths(
     scene_id: str,
     output_type: str,
     outputs: OutputsConfig,
-    receiver_output: ReceiverOutputConfig,
+    receiver_output: ReceiverOutputConfig | CircularArrayOutputConfig,
     experiment_id: str,
 ) -> ResolvedOutputPaths:
     variant_id = f"{scene_id}__{output_type}"
@@ -76,33 +89,40 @@ def resolve_output_paths(
     }
 
 
-def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverOutputConfig:
+def get_receiver_output_config(config: AppConfig, output_type: str) -> ReceiverOutputConfig | CircularArrayOutputConfig:
+    if "__" in output_type:
+        base_type, suffix = output_type.rsplit("__", 1)
+        if suffix.isdecimal():
+            output_type = base_type
     receiver_output = {
         "binaural_hrtf": config.receiver_outputs.binaural_hrtf,
         "bte_rear_hartf": config.receiver_outputs.bte_rear_hartf,
         "bte_front_hartf": config.receiver_outputs.bte_front_hartf,
+        "circular_array": config.receiver_outputs.circular_array,
     }.get(output_type)
     if receiver_output is None:
         raise KeyError(f"receiver_output desconocido: {output_type}")
     return receiver_output
 
 
-def build_clarity_job_id(variant_id: str, hearing_profile_id: str) -> str:
-    return f"clarity__{variant_id}__{hearing_profile_id}"
+def build_clarity_job_id(variant_id: str, hearing_profile_id: str, processor: str) -> str:
+    return f"clarity__{variant_id}__{hearing_profile_id}__{processor}"
 
 
 def resolve_clarity_job_paths(
     *,
     output_root: Path,
+    processor: str,
     output_type: str,
     variant_id: str,
     hearing_profile_id: str,
     input_wav_path: str | Path,
 ) -> ClarityJobPaths:
+    """Degraded outputs live in ``<output_root>/<processor>/<output_type>/<hearing_profile_id>/``."""
     input_wav = Path(input_wav_path)
-    output_dir = (output_root / output_type / hearing_profile_id).resolve()
+    output_dir = (output_root / processor / output_type / hearing_profile_id).resolve()
     return {
-        "job_id": build_clarity_job_id(variant_id, hearing_profile_id),
+        "job_id": build_clarity_job_id(variant_id, hearing_profile_id, processor),
         "output_dir": output_dir.as_posix(),
         "expected_output_wav_path": (output_dir / input_wav.name).resolve().as_posix(),
         "expected_output_metadata_path": (output_dir / f"{input_wav.stem}.json").resolve().as_posix(),
@@ -123,8 +143,7 @@ def is_safe_output_subdir(output_subdir: str) -> bool:
     if output_subdir.strip() == "":
         return False
 
-    path = PurePath(output_subdir)
-    if path.is_absolute():
-        return False
-
-    return all(part not in {"", ".", ".."} for part in path.parts)
+    for path in (PureWindowsPath(output_subdir), PurePosixPath(output_subdir)):
+        if path.anchor or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+            return False
+    return True

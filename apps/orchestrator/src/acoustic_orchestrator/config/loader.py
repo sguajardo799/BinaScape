@@ -1,4 +1,5 @@
 from pathlib import Path
+from string import Formatter
 
 import yaml
 
@@ -20,15 +21,43 @@ def load_config(config_path: str | Path) -> AppConfig:
         raw_config = yaml.safe_load(file)
 
     _reject_legacy_output_roots(raw_config)
+    _normalize_legacy_config(raw_config)
 
     config = AppConfig.model_validate(raw_config)
+    _resolve_seed_placeholders(config)
     return resolve_relative_paths(config, config_path.parent)
 
 
-def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
-    config.raven.base_rpf_file = _resolve(config.raven.base_rpf_file, base_dir)
+def _resolve_seed_placeholders(config: AppConfig) -> None:
+    seed = config.experiment.random_seed
+    config.experiment.experiment_id = _format_seed(
+        config.experiment.experiment_id, seed, "experiment.experiment_id"
+    )
+    if config.outputs.run_name is not None:
+        config.outputs.run_name = _format_seed(config.outputs.run_name, seed, "outputs.run_name")
 
-    for output in _receiver_outputs(config):
+
+def _format_seed(template: str, seed: int, field: str) -> str:
+    """Replace the only supported placeholder, ``{seed}``, with the experiment seed."""
+    try:
+        parts = list(Formatter().parse(template))
+    except ValueError as exc:
+        raise ValueError(f"{field} has malformed braces: {template!r}") from exc
+    for _, name, spec, conversion in parts:
+        if name is None:
+            continue
+        if name != "seed" or spec or conversion:
+            raise ValueError(
+                f"{field} only supports the '{{seed}}' placeholder, got {template!r}"
+            )
+    return template.format(seed=seed)
+
+
+def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
+    if config.raven is not None:
+        config.raven.base_rpf_file = _resolve(config.raven.base_rpf_file, base_dir)
+
+    for output in _catalog_receiver_outputs(config):
         output.ir_catalog_path = _resolve(output.ir_catalog_path, base_dir)
 
     for source_type in config.source_sampling.source_types:
@@ -53,7 +82,7 @@ def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
         config.hearing_degradation.output_dir = (
             config.outputs.artifact_root
             / config.outputs.run_name
-            / "outputs"
+            / "output_audio"
             / "degraded"
         ).resolve()
     else:
@@ -65,11 +94,13 @@ def resolve_relative_paths(config: AppConfig, base_dir: Path) -> AppConfig:
             backend_project_path,
             base_dir,
         )
+    if config.hearing_degradation.whis is not None:
+        config.hearing_degradation.whis.install_root = _resolve(config.hearing_degradation.whis.install_root, base_dir)
 
     return config
 
 
-def _receiver_outputs(config: AppConfig):
+def _catalog_receiver_outputs(config: AppConfig):
     return [
         output
         for output in [
@@ -100,3 +131,72 @@ def _reject_legacy_output_roots(raw_config: object) -> None:
             + ", ".join(legacy_keys)
             + ". Usa outputs.artifact_root y outputs.run_name."
         )
+
+
+def _normalize_legacy_config(raw_config: object) -> None:
+    if not isinstance(raw_config, dict):
+        return
+
+    room_sampling = raw_config.get("room_sampling")
+    if isinstance(room_sampling, dict):
+        if "max_rt30_s" in room_sampling:
+            raise ValueError(
+                "room_sampling.max_rt30_s ya no es válido; configure room_sampling.reverberation"
+            )
+        _normalize_legacy_room_sampling(room_sampling)
+
+    scene_validation = raw_config.get("scene_validation")
+    if isinstance(scene_validation, dict):
+        _normalize_legacy_retry_budget(scene_validation)
+
+
+def _normalize_legacy_room_sampling(room_sampling: dict) -> None:
+    has_dimensions = "dimensions_m" in room_sampling
+    has_geometry = "geometry" in room_sampling
+    has_semantic_surfaces = "semantic_surfaces" in room_sampling
+
+    if has_dimensions and has_geometry:
+        raise ValueError("room_sampling no puede mezclar dimensions_m legacy con geometry")
+
+    if not has_dimensions:
+        if has_semantic_surfaces:
+            raise ValueError("room_sampling.semantic_surfaces solo se admite junto a dimensions_m legacy")
+        return
+
+    dimensions = room_sampling.pop("dimensions_m")
+    if not isinstance(dimensions, dict):
+        raise ValueError("room_sampling.dimensions_m legacy debe ser un objeto")
+
+    semantic_surfaces = room_sampling.pop("semantic_surfaces", None)
+    if semantic_surfaces is not None:
+        if not isinstance(semantic_surfaces, dict):
+            raise ValueError("room_sampling.semantic_surfaces legacy debe ser un objeto")
+
+    missing = [name for name in ("length", "width", "height") if name not in dimensions]
+    if missing:
+        raise ValueError("room_sampling.dimensions_m legacy incompleto: " + ", ".join(missing))
+
+    room_sampling["geometry"] = {
+        "height_m": dimensions["height"],
+        "shape_mix": [
+            {
+                "type": "shoebox",
+                "probability": 1.0,
+                "length_m": dimensions["length"],
+                "width_m": dimensions["width"],
+            }
+        ],
+    }
+
+
+def _normalize_legacy_retry_budget(scene_validation: dict) -> None:
+    legacy_key = "max_sampling_attempts_per_scene"
+    if legacy_key not in scene_validation:
+        return
+    if "max_scene_attempts" in scene_validation or "max_receiver_attempts" in scene_validation:
+        raise ValueError(
+            "scene_validation no puede mezclar max_sampling_attempts_per_scene legacy con los presupuestos nuevos"
+        )
+    attempts = scene_validation.pop(legacy_key)
+    scene_validation["max_scene_attempts"] = attempts
+    scene_validation["max_receiver_attempts"] = attempts

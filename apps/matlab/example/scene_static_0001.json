@@ -118,8 +118,8 @@
   "render": {
     "sample_rate_hz": 44100,
     "seed": 42,
-    "output_wav_path": "D:/Tesis/Binaural-Impared-Hear/outputs/sim_001/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
-    "output_metadata_path": "D:/Tesis/Binaural-Impared-Hear/outputs/sim_001/outputs/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json",
+    "output_wav_path": "D:/Tesis/Binaural-Impared-Hear/outputs/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf.wav",
+    "output_metadata_path": "D:/Tesis/Binaural-Impared-Hear/outputs/sim_001/output_audio/render/binaural_hrtf/scene_static_0001__binaural_hrtf__render.json",
     "target_duration_s": 10.0
   }
 }

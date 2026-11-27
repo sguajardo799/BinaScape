@@ -1,0 +1,1538 @@
+from __future__ import annotations
+
+import html
+import json
+import math
+import re
+import textwrap
+from pathlib import Path
+from typing import Any
+
+from .scene_distributions import scene_metrics
+
+from .loader import (
+    AnalysisData,
+    RT30_ABS_TOL_S,
+    RT30_REL_TOL,
+    summary_for,
+    write_csv,
+    write_json,
+    write_jsonl,
+)
+
+PALETTE = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0891b2", "#be123c"]
+
+# Metrics kept in metrics.json but never drawn: redundant or unreadable as charts.
+HIDDEN_METRICS = frozenset(
+    {
+        "hist_room_length",
+        "hist_room_width",
+        "rt30_sabine_estimate",
+        "rt30_raven_rpf_gett30",
+        "sampling_attempts",
+        "sampling_requested_bin",
+        "surface_area",
+        "hist_employed_hrtf",
+    }
+)
+
+
+def build_analysis(
+    data: AnalysisData, output_dir: str | Path | None = None
+) -> dict[str, Path]:
+    analysis_dir = (
+        Path(output_dir).resolve() if output_dir else data.run_dir / "analysis"
+    )
+    images_dir = analysis_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "summary": analysis_dir / "summary.json",
+        "report": analysis_dir / "report.html",
+    }
+    # Preserve existing filenames. Their observation units are explicitly documented.
+    exports = {
+        "scenes": data.scenes,
+        "sources": data.sources,
+        "render_scenes": data.render_scenes,
+        "joined_render_sources": data.render_sources,
+        "degraded_metadata": data.degraded_records,
+        "incidents": data.incidents,
+        "rt30_pairs": data.rt30_pairs,
+        "rt30_records": data.rt30_records,
+        "rt30_comparisons": data.rt30_comparisons,
+        "rt30_consolidated": data.rt30_consolidated,
+        "rt30_scene_means": data.rt30_scene_means,
+        "materials": data.materials,
+        "sampling_records": data.sampling_records,
+        "sampling_batches": data.sampling_batches,
+        "sampling_failures": data.sampling_failures,
+        "coverage": data.coverage,
+    }
+    for name, records in exports.items():
+        for extension, writer in [
+            ("json", write_json),
+            ("jsonl", write_jsonl),
+            ("csv", write_csv),
+        ]:
+            path = analysis_dir / f"{name}.{extension}"
+            writer(path, records)
+            artifacts[f"{name}_{extension}"] = path
+    artifacts.update(
+        {
+            "joined_sources_jsonl": artifacts["joined_render_sources_jsonl"],
+            "joined_sources_csv": artifacts["joined_render_sources_csv"],
+            "degraded_jsonl": artifacts["degraded_metadata_jsonl"],
+            "degraded_csv": artifacts["degraded_metadata_csv"],
+        }
+    )
+    parameters = analysis_dir / "general_parameters.json"
+    write_json(parameters, data.general_parameters)
+    artifacts["general_parameters_json"] = parameters
+    charts, metrics, presentation = _write_charts(data, images_dir)
+    for extension, writer in [
+        ("json", write_json),
+        ("jsonl", write_jsonl),
+        ("csv", write_csv),
+    ]:
+        path = analysis_dir / f"metrics.{extension}"
+        writer(path, metrics)
+        artifacts[f"metrics_{extension}"] = path
+    summary = summary_for(data)
+    summary["rt30_tolerance"] = {
+        "absolute_s": RT30_ABS_TOL_S,
+        "relative": RT30_REL_TOL,
+        "rule": "abs(a-b) <= max(absolute_s, relative * max(abs(a), abs(b))); all valid variant pairs",
+    }
+    summary["report_metrics"] = [
+        {key: value for key, value in row.items() if key != "observations"}
+        for row in metrics
+    ]
+    write_json(artifacts["summary"], summary)
+    _write_report(artifacts["report"], data, summary, charts, metrics, presentation)
+    artifacts.update(charts)
+    return artifacts
+
+
+def _presentation_state(key: str, values: list[Any]) -> str:
+    """Decide how a metric appears in the report; metrics.json is unaffected."""
+    if key in HIDDEN_METRICS:
+        return "hidden"
+    if not values:
+        return "empty"
+    if len({str(value) for value in values}) == 1:
+        return "constant"
+    return "chart"
+
+
+def _write_charts(
+    data: AnalysisData, images_dir: Path
+) -> tuple[dict[str, Path], list[dict[str, Any]], list[dict[str, Any]]]:
+    charts: dict[str, Path] = {}
+    metrics: list[dict[str, Any]] = []
+    presentation: list[dict[str, Any]] = []
+
+    def metric(
+        key: str,
+        records: list[dict[str, Any]],
+        field: str,
+        title: str,
+        unit: str,
+        population: str,
+        section: str,
+        categorical: bool = False,
+    ) -> None:
+        observations = []
+        for record in records:
+            raw = record.get(field)
+            value = (
+                raw
+                if categorical and raw is not None and raw != ""
+                else (_float_or_none(raw) if not categorical else None)
+            )
+            if value is not None:
+                observations.append(
+                    {
+                        "scene_id": record.get("scene_id"),
+                        "source_id": record.get("source_id"),
+                        "variant_id": record.get("variant_id"),
+                        "value": value,
+                        "frequency_hz": record.get("frequency_hz"),
+                        "provenance": record.get(
+                            "provenance",
+                            record.get("metadata_path", record.get("path")),
+                        ),
+                    }
+                )
+        row = {
+            "key": key,
+            "title": title,
+            "field": field,
+            "unit": unit,
+            "population": population,
+            "section": section,
+            "n_valid": len(observations),
+            "n_excluded": len(records) - len(observations),
+            "observations": observations,
+            "exclusion_rule": "Missing, malformed or conflicted field; see incidents for document-level exclusions.",
+        }
+        values = [observation["value"] for observation in observations]
+        if not categorical:
+            row["mean"] = _mean(values)
+        else:
+            row["counts"] = _counts(values)
+        metrics.append(row)
+        path = images_dir / f"{key}.svg"
+        state = _presentation_state(key, values)
+        presentation.append(
+            {
+                "key": key,
+                "title": title,
+                "unit": unit,
+                "section": section,
+                "n_valid": row["n_valid"],
+                "n_excluded": row["n_excluded"],
+                "state": state,
+                "value": values[0] if state == "constant" else None,
+            }
+        )
+        if state != "chart":
+            # Never leave a chart from a previous run in a reused output directory.
+            path.unlink(missing_ok=True)
+            return
+        title_with_n = title
+        if categorical:
+            _write_bar_chart(path, _counts(values), title_with_n, population)
+        else:
+            _write_histogram(path, values, title_with_n, unit)
+        legend = [
+            (
+                None,
+                None,
+                f"Population: {population}; n={row['n_valid']}; excluded={row['n_excluded']}; unit: {unit}.",
+            )
+        ]
+        if categorical:
+            legend.append(
+                (
+                    None,
+                    None,
+                    "Bars count observations in each category; colors identify categories.",
+                )
+            )
+            legend.extend(
+                ("rect", PALETTE[index % len(PALETTE)], str(category))
+                for index, category in enumerate(_counts(values))
+            )
+        else:
+            legend.append(
+                (
+                    "rect",
+                    PALETTE[0],
+                    f"{title}: bars count {population} in value intervals ({unit}).",
+                )
+            )
+        if key.startswith("rt30_"):
+            bands = sorted(
+                {
+                    observation["frequency_hz"]
+                    for observation in observations
+                    if observation["frequency_hz"] is not None
+                }
+            )
+            legend.append(
+                (
+                    None,
+                    None,
+                    "Central frequencies (Hz): "
+                    + (
+                        ", ".join(f"{frequency:g}" for frequency in bands)
+                        or "Not available"
+                    ),
+                )
+            )
+            if key == "rt30_difference":
+                legend.append(
+                    (
+                        None,
+                        None,
+                        "Difference = RAVEN − Sabine (s); positive values mean RAVEN is larger.",
+                    )
+                )
+        _append_legend(path, legend)
+        charts[key] = path
+
+    for field, title, unit in [
+        ("room_length_m", "Envelope X extent", "m"),
+        ("room_width_m", "Envelope Z extent", "m"),
+        ("room_height_m", "Height Y", "m"),
+        ("room_area_m2", "Real polygon area", "m²"),
+        ("room_volume_m3", "Room volume", "m³"),
+        ("n_sources", "Sources per scene", "sources"),
+    ]:
+        metric(
+            "hist_" + field.removesuffix("_m").removesuffix("_m2").removesuffix("_m3"),
+            data.scenes,
+            field,
+            title,
+            unit,
+            "unique scenes",
+            "general",
+        )
+    metric(
+        "geometry_types",
+        data.scenes,
+        "geometry_type",
+        "Room geometry",
+        "category",
+        "unique scenes",
+        "general",
+        True,
+    )
+    metric(
+        "hist_employed_hrtf",
+        data.render_scenes,
+        "employed_hrtf",
+        "HRTF coverage",
+        "identity",
+        "unique render variants",
+        "general",
+        True,
+    )
+    for field, key, title, unit in [
+        ("global_doa_deg", "hist_global_doa", "Global azimuth", "degrees"),
+        (
+            "receiver_relative_doa_deg",
+            "hist_receiver_relative_doa",
+            "Receiver-relative DoA",
+            "degrees",
+        ),
+        ("distance_m", "hist_distance", "Source–receiver distance", "m"),
+        ("elevation_deg", "hist_elevation", "Elevation", "degrees"),
+        (
+            "wall_distance_m",
+            "hist_wall_distance",
+            "Minimum distance to real walls",
+            "m",
+        ),
+        ("gain_db", "hist_gain", "Declared gain", "dB"),
+        ("start_time_s", "hist_start_time", "Declared start time", "s"),
+    ]:
+        metric(key, data.sources, field, title, unit, "unique sources", "acoustics")
+    metric(
+        "source_events",
+        data.sources,
+        "source_type",
+        "Source event coverage",
+        "category",
+        "unique sources",
+        "acoustics",
+        True,
+    )
+    # The loader owns RT30 equivalence and averaging; never reclassify its results here.
+    metric(
+        "rt30_sabine_estimate",
+        [row for row in data.rt30_records if row.get("method") == "Sabine estimate"],
+        "value_s",
+        "Sabine estimate",
+        "s",
+        "unique scene/frequency records",
+        "acoustics",
+    )
+    metric(
+        "rt30_raven_rpf_gett30",
+        data.rt30_consolidated,
+        "value_s",
+        "RAVEN consolidated T30 (variant mean)",
+        "s",
+        "unique scene/frequency records",
+        "acoustics",
+    )
+    metric(
+        "rt30_difference",
+        data.rt30_comparisons,
+        "difference_s",
+        "RAVEN minus Sabine, aligned bands",
+        "s",
+        "unique scene/frequency pairs",
+        "acoustics",
+    )
+    processors = sorted({r.get("processor") for r in data.degraded_records if r.get("processor")})
+    # One processor keeps the historical charts; several get one chart per processor.
+    degraded_groups = (
+        [("", "", data.degraded_records)]
+        if len(processors) <= 1
+        else [
+            (f"_{processor}", f" ({processor})", [r for r in data.degraded_records if r.get("processor") == processor])
+            for processor in processors
+        ]
+    )
+    for suffix, title_suffix, records in degraded_groups:
+        for field, key, title, categorical in [
+            ("hearing_profile_id", "degraded_profiles", "Hearing profiles", True),
+            ("status", "degraded_status", "Degradation status", True),
+            (
+                "ear_asymmetry_db",
+                "degraded_asymmetry",
+                "Declared ear asymmetry on common bands",
+                False,
+            ),
+        ]:
+            metric(
+                key + suffix,
+                records,
+                field,
+                title + title_suffix,
+                "category" if categorical else "dB",
+                "unique degraded records",
+                "quality",
+                categorical,
+            )
+    for field, title, categorical in [
+        ("scene_attempt", "Scene sampling attempt", False),
+        ("receiver_attempt", "Receiver sampling attempt", False),
+        ("attempts", "RT30 sampling attempts", False),
+        ("requested_bin", "Requested RT30 sampling bin", True),
+        ("obtained_bin", "Obtained RT30 sampling bin", True),
+        ("matched_requested_bin", "Requested RT30 bin matched", True),
+        ("fallback_used", "RT30 sampling fallback used", True),
+    ]:
+        unit = (
+            "boolean"
+            if field in {"matched_requested_bin", "fallback_used"}
+            else "bin"
+            if categorical
+            else "attempts"
+        )
+        metric(
+            "sampling_" + field,
+            data.sampling_records,
+            field,
+            title,
+            unit,
+            "unique scene sampling records",
+            "quality",
+            categorical,
+        )
+    metric(
+        "background_noise",
+        data.render_scenes,
+        "background_noise_applied",
+        "Declared background noise application",
+        "boolean",
+        "unique render variants",
+        "quality",
+        True,
+    )
+    metric(
+        "material_coverage",
+        data.materials,
+        "material_id",
+        "Material coverage by surface",
+        "material identity",
+        "unique scene surfaces",
+        "quality",
+        True,
+    )
+    metric(
+        "surface_area",
+        data.materials,
+        "surface_area_m2",
+        "Real surface area",
+        "m²",
+        "unique scene surfaces",
+        "quality",
+    )
+    metric(
+        "receiver_wall_distance",
+        data.scenes,
+        "wall_distance_m",
+        "Receiver minimum distance to real walls",
+        "m",
+        "unique scenes",
+        "acoustics",
+    )
+    for index, scene in enumerate(data.scenes):
+        geometry = scene.get("geometry_type")
+        if geometry not in {"shoebox", "l_shape", "trapezoid"}:
+            continue
+        sources = [
+            row for row in data.sources if row.get("scene_id") == scene.get("scene_id")
+        ]
+        path = images_dir / f"plan_{index:05d}.svg"
+        if _write_plan(path, scene, sources):
+            charts[f"plan_{geometry}_{index:05d}"] = path
+    for metric in scene_metrics(data):
+        metrics.append(metric)
+        writer = SCENE_CHART_WRITERS.get(metric.get("chart_type"))
+        if writer is not None:
+            path = images_dir / f"{metric['key']}.svg"
+            writer(path, metric)
+            charts[metric["key"]] = path
+    return charts, metrics, presentation
+
+
+def _write_plan(
+    path: Path, scene: dict[str, Any], sources: list[dict[str, Any]]
+) -> bool:
+    vertices = scene.get("footprint_vertices_m")
+    if not isinstance(vertices, list) or len(vertices) < 3:
+        return False
+    # The loader supplies authoritative public-frame [x,z] polygon vertices.
+    points = []
+    for vertex in vertices:
+        if not isinstance(vertex, (list, tuple)) or len(vertex) != 2:
+            return False
+        x, z = map(_float_or_none, vertex)
+        if x is None or z is None:
+            return False
+        points.append((x, z))
+    actors = [("Receiver", scene, "receiver", "#111827")]
+    events = sorted(
+        {str(source.get("source_type") or "Event unavailable") for source in sources}
+    )
+    colors = {
+        event: PALETTE[index % len(PALETTE)] for index, event in enumerate(events)
+    }
+    for source in sources:
+        event = str(source.get("source_type") or "Event unavailable")
+        actors.append(
+            (f"{source.get('source_id')} · {event}", source, "source", colors[event])
+        )
+    positioned, oriented = [], []
+    for label, record, prefix, color in actors:
+        x, z = (
+            _float_or_none(record.get(prefix + "_x_m")),
+            _float_or_none(record.get(prefix + "_z_m")),
+        )
+        if x is not None and z is not None:
+            positioned.append((label, x, z, prefix, color))
+            yaw = _float_or_none(record.get(prefix + "_yaw_deg"))
+            if yaw is not None:
+                key = (
+                    "receiver"
+                    if prefix == "receiver"
+                    else f"source:{record.get('source_id')}"
+                )
+                oriented.append((key, x, z, yaw, color))
+    bounds = points + [(x, z) for _, x, z, _, _ in positioned]
+    xmin, xmax = min(x for x, _ in bounds), max(x for x, _ in bounds)
+    zmin, zmax = min(z for _, z in bounds), max(z for _, z in bounds)
+    if xmax <= xmin or zmax <= zmin:
+        return False
+    width, height, left, top = 760, 535, 80, 65
+    scale = min(580 / (xmax - xmin), 370 / (zmax - zmin))
+    plot_w, plot_h = (xmax - xmin) * scale, (zmax - zmin) * scale
+
+    def project(x: float, z: float) -> tuple[float, float]:
+        return left + (x - xmin) * scale, top + plot_h - (z - zmin) * scale
+
+    polygon = " ".join(
+        f"{x:.4f},{y:.4f}" for x, y in [project(*point) for point in points]
+    )
+    parts = [
+        f'<g data-scale-x="{scale}" data-scale-z="{scale}"><polygon points="{polygon}" fill="#f1f5f9" stroke="#334155" stroke-width="2"/>'
+    ]
+    for x, z in points:
+        px, py = project(x, z)
+        parts.append(f'<circle cx="{px}" cy="{py}" r="1" data-x="{x}" data-z="{z}"/>')
+    if oriented:
+        parts.append('<g class="orientation-arrows">')
+        for key, x, z, yaw, color in oriented:
+            parts.append(_orientation_arrow(*project(x, z), yaw, key, color))
+        parts.append("</g>")
+    for label, x, z, prefix, color in positioned:
+        px, py = project(x, z)
+        title = html.escape(f"{label}: X={x:g}, Z={z:g} m")
+        if prefix == "receiver":
+            parts.append(
+                f'<rect x="{px - 5}" y="{py - 5}" width="10" height="10" fill="{color}"><title>{title}</title></rect>'
+            )
+        else:
+            parts.append(
+                f'<circle cx="{px}" cy="{py}" r="5" fill="{color}"><title>{title}</title></circle>'
+            )
+        parts.append(_label(px + 8, py - 8, label, "start", size=10))
+    parts.append("</g>")
+    parts.extend(
+        [
+            _axes(left, top, plot_w, plot_h),
+            _numeric_x_ticks(left, top, plot_w, plot_h, xmin, xmax),
+            _numeric_y_ticks(left, top, plot_h, zmin, zmax),
+            _label(left + plot_w / 2, 485, "X (m)", "middle"),
+            _label(20, top + plot_h / 2, "Z (m)", "middle", rotate=-90),
+            _label(
+                left,
+                510,
+                f"Public frame: Y vertical; equal axis scale. Poses n={len(positioned)}, excluded={len(actors) - len(positioned)}",
+                "start",
+                size=11,
+            ),
+        ]
+    )
+    path.write_text(
+        _svg_shell(width, height, f"Scene {scene.get('scene_id')}", "".join(parts)),
+        encoding="utf-8",
+    )
+    legend = [
+        (
+            "line",
+            "#334155",
+            "Room contour: authoritative footprint; original X/Z coordinates in meters.",
+        )
+    ]
+    if any(prefix == "receiver" for _, _, _, prefix, _ in positioned):
+        legend.append(("rect", "#111827", "Receiver (square)."))
+    else:
+        legend.append(
+            (
+                None,
+                None,
+                "Receiver position: Not available; n=0; excluded=1; unit: receiver pose.",
+            )
+        )
+    present_events = {
+        str(source.get("source_type") or "Event unavailable")
+        for source in sources
+        if _float_or_none(source.get("source_x_m")) is not None
+        and _float_or_none(source.get("source_z_m")) is not None
+    }
+    legend.extend(
+        ("circle", colors[event], "Source event (circle): " + event)
+        for event in events
+        if event in present_events
+    )
+    valid_sources = sum(prefix == "source" for _, _, _, prefix, _ in positioned)
+    if not valid_sources:
+        legend.append(
+            (
+                None,
+                None,
+                f"Source positions: No data / Not available; n=0; excluded={len(sources)}; unit: source pose.",
+            )
+        )
+    if oriented:
+        legend.append(
+            (
+                None,
+                None,
+                "Orientation arrows: horizontal projection of yaw (yaw 0 = +X, positive yaw toward -Z); "
+                f"pitch and roll not shown; fixed length. n={len(oriented)}, excluded={len(positioned) - len(oriented)}.",
+            )
+        )
+    else:
+        legend.append(
+            (
+                None,
+                None,
+                "Orientation: Not available; no positioned receiver or source has a valid yaw; "
+                f"n=0, excluded={len(positioned)}.",
+            )
+        )
+    legend.append(
+        (
+            None,
+            None,
+            "Points retain their coordinates, including outside-room positions; no clipping or normalization.",
+        )
+    )
+    _append_legend(path, legend)
+    return True
+
+
+ORIENTATION_ARROW_PX = 28.0
+
+
+def _orientation_arrow(
+    px: float, py: float, yaw: float, key: str, color: str
+) -> str:
+    """Fixed-length arrow along the yaw's X/Z projection: plan (cos y, -sin y)."""
+    radians = math.radians(yaw)
+    # Plan +Z is screen up, so plan -sin(y) in Z becomes +sin(y) in screen y.
+    ux, uy = math.cos(radians), math.sin(radians)
+    if abs(ux) < 1e-12:
+        ux = 0.0
+    if abs(uy) < 1e-12:
+        uy = 0.0
+    x2, y2 = px + ux * ORIENTATION_ARROW_PX, py + uy * ORIENTATION_ARROW_PX
+    head, wing = 8.0, 4.0
+    bx, by = x2 - ux * head, y2 - uy * head
+    left = (bx - uy * wing, by + ux * wing)
+    right = (bx + uy * wing, by - ux * wing)
+    escaped = html.escape(key, quote=True)
+    return (
+        f'<line x1="{px}" y1="{py}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="1.5" '
+        f'stroke-opacity="0.85" data-orientation="{escaped}" data-yaw="{yaw:g}"/>'
+        f'<polygon points="{x2:.4f},{y2:.4f} {left[0]:.4f},{left[1]:.4f} {right[0]:.4f},{right[1]:.4f}" '
+        f'fill="{color}" fill-opacity="0.85"><title>{escaped}: yaw {yaw:g} deg</title></polygon>'
+    )
+
+
+def _append_legend(
+    path: Path, entries: list[tuple[str | None, str | None, str]]
+) -> None:
+    """Append a visible, wrapped legend inside an exported SVG's expanded canvas."""
+    svg = path.read_text(encoding="utf-8")
+    match = re.search(r'width="(\d+)" height="(\d+)" viewBox="0 0 \d+ \d+"', svg)
+    if match is None:
+        raise ValueError("SVG canvas dimensions unavailable")
+    width, old_height = map(int, match.groups())
+    y = old_height + 22
+    parts = [_label(24, y, "Legend", "start", size=13)]
+    y += 24
+    for shape, color, text in entries:
+        lines = textwrap.wrap(
+            text, width=max(30, (width - 100) // 7), break_long_words=True
+        ) or [""]
+        if shape == "circle":
+            parts.append(f'<circle cx="32" cy="{y - 4}" r="5" fill="{color}"/>')
+        elif shape == "rect":
+            parts.append(
+                f'<rect x="26" y="{y - 10}" width="12" height="12" fill="{color}"/>'
+            )
+        elif shape == "line":
+            parts.append(
+                f'<line x1="24" y1="{y - 4}" x2="42" y2="{y - 4}" stroke="{color}" stroke-width="2"/>'
+            )
+        for line in lines:
+            parts.append(_label(52, y, line, "start", size=12))
+            y += 19
+        y += 5
+    height = y + 12
+    svg = (
+        svg[: match.start()]
+        + f'width="{width}" height="{height}" viewBox="0 0 {width} {height}"'
+        + svg[match.end() :]
+    )
+    svg = svg.replace(
+        "</svg>", '<g class="chart-legend">' + "".join(parts) + "</g></svg>"
+    )
+    path.write_text(svg, encoding="utf-8")
+
+
+def _presentation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _presentation_value(item)
+            for key, item in value.items()
+            if key != "render_configuration"
+        }
+    if isinstance(value, list):
+        return [_presentation_value(item) for item in value]
+    return value
+
+
+INCIDENT_ROW_LIMIT = 50
+
+# Observed-value distributions in general_parameters: {value: count}.
+DISTRIBUTION_PARAMETERS = frozenset(
+    {"observed_schema_versions", "backend", "sample_rate_hz", "project_name"}
+)
+
+EXPORT_UNITS = [
+    ("scenes", "Unique scene (scene_id), independent of HRTF count"),
+    ("sources", "Unique scene/source identity"),
+    ("render_scenes", "Unique scene/HRTF render variant (not unique scenes)"),
+    ("joined_render_sources", "Source–variant row (not unique sources)"),
+    ("degraded_metadata", "Unique degraded record"),
+    ("rt30_records", "Individual method/frequency value with scene/variant provenance"),
+    ("rt30_consolidated", "One RAVEN scene/frequency estimate with dispersion and variants"),
+    ("rt30_comparisons", "Every candidate scene/frequency comparison, including exclusions"),
+    ("rt30_pairs", "Consolidated scene/frequency pair: Sabine, RAVEN and difference (s)"),
+    ("rt30_scene_means", "Unique scene: complete selected-band means per method"),
+    ("materials", "Scene surface material and area"),
+    ("sampling_records", "Scene sampling metadata and attempts"),
+    ("sampling_failures", "Parsed rows of the optional sampling failure index"),
+    ("sampling_batches", "Unique sampling batch"),
+    ("coverage", "Scene/HRTF coverage and authoritative expectations"),
+    ("incidents", "Category/entity/field/path/detail of an affected observation"),
+    ("metrics", "Chart metric with unit, population, counts and contributing values"),
+]
+
+
+def _readable_parameter(key: str, value: Any) -> str:
+    if isinstance(value, dict):
+        if key in DISTRIBUTION_PARAMETERS:
+            return ", ".join(f"{item} (n={count})" for item, count in value.items()) or "Not available"
+        return "; ".join(f"{item}: {_readable_parameter(item, inner)}" for item, inner in value.items())
+    if isinstance(value, list):
+        return ", ".join(_readable_parameter(key, item) for item in value) or "Not available"
+    return "Not available" if value is None else str(value)
+
+
+def _incident_table(incidents: list[dict[str, Any]]) -> str:
+    shown = incidents[:INCIDENT_ROW_LIMIT]
+    text = f'<h3>Incidents</h3><div class="incidents"><p>Showing {len(shown)} of {len(incidents)} incidents. Full causal details, identities and paths: incidents.jsonl.</p>'
+    if shown:
+        text += _html_table(
+            ["Category", "Entity", "Field", "Detail"],
+            [
+                (row.get("category"), row.get("entity"), row.get("field"), row.get("detail"))
+                for row in shown
+            ],
+        )
+    return text + "</div>"
+
+
+CAROUSEL_SCRIPT = """<script>
+(function () {
+  document.querySelectorAll('[data-carousel]').forEach(function (group) {
+    const slides = Array.from(group.querySelectorAll('[data-slide]'));
+    const previous = group.querySelector('[data-previous]');
+    const next = group.querySelector('[data-next]');
+    const select = group.querySelector('[data-scene-select]');
+    const status = group.querySelector('[data-carousel-status]');
+    let selected = 0;
+    function show(index) {
+      if (!slides.length) return;
+      selected = Math.max(0, Math.min(slides.length - 1, index));
+      slides.forEach(function (slide, position) { slide.hidden = position !== selected; });
+      previous.disabled = selected === 0;
+      next.disabled = selected === slides.length - 1;
+      select.value = String(selected);
+      status.textContent = (selected + 1) + ' of ' + slides.length + ' — ' + slides[selected].dataset.sceneId;
+    }
+    previous.addEventListener('click', function () { show(selected - 1); });
+    next.addEventListener('click', function () { show(selected + 1); });
+    select.addEventListener('change', function () { show(Number(select.value)); });
+    group.addEventListener('keydown', function (event) {
+      if (event.target.closest('select, input, textarea') || event.altKey || event.ctrlKey || event.metaKey) return;
+      const actions = {ArrowLeft: selected - 1, ArrowRight: selected + 1, Home: 0, End: slides.length - 1};
+      if (Object.prototype.hasOwnProperty.call(actions, event.key)) {
+        event.preventDefault();
+        show(actions[event.key]);
+      }
+    });
+    show(0);
+  });
+})();
+</script><noscript><p>JavaScript is disabled. All scene cards are shown below.</p><style>[data-slide][hidden]{display:block!important}</style></noscript>"""
+
+
+def _scene_rt30(data: AnalysisData, scene_id: str, matched: dict[str, Any]) -> str:
+    """Present existing scene/frequency results; never re-estimate or re-consolidate."""
+    raw = [row for row in data.rt30_records if row.get("scene_id") == scene_id]
+    consolidated = [
+        row for row in data.rt30_consolidated if row.get("scene_id") == scene_id
+    ]
+    candidates = [
+        row for row in data.rt30_comparisons if row.get("scene_id") == scene_id
+    ]
+    sabine = {
+        row["frequency_hz"]: row
+        for row in raw
+        if row.get("method") == "Sabine estimate"
+        and row.get("frequency_hz") is not None
+    }
+    raven = {
+        row["frequency_hz"]: row
+        for row in consolidated
+        if row.get("frequency_hz") is not None
+    }
+    comparisons = {row["frequency_hz"]: row for row in candidates}
+    included = set(matched.get("frequencies_hz", []))
+    frequencies = sorted(set(sabine) | set(raven) | set(comparisons))
+    incidents_by_id = {row.get("incident_id"): row for row in data.incidents}
+
+    def seconds(value: Any) -> str:
+        return f"{value:.9g}" if _float_or_none(value) is not None else "Not available"
+
+    def cell(row: dict[str, Any] | None) -> str:
+        if row is None:
+            return "Not available — band absent"
+        if _float_or_none(row.get("value_s")) is not None:
+            return seconds(row["value_s"])
+        cause = incidents_by_id.get(row.get("cause_id"), {})
+        reason = (
+            "variant conflict"
+            if cause.get("category") == "rt30_conflict"
+            else "band absent, invalid or ambiguous"
+        )
+        return "Not available — " + reason
+
+    rows = []
+    for frequency in frequencies:
+        candidate = comparisons.get(frequency, {})
+        membership = (
+            "Included"
+            if frequency in included
+            else (
+                "Excluded — "
+                + str(candidate.get("exclusion_reason") or "no valid pair")
+            )
+            if frequency in comparisons
+            else "Additional — outside comparable mean"
+        )
+        rows.append(
+            [
+                f"{frequency:g}",
+                cell(sabine.get(frequency)),
+                cell(raven.get(frequency)),
+                membership,
+            ]
+        )
+    n_valid = matched.get("n_pairs", 0)
+    n_excluded = len(candidates) - n_valid if candidates else None
+    band_text = (
+        ", ".join(f"{frequency:g}" for frequency in sorted(included)) + " Hz"
+        if included
+        else "Not available"
+    )
+    result = f'<section class="scene-rt30" data-scene-rt30="{html.escape(scene_id, quote=True)}"><h5>RT30 by band — {html.escape(scene_id)}</h5><p>Metadata in seconds; not WAV measurements. RAVEN: one consolidation per scene/frequency, without HRTF duplication.</p>'
+    result += (
+        _html_table(
+            [
+                "Central frequency (Hz)",
+                "RT30 estimate — Sabine (s)",
+                "Reported T30 — RAVEN consolidated (s)",
+                "Comparable mean",
+            ],
+            rows,
+        )
+        if rows
+        else "<p>Not available — no explicit frequencies for this room.</p>"
+    )
+    result += f'<p class="scene-rt30-means">Sabine mean: {seconds(matched.get("sabine_mean_s"))}; RAVEN mean: {seconds(matched.get("raven_mean_s"))}. Unit: s. Both arithmetic means use the same bands: {html.escape(band_text)}; n={n_valid}; excluded={n_excluded if n_excluded is not None else "Not available (expected set absent)"}. Additional bands do not contribute.</p>'
+    return result + "</section>"
+
+
+def _pose_table(scene: dict[str, Any], sources: list[dict[str, Any]]) -> str:
+    rows = [
+        (
+            "Receiver",
+            scene.get("scene_id"),
+            *(scene.get(f"receiver_{axis}_m") for axis in "xyz"),
+        )
+    ]
+    rows += [
+        (
+            "Source",
+            source.get("source_id"),
+            *(source.get(f"source_{axis}_m") for axis in "xyz"),
+        )
+        for source in sources
+    ]
+    return (
+        '<div class="card-poses"><p>Public-frame positions (m); Y is vertical. Full pose provenance and margins: scenes and sources exports.</p>'
+        + _html_table(["Role", "Identity", "X (m)", "Y (m)", "Z (m)"], rows)
+        + "</div>"
+    )
+
+
+def _spatial_carousel(
+    geometry: str,
+    data: AnalysisData,
+    charts: dict[str, Path],
+    matched_means: dict[str, dict[str, Any]],
+) -> str:
+    scenes = [row for row in data.scenes if row.get("geometry_type") == geometry]
+    plans = [
+        (key, path)
+        for key, path in charts.items()
+        if key.startswith(f"plan_{geometry}_")
+    ]
+    group_id = f"geometry-{geometry}"
+    title_id = f"{group_id}-title"
+    select_id = f"{group_id}-select"
+    viewport_id = f"{group_id}-cards"
+    text = f'<section class="carousel" id="{group_id}" data-carousel="{geometry}" role="region" aria-roledescription="carousel" aria-labelledby="{title_id}" tabindex="0">'
+    text += f'<h3 id="{title_id}">{geometry}</h3><p>Unique scenes: n={len(plans)} valid plans; excluded={len(scenes) - len(plans)}. Manual navigation; Left/Right arrows, Home/End.</p>'
+    options, cards = [], []
+    for position, (key, path) in enumerate(plans):
+        scene = data.scenes[int(key.rsplit("_", 1)[-1])]
+        scene_id = str(scene.get("scene_id"))
+        escaped = html.escape(scene_id, quote=True)
+        sources = [
+            row for row in data.sources if row.get("scene_id") == scene.get("scene_id")
+        ]
+        # Unique identities in first-seen order; arrays without HRTF fall back to the variant.
+        identities = list(
+            dict.fromkeys(
+                str(row.get("hrtf_id") or row.get("variant_id"))
+                for row in data.render_scenes
+                if row.get("scene_id") == scene.get("scene_id")
+            )
+        )
+        options.append(f'<option value="{position}">{escaped}</option>')
+        hidden = " hidden" if position else ""
+        card = f'<article class="carousel-card" data-slide data-scene-id="{escaped}" role="group" aria-roledescription="slide" aria-label="{position + 1} of {len(plans)}: {escaped}"{hidden}>'
+        card += (
+            f'<h4>Scene {escaped}</h4><p class="card-hrtfs">HRTF/render variants: '
+            + html.escape(", ".join(identities) or "Not available")
+            + "</p>"
+        )
+        card += path.read_text(encoding="utf-8")
+        card += _scene_rt30(data, scene_id, matched_means.get(scene_id, {}))
+        card += _pose_table(scene, sources) + "</article>"
+        cards.append(card)
+    next_disabled = " disabled" if len(plans) <= 1 else ""
+    select_disabled = " disabled" if len(plans) <= 1 else ""
+    text += f'<div class="carousel-controls"><button type="button" data-previous aria-label="Previous scene in {geometry}" aria-controls="{viewport_id}" disabled>Previous</button><button type="button" data-next aria-label="Next scene in {geometry}" aria-controls="{viewport_id}"{next_disabled}>Next</button><label for="{select_id}">Select scene</label><select id="{select_id}" data-scene-select aria-controls="{viewport_id}"{select_disabled}>{"".join(options)}</select></div>'
+    initial = (
+        f"1 of {len(plans)}"
+        if plans
+        else "0 of 0 — Not available: no valid floor plans."
+    )
+    text += f'<p data-carousel-status role="status" aria-live="polite" aria-atomic="true">{initial}</p><div id="{viewport_id}">{"".join(cards)}</div></section>'
+    return text
+
+
+def _write_report(
+    report_path: Path,
+    data: AnalysisData,
+    summary: dict[str, Any],
+    charts: dict[str, Path],
+    metrics: list[dict[str, Any]],
+    presentation: list[dict[str, Any]] | None = None,
+) -> None:
+    def grid(section: str) -> str:
+        figures = []
+        for metric in metrics:
+            if metric["section"] == section and metric["key"] in charts:
+                caption = f"{metric['population']}; unit: {metric['unit']}; n={metric['n_valid']}; excluded={metric['n_excluded']}. {metric['exclusion_rule']}"
+                figures.append(
+                    "<figure>"
+                    + charts[metric["key"]].read_text(encoding="utf-8")
+                    + "<figcaption>"
+                    + html.escape(caption)
+                    + "</figcaption></figure>"
+                )
+        return '<div class="grid">' + "".join(figures) + "</div>" + notes(section)
+
+    def notes(section: str) -> str:
+        rows = [row for row in presentation or [] if row["section"] == section]
+        constant = [
+            f'<li class="constant-metric">{html.escape(row["title"])}: '
+            f'{html.escape(_format_value(row["value"]))} {html.escape(row["unit"])}; '
+            f'n={row["n_valid"]}; excluded={row["n_excluded"]}</li>'
+            for row in rows
+            if row["state"] == "constant"
+        ]
+        empty = [
+            f'<li class="empty-metric">{html.escape(row["title"])}: Not available; '
+            f'n=0; excluded={row["n_excluded"]}</li>'
+            for row in rows
+            if row["state"] == "empty"
+        ]
+        text = ""
+        if constant:
+            text += "<p>Single observed value (no chart drawn):</p><ul>" + "".join(constant) + "</ul>"
+        if empty:
+            text += "<p>Not available — no valid observations (no chart drawn):</p><ul>" + "".join(empty) + "</ul>"
+        return text
+
+    matched_means = {
+        row["scene_id"]: row for row in summary.get("rt30_matched_means", [])
+    }
+    spatial = [
+        _spatial_carousel(geometry, data, charts, matched_means)
+        for geometry in ("shoebox", "l_shape", "trapezoid")
+    ]
+    rt_by_band = []
+    for frequency in sorted({row["frequency_hz"] for row in data.rt30_pairs}):
+        rows = [row for row in data.rt30_pairs if row["frequency_hz"] == frequency]
+        rt_by_band.append(
+            {
+                "frequency_hz": frequency,
+                "n_pairs": len(rows),
+                "mean_sabine_s": _mean(_numbers(rows, "sabine_s")),
+                "mean_raven_s": _mean(_numbers(rows, "raven_s")),
+                "mean_raven_minus_sabine_s": _mean(_numbers(rows, "difference_s")),
+            }
+        )
+    status = summary.get("status", "partial")
+    if not data.scenes and not data.render_scenes and not data.degraded_records:
+        status = "No analyzable data"
+    count_keys = [
+        "unique_scene_count",
+        "scenes_with_render_count",
+        "render_variant_count",
+        "unique_source_count",
+        "source_variant_count",
+        "degraded_metadata_count",
+        "affected_entity_count",
+        "expected_variant_count",
+    ]
+    counts = _html_table(
+        ["Population", "Count"], [(key, summary.get(key)) for key in count_keys]
+    )
+    parameters = _html_table(
+        ["Parameter", "Observed values and frequencies / available configuration"],
+        [
+            (key, _readable_parameter(key, value))
+            for key, value in _presentation_value(data.general_parameters).items()
+        ],
+    )
+    hrtf_counts = next(
+        (row.get("counts", {}) for row in metrics if row["key"] == "hist_employed_hrtf"),
+        {},
+    )
+    hrtf = (
+        '<h3>HRTF coverage</h3><div class="hrtf-coverage">'
+        + (
+            _html_table(
+                ["HRTF identity", "Render variants"],
+                sorted(hrtf_counts.items(), key=lambda item: (-item[1], item[0])),
+            )
+            if hrtf_counts
+            else "<p>Not available — no employed HRTF identities.</p>"
+        )
+        + "</div>"
+    )
+    rt_table = (
+        _html_table(
+            [
+                "Central frequency (Hz)",
+                "Pairs",
+                "Mean Sabine (s)",
+                "Mean RAVEN (s)",
+                "Mean RAVEN − Sabine (s)",
+            ],
+            [
+                (
+                    f"{row['frequency_hz']:g}",
+                    row["n_pairs"],
+                    row["mean_sabine_s"],
+                    row["mean_raven_s"],
+                    row["mean_raven_minus_sabine_s"],
+                )
+                for row in rt_by_band
+            ],
+        )
+        if rt_by_band
+        else "<p>Not available — n=0 valid pairs.</p>"
+    )
+    quality = _incident_table(data.incidents)
+    exports = _html_table(
+        ["File stem", "Observation unit"], [(stem, unit) for stem, unit in EXPORT_UNITS]
+    )
+    body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Output Analysis Report</title>
+<style>body{{font:14px/1.5 Arial,sans-serif;color:#1f2937;background:#f8fafc;margin:0}}header,main{{padding:24px;max-width:1200px;margin:auto}}h2{{border-bottom:1px solid #cbd5e1}}section{{margin-bottom:32px}}table{{border-collapse:collapse;width:100%;background:white}}td,th{{border:1px solid #cbd5e1;text-align:left;padding:8px;vertical-align:top;overflow-wrap:anywhere}}th{{background:#e2e8f0}}.scroll{{overflow:auto;max-height:560px}}.grid{{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))}}figure{{margin:0;background:white;padding:10px}}svg{{max-width:100%;height:auto}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}figcaption{{color:#475569}}details{{margin:12px 0;padding:10px;background:white;border:1px solid #e2e8f0}}summary{{cursor:pointer;font-weight:bold}}[hidden]{{display:none!important}}.carousel{{border:1px solid #cbd5e1;padding:16px;margin-bottom:24px}}.carousel-controls{{display:flex;flex-wrap:wrap;gap:10px;align-items:center}}button,select{{font:inherit;padding:8px;max-width:100%}}:focus-visible{{outline:3px solid #2563eb;outline-offset:3px}}.carousel-card{{overflow-wrap:anywhere}}.carousel-card svg{{display:block;margin:auto}}</style></head>
+<body><header><h1>Output Analysis Report</h1><p>{html.escape(str(data.run_dir))}</p><p>Status: {html.escape(str(status))}</p></header><main>
+<section id="general-parameters"><h2>General parameters</h2><p>Supported scene/render schema: 3.0 only. Metadata only; no audio measurements.</p>{counts}{parameters}{grid("general")}{hrtf}</section>
+<section><h2>Positions by geometry</h2><p>One exact public-frame X/Z floor plan per unique scene. Y is vertical. No HRTF duplication.</p>{"".join(spatial)}</section>
+<section><h2>Acoustics and sources</h2>{grid("acoustics")}<h3>RT30 scene means</h3><p>Complete mean RT30 per unique scene over its selected central frequencies, from metadata (seconds); not a WAV measurement. A scene is excluded from a method when any selected band is missing, invalid or conflicted. Sabine and RAVEN share bin edges and count scale; dashed marks are sampling target counts when available.</p>{grid("scene_means")}<h3>RT30 aligned comparison by central frequency</h3><p>RAVEN reported T30 versus Sabine estimate, seconds. No WAV measurements. Each pair is one scene/frequency; differences and means use exactly the same valid pairs. Additional RAVEN bands remain in method records. RAVEN uses the mean of numerically equivalent variants per scene/frequency; only bands beyond tolerance are excluded. Equivalence is a numerical criterion, not proof of simulator determinism. Tolerance: absolute {RT30_ABS_TOL_S:g} s, relative {RT30_REL_TOL:g}, tested for every valid variant pair.</p>{rt_table}<p>Record-level RT30 audit data (per-scene matched means, candidates and exclusions, aligned pairs, consolidated RAVEN values and individual variant/frequency values) is in the rt30_scene_means, rt30_comparisons, rt30_pairs, rt30_consolidated and rt30_records exports and summary.json; see Data exports.</p></section>
+<section><h2>Coverage and metadata quality</h2><p>Expected coverage unavailable unless an authoritative expectation is present in the coverage records. Missing optional failure indexes do not mean zero failures. Incident categories overlap; do not sum them as distinct affected entities.</p>{_html_table(["Category", "Count"], list(summary.get("incident_counts", {}).items()))}<details><summary>Population definitions and valid/excluded counts</summary><pre>{html.escape(json.dumps(summary.get("populations", {}), ensure_ascii=False, indent=2))}</pre></details>{grid("quality")}<p>Coverage, materials, sampling records/failures/batches, degraded records and render variants are available as record-level exports; see Data exports.</p>{quality}</section>
+<section id="data-exports"><h2>Data exports</h2><p>All figures are embedded; this HTML works offline by itself. Original SVGs are also in images/. Every population below has JSON, JSONL and CSV exports next to this report (for example joined_render_sources.jsonl and .csv contain source–variant rows). general_parameters.json, metrics.json and summary.json preserve values, denominators and provenance for audit, including metrics not drawn in this report. Null means Not available, never an imputed zero.</p>{exports}</section>
+</main>{CAROUSEL_SCRIPT}</body></html>"""
+    report_path.write_text(body, encoding="utf-8", newline="\n")
+
+
+def _write_histogram(
+    path: Path, values: list[float], title: str, xlabel: str, bins: int = 12
+) -> None:
+    width, height = 760, 420
+    left, right, top, bottom = 70, 30, 46, 70
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    if not values:
+        _write_empty_svg(path, title, "No numeric values available")
+        return
+    minimum, maximum = min(values), max(values)
+    if math.isclose(minimum, maximum):
+        minimum -= 0.5
+        maximum += 0.5
+    step = (maximum - minimum) / bins
+    counts = [0] * bins
+    for value in values:
+        index = min(bins - 1, max(0, int((value - minimum) / step)))
+        counts[index] += 1
+    max_count = max(counts) or 1
+    bars = []
+    for index, count in enumerate(counts):
+        x = left + index * (plot_w / bins)
+        bar_w = plot_w / bins - 3
+        bar_h = plot_h * (count / max_count)
+        y = top + plot_h - bar_h
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" fill="#2563eb"/>'
+        )
+    svg = _svg_shell(
+        width,
+        height,
+        title,
+        "".join(bars)
+        + _axes(left, top, plot_w, plot_h)
+        + _numeric_x_ticks(left, top, plot_w, plot_h, minimum, maximum)
+        + _numeric_y_ticks(left, top, plot_h, 0, max_count)
+        + _label(left + plot_w / 2, height - 20, xlabel, "middle")
+        + _label(18, top + plot_h / 2, "count", "middle", rotate=-90),
+    )
+    path.write_text(svg, encoding="utf-8", newline="\n")
+
+
+def _write_bar_chart(
+    path: Path, counts: dict[str, int], title: str, ylabel: str
+) -> None:
+    width, height = 820, 460
+    left, right, top, bottom = 90, 30, 46, 120
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    if not counts:
+        _write_empty_svg(path, title, "No records available")
+        return
+    items = list(counts.items())
+    max_count = max(count for _, count in items) or 1
+    bar_w = max(8, plot_w / len(items) - 8)
+    parts = []
+    for index, (label, count) in enumerate(items):
+        x = left + index * (plot_w / len(items)) + 4
+        bar_h = plot_h * count / max_count
+        y = top + plot_h - bar_h
+        color = PALETTE[index % len(PALETTE)]
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" fill="{color}"/>'
+        )
+        parts.append(_label(x + bar_w / 2, y - 5, str(count), "middle", size=11))
+        parts.append(
+            _label(
+                x + bar_w / 2, height - 48, _short(label), "end", size=10, rotate=-35
+            )
+        )
+    svg = _svg_shell(
+        width,
+        height,
+        title,
+        "".join(parts)
+        + _axes(left, top, plot_w, plot_h)
+        + _label(20, top + plot_h / 2, ylabel, "middle", rotate=-90),
+    )
+    path.write_text(svg, encoding="utf-8", newline="\n")
+
+
+SCENE_METHOD_COLORS = {"sabine": PALETTE[0], "raven": PALETTE[1]}
+SCENE_METHOD_NAMES = {"sabine": "Sabine estimate", "raven": "RAVEN consolidated T30"}
+
+
+def _scene_context_legend(metric: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    frequencies = ", ".join(f"{f:g}" for f in metric.get("selected_frequencies_hz") or [])
+    return [
+        (None, None, "Central frequencies (Hz): " + (frequencies or "Not available")),
+        (None, None, f"Bin edges: {metric.get('edge_source')}."),
+    ]
+
+
+def _scene_population_legend(metric: dict[str, Any]) -> list[tuple[str | None, str | None, str]]:
+    entries = [(
+        None, None,
+        f"Population: {metric['population']}; n={metric['n_valid']}; "
+        f"excluded={metric['n_excluded']}; unit: {metric['unit']}.",
+    )]
+    if not metric["n_valid"]:
+        entries.append((None, None, "No data / Not available — no observed series."))
+    return entries
+
+
+def _write_scene_histogram(path: Path, metric: dict[str, Any]) -> None:
+    """Draw exported scene-mean bins as-is; never re-bin the observations."""
+    title = metric["title"]
+    edges = metric.get("bin_edges_s") or []
+    counts = metric.get("bin_counts") or []
+    targets = metric.get("target_counts")
+    under = metric.get("underflow_count") or 0
+    over = metric.get("overflow_count") or 0
+    color = SCENE_METHOD_COLORS.get(metric.get("method"), PALETTE[0])
+    if not metric["n_valid"] or len(edges) < 2 or len(counts) != len(edges) - 1:
+        _write_empty_svg(path, title, "No data / Not available")
+    else:
+        width, height = 760, 420
+        left, right, top, bottom = 70, 30, 46, 70
+        gutter = 64
+        plot_w = width - left - right
+        plot_h = height - top - bottom
+        x0 = left + (gutter if under else 0)
+        x1 = left + plot_w - (gutter if over else 0)
+        low, high = edges[0], edges[-1]
+        scale = metric.get("count_axis_max") or max([1, under, over, *counts, *(targets or [])])
+
+        def x_at(value: float) -> float:
+            return x0 + (x1 - x0) * (value - low) / (high - low)
+
+        def y_at(count: float) -> float:
+            return top + plot_h - plot_h * count / scale
+
+        parts = []
+        for index, count in enumerate(counts):
+            lower, upper = edges[index], edges[index + 1]
+            bx = x_at(lower) + 1
+            bw = max(1.0, x_at(upper) - x_at(lower) - 2)
+            parts.append(
+                f'<rect class="scene-bin" data-lower="{lower!r}" data-upper="{upper!r}" '
+                f'data-count="{count}" x="{bx:.1f}" y="{y_at(count):.1f}" '
+                f'width="{bw:.1f}" height="{top + plot_h - y_at(count):.1f}" fill="{color}"/>'
+            )
+            parts.append(_label(bx + bw / 2, y_at(count) - 4, str(count), "middle", size=10))
+            if targets is not None:
+                ty = y_at(targets[index])
+                parts.append(
+                    f'<line class="scene-target" data-count="{targets[index]}" x1="{bx:.1f}" '
+                    f'y1="{ty:.1f}" x2="{bx + bw:.1f}" y2="{ty:.1f}" stroke="#111827" '
+                    'stroke-width="2" stroke-dasharray="5 3"/>'
+                )
+        for css_class, count, bx, text in (
+            ("scene-underflow", under, left + 6, f"< {low:g} s: {under}"),
+            ("scene-overflow", over, x1 + 6, f"> {high:g} s: {over}"),
+        ):
+            if count:
+                bw = gutter - 12
+                parts.append(
+                    f'<rect class="{css_class}" data-count="{count}" x="{bx:.1f}" '
+                    f'y="{y_at(count):.1f}" width="{bw:.1f}" '
+                    f'height="{top + plot_h - y_at(count):.1f}" fill="#9ca3af"/>'
+                )
+                parts.append(_label(bx + bw / 2, y_at(count) - 4, text, "middle", size=10))
+        ticks = []
+        for edge in edges:
+            x = x_at(edge)
+            ticks.append(
+                f'<line x1="{x:.1f}" y1="{top + plot_h:.1f}" x2="{x:.1f}" '
+                f'y2="{top + plot_h + 5:.1f}" stroke="#374151" stroke-width="1"/>'
+            )
+            ticks.append(_label(x, top + plot_h + 20, _format_tick(edge), "middle", size=10))
+        svg = _svg_shell(
+            width, height, title,
+            "".join(parts)
+            + _axes(left, top, plot_w, plot_h)
+            + "".join(ticks)
+            + _numeric_y_ticks(left, top, plot_h, 0, scale)
+            + _label(left + plot_w / 2, height - 20, "complete mean RT30 per scene (s)", "middle")
+            + _label(18, top + plot_h / 2, "scenes", "middle", rotate=-90),
+        )
+        path.write_text(svg, encoding="utf-8", newline="\n")
+    name = SCENE_METHOD_NAMES.get(metric.get("method"), str(metric.get("method")))
+    legend = _scene_population_legend(metric)
+    legend.append((
+        "rect", color,
+        f"{name}: bars count scenes whose complete mean falls in each interval "
+        f"{metric.get('interval_closure', '')}.",
+    ))
+    if targets is not None:
+        legend.append(("line", "#111827", "Sampling target counts per bin (dashed marks)."))
+    else:
+        legend.append((
+            None, None,
+            "Sampling target counts unavailable: "
+            + str(metric.get("reference_unavailable_reason") or "Not available"),
+        ))
+    if len(edges) >= 2:
+        legend.append((
+            "rect", "#9ca3af",
+            f"Outside bin range: below {edges[0]:g} s = {under}; above {edges[-1]:g} s = {over}.",
+        ))
+    legend.extend(_scene_context_legend(metric))
+    _append_legend(path, legend)
+
+
+def _write_scene_scatter(path: Path, metric: dict[str, Any]) -> None:
+    """Sabine versus RAVEN complete scene means on one shared axis range."""
+    title = metric["title"]
+    points = metric.get("observations") or []
+    if not points:
+        _write_empty_svg(path, title, "No data / Not available")
+    else:
+        size, left, top, bottom = 420, 70, 46, 70
+        width, height = left + size + 30, top + size + bottom
+        values = [v for p in points for v in (p["sabine_s"], p["raven_s"])]
+        low, high = min(values), max(values)
+        padding = max((high - low) * 0.05, abs(high) * 0.05, 0.01)
+        low, high = low - padding, high + padding
+
+        def x_at(value: float) -> float:
+            return left + size * (value - low) / (high - low)
+
+        def y_at(value: float) -> float:
+            return top + size - size * (value - low) / (high - low)
+
+        parts = [
+            f'<line class="identity-line" data-from="{low!r}" data-to="{high!r}" '
+            f'x1="{x_at(low):.1f}" y1="{y_at(low):.1f}" x2="{x_at(high):.1f}" '
+            f'y2="{y_at(high):.1f}" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6 4"/>'
+        ]
+        for p in points:
+            parts.append(
+                f'<circle class="scene-point" data-sabine="{p["sabine_s"]!r}" '
+                f'data-raven="{p["raven_s"]!r}" cx="{x_at(p["sabine_s"]):.1f}" '
+                f'cy="{y_at(p["raven_s"]):.1f}" r="2.5" fill="{PALETTE[4]}" fill-opacity="0.6"/>'
+            )
+        svg = _svg_shell(
+            width, height, title,
+            "".join(parts)
+            + _axes(left, top, size, size)
+            + _numeric_x_ticks(left, top, size, size, low, high)
+            + _numeric_y_ticks(left, top, size, low, high)
+            + _label(left + size / 2, height - 20, "Sabine estimate mean (s)", "middle")
+            + _label(18, top + size / 2, "RAVEN consolidated T30 mean (s)", "middle", rotate=-90),
+        )
+        path.write_text(svg, encoding="utf-8", newline="\n")
+    legend = _scene_population_legend(metric)
+    legend.append((
+        "circle", PALETTE[4],
+        "One point per scene with complete Sabine and RAVEN means; "
+        "scenes missing either mean are excluded.",
+    ))
+    legend.append(("line", "#6b7280", "Identity y = x: RAVEN equals Sabine."))
+    legend.extend(_scene_context_legend(metric))
+    _append_legend(path, legend)
+
+
+SCENE_CHART_WRITERS = {
+    "scene_histogram": _write_scene_histogram,
+    "scene_scatter": _write_scene_scatter,
+}
+
+
+def _html_table(headers: list[str], rows: list[Any]) -> str:
+    head = "".join(f"<th>{html.escape(str(header))}</th>" for header in headers)
+    body = []
+    for row in rows:
+        values = row if isinstance(row, list | tuple) else list(row)
+        body.append(
+            "<tr>"
+            + "".join(
+                f"<td>{html.escape(_format_value(value))}</td>" for value in values
+            )
+            + "</tr>"
+        )
+    return (
+        f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def _write_empty_svg(path: Path, title: str, message: str) -> None:
+    svg = _svg_shell(680, 280, title, _label(340, 150, message, "middle", size=16))
+    path.write_text(svg, encoding="utf-8", newline="\n")
+
+
+def _svg_shell(width: int, height: int, title: str, inner: str) -> str:
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">
+  <title>{html.escape(title)}</title>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="24" y="30" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#111827">{html.escape(title)}</text>
+  {inner}
+</svg>
+"""
+
+
+def _axes(left: float, top: float, plot_w: float, plot_h: float) -> str:
+    return (
+        f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" stroke="#374151" stroke-width="1"/>'
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}" stroke="#374151" stroke-width="1"/>'
+    )
+
+
+def _numeric_x_ticks(
+    left: float,
+    top: float,
+    plot_w: float,
+    plot_h: float,
+    minimum: float,
+    maximum: float,
+    count: int = 5,
+) -> str:
+    if count < 2:
+        return ""
+    parts = []
+    for index in range(count):
+        ratio = index / (count - 1)
+        value = minimum + (maximum - minimum) * ratio
+        x = left + plot_w * ratio
+        y = top + plot_h
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{y:.1f}" x2="{x:.1f}" y2="{y + 5:.1f}" stroke="#374151" stroke-width="1"/>'
+        )
+        parts.append(_label(x, y + 20, _format_tick(value), "middle", size=10))
+    return "".join(parts)
+
+
+def _numeric_y_ticks(
+    left: float,
+    top: float,
+    plot_h: float,
+    minimum: float,
+    maximum: float,
+    count: int = 5,
+    axis: str = "y",
+) -> str:
+    if count < 2:
+        return ""
+    parts = []
+    for index in range(count):
+        ratio = index / (count - 1)
+        value = minimum + (maximum - minimum) * ratio
+        y = top + plot_h - plot_h * ratio
+        parts.append(
+            f'<line x1="{left - 5:.1f}" y1="{y:.1f}" x2="{left:.1f}" y2="{y:.1f}" stroke="#374151" stroke-width="1"/>'
+        )
+        parts.append(_label(left - 9, y + 4, _format_tick(value), "end", size=10))
+    if axis != "y":
+        parts.append(_label(left - 9, top + 12, axis, "end", size=10))
+    return "".join(parts)
+
+
+def _label(
+    x: float,
+    y: float,
+    text: str,
+    anchor: str,
+    size: int = 12,
+    rotate: int | None = None,
+) -> str:
+    transform = (
+        f' transform="rotate({rotate} {x:.1f} {y:.1f})"' if rotate is not None else ""
+    )
+    return (
+        f'<text x="{x:.1f}" y="{y:.1f}" text-anchor="{anchor}" font-family="Arial, sans-serif" '
+        f'font-size="{size}" fill="#374151"{transform}>{html.escape(text)}</text>'
+    )
+
+
+def _numbers(records: list[dict[str, Any]], field: str) -> list[float]:
+    return [
+        value
+        for value in (_float_or_none(record.get(field)) for record in records)
+        if value is not None
+    ]
+
+
+def _counts(values: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if value is None or value == "":
+            continue
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _short(label: str, limit: int = 24) -> str:
+    return label if len(label) <= limit else label[: limit - 1] + "..."
+
+
+def _slug(value: str) -> str:
+    slug = "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_")
+    return slug or "unknown"
+
+
+def _format_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    return "Not available" if value is None else str(value)
+
+
+def _format_tick(value: float) -> str:
+    if math.isclose(value, round(value)):
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".")

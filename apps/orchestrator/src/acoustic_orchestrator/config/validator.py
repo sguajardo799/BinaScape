@@ -6,12 +6,31 @@ from typing import Any, TypedDict
 
 import yaml
 
-from .models import AppConfig, AudioFolderNoiseStrategyConfig, ClarityRunnerConfig, ReceiverOutputConfig, SourceTypeConfig
+from .models import (
+    AppConfig,
+    AudioFolderNoiseStrategyConfig,
+    CircularArrayOutputConfig,
+    ClarityRunnerConfig,
+    HearingDegradationConfig,
+    LShapeGeometryConfig,
+    ReceiverOutputConfig,
+    RoomShapeConfig,
+    ShoeboxGeometryConfig,
+    SourceTypeConfig,
+    TrapezoidGeometryConfig,
+)
 from acoustic_orchestrator.pipeline.output_paths import find_unsupported_placeholders, is_safe_output_subdir
+from acoustic_orchestrator.experiment.reverberation_sampling import build_bins
+from acoustic_orchestrator.experiment.treatment_catalog import validate_catalog
+from acoustic_orchestrator.source_audio import list_source_wavs
+from acoustic_orchestrator.receiver_ir_subjects import subject_catalog
+from acoustic_orchestrator.config.backend_validation import validate_backend_config
 
 
 MIN_SOURCE_WALL_CLEARANCE_M = 0.5
 MIN_SOURCE_RECEIVER_DISTANCE_M = 0.5
+PROBABILITY_ABS_TOL = 1e-6
+PROBABILITY_REL_TOL = 1e-9
 HEARING_PROFILE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SUPPORTED_BACKGROUND_AUDIO_SUFFIXES = {".wav"}
 
@@ -20,6 +39,171 @@ class HearingProfileDefinition(TypedDict):
     hearing_profile_id: str
     left_loss_db_by_band: dict[str, float]
     right_loss_db_by_band: dict[str, float]
+    left_compression_health: float | dict[str, float] | None
+    right_compression_health: float | dict[str, float] | None
+
+
+def _validate_room_geometry(errors: list[str], config: AppConfig) -> None:
+    geometry = config.room_sampling.geometry
+    _validate_numeric_range(
+        errors,
+        "room_sampling.geometry.height_m",
+        geometry.height_m.min,
+        geometry.height_m.max,
+        strictly_positive=True,
+    )
+
+    if not geometry.shape_mix:
+        errors.append("room_sampling.geometry.shape_mix no puede estar vacío")
+        return
+
+    shape_types = [shape.type for shape in geometry.shape_mix]
+    if len(set(shape_types)) != len(shape_types):
+        errors.append("room_sampling.geometry.shape_mix no permite tipos duplicados")
+
+    probabilities = [shape.probability for shape in geometry.shape_mix]
+    for index, probability in enumerate(probabilities):
+        if not isfinite(probability) or probability <= 0.0:
+            errors.append(
+                f"room_sampling.geometry.shape_mix[{index}].probability debe ser finita y > 0"
+            )
+    total_probability = sum(probabilities)
+    if not isclose(
+        total_probability,
+        1.0,
+        rel_tol=PROBABILITY_REL_TOL,
+        abs_tol=PROBABILITY_ABS_TOL,
+    ):
+        errors.append(
+            "room_sampling.geometry.shape_mix probabilities debe sumar 1.0 "
+            f"y suma {total_probability}"
+        )
+
+    for index, shape in enumerate(geometry.shape_mix):
+        _validate_room_shape(errors, shape, index)
+
+    materials = config.room_sampling.materials
+    for pool_name, pool in (
+        ("walls", materials.walls),
+        ("floor", materials.floor),
+        ("ceiling", materials.ceiling),
+    ):
+        if not pool:
+            errors.append(f"room_sampling.materials.{pool_name} no puede estar vacío")
+
+
+def _validate_room_shape(errors: list[str], shape: RoomShapeConfig, index: int) -> None:
+    prefix = f"room_sampling.geometry.shape_mix[{index}]"
+    if isinstance(shape, ShoeboxGeometryConfig):
+        _validate_positive_shape_ranges(errors, prefix, shape, ("length_m", "width_m"))
+        if shape.length_m.max <= 1.0 or shape.width_m.max <= 1.0:
+            errors.append(f"{prefix} no puede producir una región útil con margen de 0.5 m")
+        return
+
+    if isinstance(shape, TrapezoidGeometryConfig):
+        _validate_positive_shape_ranges(
+            errors,
+            prefix,
+            shape,
+            ("base_a_m", "base_b_m", "depth_m"),
+        )
+        _validate_numeric_range(
+            errors,
+            f"{prefix}.top_offset_m",
+            shape.top_offset_m.min,
+            shape.top_offset_m.max,
+        )
+        if shape.depth_m.max <= 1.0 or max(shape.base_a_m.max, shape.base_b_m.max) <= 1.0:
+            errors.append(f"{prefix} no puede producir una región útil con margen de 0.5 m")
+        return
+
+
+    assert isinstance(shape, LShapeGeometryConfig)
+    _validate_positive_shape_ranges(
+        errors,
+        prefix,
+        shape,
+        (
+            "outer_length_m",
+            "outer_width_m",
+            "cutout_length_m",
+            "cutout_width_m",
+        ),
+    )
+    if not shape.removed_corners:
+        errors.append(f"{prefix}.removed_corners no puede estar vacío")
+    elif len(set(shape.removed_corners)) != len(shape.removed_corners):
+        errors.append(f"{prefix}.removed_corners no permite duplicados")
+
+    if shape.outer_length_m.max - shape.cutout_length_m.min <= 1.0:
+        errors.append(f"{prefix} no puede producir un brazo horizontal útil mayor que 1.0 m")
+    if shape.outer_width_m.max - shape.cutout_width_m.min <= 1.0:
+        errors.append(f"{prefix} no puede producir un brazo vertical útil mayor que 1.0 m")
+
+
+def _validate_positive_shape_ranges(
+    errors: list[str],
+    prefix: str,
+    shape: object,
+    field_names: tuple[str, ...],
+) -> None:
+    for field_name in field_names:
+        value_range = getattr(shape, field_name)
+        _validate_numeric_range(
+            errors,
+            f"{prefix}.{field_name}",
+            value_range.min,
+            value_range.max,
+            strictly_positive=True,
+        )
+
+
+def _validate_numeric_range(
+    errors: list[str],
+    field_name: str,
+    min_value: float,
+    max_value: float,
+    *,
+    strictly_positive: bool = False,
+) -> None:
+    if not isfinite(min_value) or not isfinite(max_value):
+        errors.append(f"{field_name} debe contener valores finitos")
+        return
+    if min_value > max_value:
+        errors.append(f"{field_name}.min no puede ser mayor que .max")
+    if strictly_positive and (min_value <= 0.0 or max_value <= 0.0):
+        errors.append(f"{field_name} debe contener longitudes > 0")
+
+
+def _validate_reverberation(errors: list[str], config: AppConfig) -> None:
+    reverberation = config.room_sampling.reverberation
+    distribution = reverberation.distribution
+    try:
+        build_bins(distribution.range_s.min, distribution.range_s.max, distribution.bin_width_s)
+    except ValueError as exc:
+        errors.append(f"room_sampling.reverberation.distribution: {exc}")
+    tolerance = distribution.quota_tolerance_fraction
+    if not isfinite(tolerance) or not 0 <= tolerance <= 1:
+        errors.append("quota_tolerance_fraction debe ser finita y pertenecer a [0,1]")
+    if reverberation.mean_bands_hz != [125, 250, 500, 1000, 2000, 4000, 8000]:
+        errors.append("mean_bands_hz debe coincidir exactamente con [125, 250, 500, 1000, 2000, 4000, 8000]")
+    treatment = reverberation.treatment
+    if treatment.eligible_surface_types != ["wall", "ceiling"]:
+        errors.append("eligible_surface_types debe ser exactamente [wall, ceiling]")
+    for field_name, coverage in (
+        ("wall_coverage", treatment.wall_coverage),
+        ("ceiling_coverage", treatment.ceiling_coverage),
+    ):
+        if (
+            not isfinite(coverage.min)
+            or not isfinite(coverage.max)
+            or not 0 <= coverage.min <= coverage.max <= 1
+        ):
+            errors.append(f"room_sampling.reverberation.treatment.{field_name} debe cumplir 0 <= min <= max <= 1")
+    try:
+        validate_catalog(treatment.catalog_version)
+    except ValueError as exc:
+        errors.append(f"Catálogo de tratamientos inválido: {exc}")
 
 
 def validate_config(config: AppConfig) -> None:
@@ -27,7 +211,7 @@ def validate_config(config: AppConfig) -> None:
     materials_root: Path | None = None
 
     if config.experiment.scene_type != "static":
-        errors.append("Solo se soporta experiment.scene_type=static en este MVP")
+        errors.append("Solo se soporta experiment.scene_type=static en esta versión")
 
     if config.execution.num_simulations <= 0:
         errors.append("execution.num_simulations debe ser > 0")
@@ -40,19 +224,39 @@ def validate_config(config: AppConfig) -> None:
 
     _validate_background_noise(errors, config)
 
-    if config.scene_validation.max_sampling_attempts_per_scene <= 0:
-        errors.append("scene_validation.max_sampling_attempts_per_scene debe ser > 0")
+    if config.scene_validation.max_scene_attempts <= 0:
+        errors.append("scene_validation.max_scene_attempts debe ser > 0")
+    if config.scene_validation.max_receiver_attempts <= 0:
+        errors.append("scene_validation.max_receiver_attempts debe ser > 0")
 
     if not config.receiver_sampling.one_receiver_per_scene:
         errors.append("Este MVP requiere receiver_sampling.one_receiver_per_scene=true")
 
-    _validate_range(errors, "room_sampling.dimensions_m.length", config.room_sampling.dimensions_m.length.min, config.room_sampling.dimensions_m.length.max)
-    _validate_range(errors, "room_sampling.dimensions_m.width", config.room_sampling.dimensions_m.width.min, config.room_sampling.dimensions_m.width.max)
-    _validate_range(errors, "room_sampling.dimensions_m.height", config.room_sampling.dimensions_m.height.min, config.room_sampling.dimensions_m.height.max)
+    _validate_room_geometry(errors, config)
+    _validate_reverberation(errors, config)
     _validate_range(errors, "receiver_sampling.position_strategy.fixed_height_m", config.receiver_sampling.position_strategy.fixed_height_m.min, config.receiver_sampling.position_strategy.fixed_height_m.max)
     _validate_range(errors, "source_sampling.timing.start_time_s", config.source_sampling.timing.start_time_s.min, config.source_sampling.timing.start_time_s.max)
     _validate_range(errors, "source_sampling.gain_db", config.source_sampling.gain_db.min, config.source_sampling.gain_db.max)
-    _validate_range(errors, "receiver_sampling.orientation_strategy.yaw_deg", config.receiver_sampling.orientation_strategy.yaw_deg.min, config.receiver_sampling.orientation_strategy.yaw_deg.max)
+    receiver_orientation = config.receiver_sampling.orientation_strategy
+    _validate_range(
+        errors,
+        "receiver_sampling.orientation_strategy.yaw_deg",
+        receiver_orientation.yaw_deg.min,
+        receiver_orientation.yaw_deg.max,
+    )
+    if receiver_orientation.type == "random_yaw_pitch":
+        _validate_range(
+            errors,
+            "receiver_sampling.orientation_strategy.pitch_deg",
+            receiver_orientation.pitch_deg.min,
+            receiver_orientation.pitch_deg.max,
+        )
+        _validate_range(
+            errors,
+            "receiver_sampling.orientation_strategy.roll_deg",
+            receiver_orientation.roll_deg.min,
+            receiver_orientation.roll_deg.max,
+        )
 
     if (
         config.source_sampling.timing.total_duration_s is not None
@@ -60,31 +264,27 @@ def validate_config(config: AppConfig) -> None:
     ):
         errors.append("source_sampling.timing.total_duration_s debe ser > 0")
 
-    if config.receiver_sampling.position_strategy.margin_m.x * 2 >= config.room_sampling.dimensions_m.length.max:
-        errors.append("receiver_sampling.position_strategy.margin_m.x es demasiado grande para la longitud máxima del cuarto")
+    receiver_margins = config.receiver_sampling.position_strategy.margin_m
+    if receiver_margins.x < MIN_SOURCE_WALL_CLEARANCE_M or receiver_margins.z < MIN_SOURCE_WALL_CLEARANCE_M:
+        errors.append("receiver_sampling.position_strategy.margin_m.x y .z deben ser >= 0.5")
 
-    if config.receiver_sampling.position_strategy.margin_m.y * 2 >= config.room_sampling.dimensions_m.width.max:
-        errors.append("receiver_sampling.position_strategy.margin_m.y es demasiado grande para el ancho máximo del cuarto")
-
-    if config.receiver_sampling.position_strategy.fixed_height_m.max > config.room_sampling.dimensions_m.height.max:
-        errors.append("receiver_sampling.position_strategy.fixed_height_m.max no puede exceder room_sampling.dimensions_m.height.max")
+    room_height = config.room_sampling.geometry.height_m
+    receiver_height = config.receiver_sampling.position_strategy.fixed_height_m
+    if receiver_height.min < 0.0 or receiver_height.max > room_height.min:
+        errors.append(
+            "receiver_sampling.position_strategy.fixed_height_m debe quedar entre piso y la altura mínima de la sala"
+        )
 
     if config.source_sampling.min_sources > config.source_sampling.max_sources:
         errors.append("source_sampling.min_sources no puede ser mayor que max_sources")
 
-    if config.source_sampling.min_sources <= 1:
-        errors.append("source_sampling.min_sources debe ser > 1")
+    if config.source_sampling.min_sources < 1:
+        errors.append("source_sampling.min_sources debe ser >= 1")
 
-    for axis_name, dimension_range in {
-        "length": config.room_sampling.dimensions_m.length,
-        "width": config.room_sampling.dimensions_m.width,
-        "height": config.room_sampling.dimensions_m.height,
-    }.items():
-        if dimension_range.min < MIN_SOURCE_WALL_CLEARANCE_M * 2:
-            errors.append(
-                f"room_sampling.dimensions_m.{axis_name}.min debe ser >= {MIN_SOURCE_WALL_CLEARANCE_M * 2:.1f} "
-                "para mantener 0.5 m de separación mínima entre fuentes y paredes"
-            )
+    if room_height.min <= MIN_SOURCE_WALL_CLEARANCE_M * 2:
+        errors.append(
+            "room_sampling.geometry.height_m.min debe ser > 1.0 para mantener 0.5 m de separación vertical"
+        )
 
     if config.scene_validation.min_distance_source_to_receiver_m < MIN_SOURCE_RECEIVER_DISTANCE_M:
         errors.append(
@@ -98,6 +298,7 @@ def validate_config(config: AppConfig) -> None:
             "binaural_hrtf": config.receiver_outputs.binaural_hrtf,
             "bte_rear_hartf": config.receiver_outputs.bte_rear_hartf,
             "bte_front_hartf": config.receiver_outputs.bte_front_hartf,
+            "circular_array": config.receiver_outputs.circular_array,
         }.items()
         if output is not None
     }
@@ -114,12 +315,33 @@ def validate_config(config: AppConfig) -> None:
     for output_name, output in defined_outputs.items():
         if output.required and not output.enabled:
             errors.append(f"receiver_outputs.{output_name} no puede ser required=true si enabled=false")
-        _validate_receiver_output(errors, output_name, output)
+        if isinstance(output, CircularArrayOutputConfig):
+            if output.enabled and (output.num_microphones is None or output.radius_m is None):
+                errors.append("receiver_outputs.circular_array requiere num_microphones y radius_m")
+            if output.enabled and not is_safe_output_subdir(output.output_subdir):
+                errors.append(
+                    "receiver_outputs.circular_array.output_subdir debe ser un subdirectorio relativo "
+                    "no vacío y sin segmentos inseguros"
+                )
+        else:
+            _validate_receiver_output(errors, output_name, output)
+
+    if config.receiver_outputs.subject_pairing == "shared":
+        _validate_subject_pairing(errors, {
+            output_name: output
+            for output_name, output in enabled_outputs.items()
+            if not isinstance(output, CircularArrayOutputConfig)
+        })
 
     _validate_output_naming(errors, config, enabled_outputs)
 
     for target_name in config.hearing_degradation.input_targets:
-        if target_name not in defined_outputs:
+        if target_name in {"bte_rear_hartf", "bte_front_hartf", "circular_array"}:
+            errors.append(
+                f"hearing_degradation.input_targets contiene target no elegible: {target_name}. "
+                "Solo binaural_hrtf admite procesamiento Clarity"
+            )
+        elif target_name != "binaural_hrtf" or target_name not in defined_outputs:
             errors.append(f"hearing_degradation.input_targets contiene target desconocido: {target_name}")
 
     if config.hearing_degradation.enabled:
@@ -134,12 +356,32 @@ def validate_config(config: AppConfig) -> None:
 
         _validate_clarity_runner(errors, config.hearing_degradation.runner)
 
+    _validate_hearing_processors(errors, config.hearing_degradation)
+
     min_total_sources = 0
     max_total_sources = 0
+    event_types: set[str] = set()
+    max_fixed_position_cases = 0
     for source_type in config.source_sampling.source_types:
         _validate_source_type(errors, source_type)
+        if source_type.event_type in event_types:
+            errors.append(f"source_types.event_type debe ser único; duplicado: {source_type.event_type}")
+        event_types.add(source_type.event_type)
         min_total_sources += source_type.min_count
         max_total_sources += source_type.max_count
+        if source_type.spatial_policy.type == "fixed_position":
+            policy = source_type.spatial_policy
+            if policy.azimuths_deg and policy.elevations_deg and policy.distances_m:
+                max_fixed_position_cases = max(
+                    max_fixed_position_cases,
+                    len(policy.azimuths_deg) * len(policy.elevations_deg) * len(policy.distances_m),
+                )
+
+    if config.execution.num_simulations < max_fixed_position_cases:
+        errors.append(
+            "execution.num_simulations debe ser >= al número de casos de cada política fixed_position "
+            f"(máximo configurado: {max_fixed_position_cases})"
+        )
 
     if min_total_sources > config.source_sampling.max_sources:
         errors.append("La suma de source_types.min_count excede source_sampling.max_sources")
@@ -147,7 +389,9 @@ def validate_config(config: AppConfig) -> None:
     if max_total_sources < config.source_sampling.min_sources:
         errors.append("La suma de source_types.max_count no alcanza source_sampling.min_sources")
 
-    _validate_existing_file(errors, "raven.base_rpf_file", config.raven.base_rpf_file)
+    validate_backend_config(errors, config)
+    if config.render.backend == "raven" and config.raven is not None:
+        _validate_existing_file(errors, "raven.base_rpf_file", config.raven.base_rpf_file)
 
     _validate_run_name(errors, config.outputs.run_name)
 
@@ -167,7 +411,10 @@ def validate_config(config: AppConfig) -> None:
         )
         if config.hearing_degradation.hearing_profiles_path.is_file():
             try:
-                load_hearing_profile_catalog(config.hearing_degradation.hearing_profiles_path)
+                load_hearing_profile_catalog(
+                    config.hearing_degradation.hearing_profiles_path,
+                    processors=config.hearing_degradation.processors,
+                )
             except ValueError as exc:
                 errors.extend(
                     f"hearing_degradation.hearing_profiles_path {issue}"
@@ -226,7 +473,45 @@ def inspect_material_file(material_path: Path) -> list[str]:
     return list(_inspect_material_file_cached(material_path.resolve()))
 
 
-def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingProfileDefinition]:
+def load_material_absorption_coefficients(material_path: Path) -> tuple[float, ...]:
+    material_path = material_path.resolve()
+    errors = inspect_material_file(material_path)
+    if errors:
+        raise ValueError(f"Material invÃ¡lido {material_path}: {'; '.join(errors)}")
+
+    try:
+        content = material_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"No se pudo leer el material {material_path}: {exc}") from exc
+
+    values_raw = _extract_material_field(content, "absorp")
+    if values_raw is None:
+        raise ValueError(f"Material invÃ¡lido {material_path}: falta absorp")
+    return tuple(_parse_material_values(values_raw))
+
+
+def load_material_scattering_coefficients(material_path: Path) -> tuple[float, ...]:
+    return _load_material_coefficients(material_path, "scatter")
+
+
+def _load_material_coefficients(material_path: Path, field_name: str) -> tuple[float, ...]:
+    material_path = material_path.resolve()
+    errors = inspect_material_file(material_path)
+    if errors:
+        raise ValueError(f"Material inválido {material_path}: {'; '.join(errors)}")
+    try:
+        content = material_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"No se pudo leer el material {material_path}: {exc}") from exc
+    values_raw = _extract_material_field(content, field_name)
+    if values_raw is None:
+        raise ValueError(f"Material inválido {material_path}: falta {field_name}")
+    return tuple(_parse_material_values(values_raw))
+
+
+def load_hearing_profile_catalog(
+    hearing_profiles_path: Path, *, processors: list[str] | tuple[str, ...] = ("msbg",),
+) -> list[HearingProfileDefinition]:
     try:
         raw_catalog = yaml.safe_load(hearing_profiles_path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -271,6 +556,22 @@ def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingPro
             issues.extend(issue for issue in str(exc).splitlines() if issue.strip())
             continue
 
+        named_path = f"{profile_path} ({hearing_profile_id})"
+        compression_health: dict[str, float | dict[str, float] | None] = {}
+        for ear_name, loss_db_by_band in (("left", left_loss_db_by_band), ("right", right_loss_db_by_band)):
+            ear_path = f"{named_path}.ears.{ear_name}"
+            compression_health[ear_name] = _parse_compression_health(
+                raw_profile["ears"][ear_name], ear_path, loss_db_by_band, issues,
+            )
+            if "whis" in processors:
+                if compression_health[ear_name] is None and "compression_health" not in raw_profile["ears"][ear_name]:
+                    issues.append(f"{ear_path}.compression_health es obligatorio con el procesador whis")
+                issues.extend(
+                    f"{ear_path}.loss_db_by_band.{band} no puede ser negativo con el procesador whis"
+                    for band, loss_db in loss_db_by_band.items()
+                    if loss_db < 0
+                )
+
         if is_duplicate_profile_id:
             continue
 
@@ -279,6 +580,8 @@ def load_hearing_profile_catalog(hearing_profiles_path: Path) -> list[HearingPro
                 "hearing_profile_id": hearing_profile_id,
                 "left_loss_db_by_band": left_loss_db_by_band,
                 "right_loss_db_by_band": right_loss_db_by_band,
+                "left_compression_health": compression_health["left"],
+                "right_compression_health": compression_health["right"],
             }
         )
 
@@ -292,6 +595,9 @@ def _validate_receiver_output(errors: list[str], output_name: str, output: Recei
     if output.num_channels <= 0:
         errors.append(f"receiver_outputs.{output_name}.num_channels debe ser > 0")
 
+    if output.num_hrtfs <= 0:
+        errors.append(f"receiver_outputs.{output_name}.num_hrtfs debe ser > 0")
+
     if not output.enabled:
         return
 
@@ -302,10 +608,41 @@ def _validate_receiver_output(errors: list[str], output_name: str, output: Recei
             errors.append(
                 f"receiver_outputs.{output_name}.ir_catalog_path no contiene archivos para el patrón {output.file_pattern}"
             )
+        elif len(matching_files) < output.num_hrtfs:
+            errors.append(
+                f"receiver_outputs.{output_name}.ir_catalog_path contiene {len(matching_files)} archivos, "
+                f"menos que num_hrtfs={output.num_hrtfs}"
+            )
 
     if not is_safe_output_subdir(output.output_subdir):
         errors.append(
             f"receiver_outputs.{output_name}.output_subdir debe ser un subdirectorio relativo no vacío y sin segmentos inseguros"
+        )
+
+
+def _validate_subject_pairing(errors: list[str], outputs: dict[str, ReceiverOutputConfig]) -> None:
+    common_subjects: set[str] | None = None
+    for output_name, output in outputs.items():
+        if output.num_hrtfs != 1:
+            errors.append(
+                f"receiver_outputs.{output_name}.num_hrtfs debe ser 1 con receiver_outputs.subject_pairing=shared"
+            )
+        if not output.ir_catalog_path.is_dir():
+            continue
+        subjects, unidentified, duplicates = subject_catalog(sorted(output.ir_catalog_path.glob(output.file_pattern)))
+        for path in unidentified:
+            errors.append(
+                f"receiver_outputs.{output_name}: el archivo {path.name} no tiene ID de sujeto "
+                "(prefijo antes del primer '_') requerido por subject_pairing=shared"
+            )
+        for subject, paths in sorted(duplicates.items()):
+            names = ", ".join(path.name for path in paths)
+            errors.append(f"receiver_outputs.{output_name}: el sujeto {subject} aparece en varios archivos ({names})")
+        catalog_subjects = set(subjects) | set(duplicates)
+        common_subjects = catalog_subjects if common_subjects is None else common_subjects & catalog_subjects
+    if common_subjects is not None and not common_subjects:
+        errors.append(
+            "receiver_outputs.subject_pairing=shared: los catálogos de receiver IR habilitados no comparten ningún sujeto"
         )
 
 
@@ -352,7 +689,7 @@ def _validate_background_noise(errors: list[str], config: AppConfig) -> None:
 def _validate_output_naming(
     errors: list[str],
     config: AppConfig,
-    enabled_outputs: dict[str, ReceiverOutputConfig],
+    enabled_outputs: dict[str, ReceiverOutputConfig | CircularArrayOutputConfig],
 ) -> None:
     for field_name, pattern in {
         "outputs.naming.wav_pattern": config.outputs.naming.wav_pattern,
@@ -397,6 +734,58 @@ def _validate_clarity_runner(errors: list[str], runner: ClarityRunnerConfig) -> 
             )
 
 
+def _validate_hearing_processors(errors: list[str], hearing: HearingDegradationConfig) -> None:
+    uses_whis = "whis" in hearing.processors
+    calibration = hearing.calibration
+    if calibration is None:
+        if uses_whis:
+            errors.append(
+                "hearing_degradation.calibration es obligatorio cuando hearing_degradation.processors incluye whis"
+            )
+    elif calibration.mode == "fixed_scale":
+        if calibration.digital_rms1_spl_db is None:
+            errors.append("hearing_degradation.calibration.digital_rms1_spl_db es obligatorio con mode=fixed_scale")
+        for field_name in ("presentation_level_db_spl", "presentation_level_range_db_spl"):
+            if getattr(calibration, field_name) is not None:
+                errors.append(f"hearing_degradation.calibration.{field_name} no aplica con mode=fixed_scale")
+    else:
+        if calibration.digital_rms1_spl_db is not None:
+            errors.append(
+                "hearing_degradation.calibration.digital_rms1_spl_db no aplica con mode=presentation_level"
+            )
+        has_level = calibration.presentation_level_db_spl is not None
+        has_range = calibration.presentation_level_range_db_spl is not None
+        if has_level and has_range:
+            errors.append(
+                "hearing_degradation.calibration.presentation_level_db_spl y "
+                "presentation_level_range_db_spl son excluyentes"
+            )
+        elif not has_level and not has_range:
+            errors.append(
+                "hearing_degradation.calibration requiere presentation_level_db_spl o "
+                "presentation_level_range_db_spl con mode=presentation_level"
+            )
+        elif has_range:
+            low, high = calibration.presentation_level_range_db_spl
+            if low > high:
+                errors.append("hearing_degradation.calibration.presentation_level_range_db_spl debe cumplir min <= max")
+
+    if hearing.outer_middle_ear is None and uses_whis:
+        errors.append(
+            "hearing_degradation.outer_middle_ear es obligatorio cuando hearing_degradation.processors incluye whis"
+        )
+    if hearing.msbg is not None and "msbg" not in hearing.processors:
+        errors.append("hearing_degradation.msbg no aplica: msbg no está en hearing_degradation.processors")
+    if uses_whis and hearing.whis is None:
+        errors.append(
+            "hearing_degradation.whis.install_root es obligatorio cuando hearing_degradation.processors incluye whis"
+        )
+    if not uses_whis and hearing.whis is not None:
+        errors.append("hearing_degradation.whis no aplica: whis no está en hearing_degradation.processors")
+    if hearing.whis is not None and hearing.whis.matlab_executable.strip() == "":
+        errors.append("hearing_degradation.whis.matlab_executable no puede estar vacío")
+
+
 def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> None:
     if not (0.0 <= source_type.probability <= 1.0):
         errors.append(f"{source_type.event_type}: probability debe estar entre 0 y 1")
@@ -408,8 +797,11 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
         errors.append(f"{source_type.event_type}: min_count debe ser >= 0")
 
     _validate_existing_directory(errors, f"source_types.{source_type.event_type}.audio_dir", source_type.audio_dir)
-    if source_type.audio_dir.exists() and not any(path.is_file() for path in source_type.audio_dir.iterdir()):
-        errors.append(f"{source_type.event_type}: audio_dir no contiene archivos de audio")
+    if source_type.audio_dir.is_dir() and not list_source_wavs(source_type.audio_dir):
+        errors.append(
+            f"{source_type.event_type}: audio_dir no contiene archivos de audio WAV "
+            f"en la raíz ni en carpetas ID inmediatas: {source_type.audio_dir}"
+        )
 
     if source_type.directivity is not None:
         directivity_field = f"source_types.{source_type.event_type}.directivity"
@@ -417,16 +809,17 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
         if source_type.directivity.suffix.lower() != ".daff":
             errors.append(f"{directivity_field} debe apuntar a un archivo .daff")
 
-    if source_type.spatial_policy.type == "weighted_targets":
-        if not source_type.spatial_policy.targets:
+    policy = source_type.spatial_policy
+    if policy.type == "weighted_targets":
+        if not policy.targets:
             errors.append(f"{source_type.event_type}: weighted_targets requiere 'targets'")
         else:
-            total = sum(source_type.spatial_policy.targets.values())
+            total = sum(policy.targets.values())
             if not isclose(total, 1.0, rel_tol=1e-6, abs_tol=1e-6):
                 errors.append(f"{source_type.event_type}: targets debe sumar 1.0 y suma {total}")
 
-    radius = source_type.spatial_policy.min_radius_from_receiver_m
-    if source_type.spatial_policy.type == "random_valid_away_from_receiver":
+    radius = policy.min_radius_from_receiver_m
+    if policy.type == "random_valid_away_from_receiver":
         if radius is None or not isfinite(radius) or radius < 0.0:
             errors.append(
                 f"{source_type.event_type}: random_valid_away_from_receiver requiere "
@@ -437,6 +830,72 @@ def _validate_source_type(errors: list[str], source_type: SourceTypeConfig) -> N
             f"{source_type.event_type}: min_radius_from_receiver_m solo se permite con "
             "random_valid_away_from_receiver"
         )
+
+    fixed_fields = {
+        "azimuths_deg": policy.azimuths_deg,
+        "elevations_deg": policy.elevations_deg,
+        "distances_m": policy.distances_m,
+    }
+    if policy.type == "fixed_position":
+        if source_type.min_count < 1:
+            errors.append(f"{source_type.event_type}: fixed_position requiere min_count >= 1")
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "azimuths_deg",
+            policy.azimuths_deg,
+            minimum=-180.0,
+            maximum=180.0,
+        )
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "elevations_deg",
+            policy.elevations_deg,
+            minimum=-90.0,
+            maximum=90.0,
+        )
+        _validate_fixed_values(
+            errors,
+            source_type.event_type,
+            "distances_m",
+            policy.distances_m,
+            strictly_positive=True,
+        )
+        if policy.targets is not None:
+            errors.append(f"{source_type.event_type}: targets no se permite con fixed_position")
+    else:
+        for field_name, values in fixed_fields.items():
+            if values is not None:
+                errors.append(
+                    f"{source_type.event_type}: {field_name} solo se permite con fixed_position"
+                )
+
+
+def _validate_fixed_values(
+    errors: list[str],
+    event_type: str,
+    field_name: str,
+    values: list[float] | None,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    strictly_positive: bool = False,
+) -> None:
+    if not values:
+        errors.append(f"{event_type}: fixed_position requiere {field_name} con al menos un valor")
+        return
+
+    if any(not isfinite(value) for value in values):
+        errors.append(f"{event_type}: {field_name} debe contener solo valores finitos")
+    if minimum is not None and any(value < minimum for value in values):
+        errors.append(f"{event_type}: {field_name} debe ser >= {minimum:g}")
+    if maximum is not None and any(value > maximum for value in values):
+        errors.append(f"{event_type}: {field_name} debe ser <= {maximum:g}")
+    if strictly_positive and any(value <= 0.0 for value in values):
+        errors.append(f"{event_type}: {field_name} debe contener valores > 0")
+    if len(set(values)) != len(values):
+        errors.append(f"{event_type}: {field_name} no permite valores duplicados")
 
 
 def _validate_run_name(errors: list[str], run_name: str | None) -> None:
@@ -585,6 +1044,41 @@ def _parse_loss_db_by_band(raw_profile: dict[str, Any], profile_path: str, ear_n
         raise ValueError("\n".join(issues))
 
     return normalized_loss_db_by_band
+
+
+def _parse_compression_health(
+    ear: dict[str, Any], ear_path: str, loss_db_by_band: dict[str, float], issues: list[str],
+) -> float | dict[str, float] | None:
+    """Return a scalar or per-band compression health in [0, 1]; invalid values are reported in issues."""
+    raw = ear.get("compression_health")
+    if raw is None:
+        return None
+
+    def _valid(value: object, field_path: str) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, int | float) or not isfinite(float(value)):
+            issues.append(f"{field_path} debe ser numérico y finito")
+            return None
+        if not 0.0 <= float(value) <= 1.0:
+            issues.append(f"{field_path} debe estar en [0, 1]")
+            return None
+        return float(value)
+
+    if not isinstance(raw, dict):
+        return _valid(raw, f"{ear_path}.compression_health")
+
+    per_band: dict[str, float] = {}
+    for raw_band, raw_value in raw.items():
+        band = str(raw_band).strip()
+        if band not in loss_db_by_band:
+            issues.append(f"{ear_path}.compression_health.{band} no es una banda de loss_db_by_band")
+            continue
+        value = _valid(raw_value, f"{ear_path}.compression_health.{band}")
+        if value is not None:
+            per_band[band] = value
+    missing = [band for band in loss_db_by_band if band not in {str(key).strip() for key in raw}]
+    if missing:
+        issues.append(f"{ear_path}.compression_health no declara las bandas {', '.join(missing)}")
+    return per_band
 
 
 def _defined_outputs(config: AppConfig) -> list[ReceiverOutputConfig]:

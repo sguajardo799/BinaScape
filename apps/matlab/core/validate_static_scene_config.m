@@ -12,7 +12,19 @@ function cfg = validate_static_scene_config(cfg)
         error('Expected scene_type = static');
     end
 
-    cfg.room = normalize_room_config(cfg.room);
+    if ~isfield(cfg, 'schema_version') || isempty(cfg.schema_version)
+        cfg.schema_version = '1.0';
+    else
+        cfg.schema_version = char(string(cfg.schema_version));
+    end
+    if ~any(strcmp(cfg.schema_version, {'1.0', '2.0', '3.0'}))
+        error('Unsupported schema_version: %s', cfg.schema_version);
+    end
+
+    cfg.room = normalize_room_config(cfg.room, cfg.schema_version);
+    if strcmp(cfg.schema_version, '3.0')
+        cfg.reverberation_sampling = normalize_reverberation_sampling(cfg);
+    end
 
     if ~isfield(cfg.receiver, 'position_m') || ~isfield(cfg.receiver, 'orientation_deg')
         error('Static receiver must define position_m and orientation_deg');
@@ -21,6 +33,17 @@ function cfg = validate_static_scene_config(cfg)
     cfg.receiver.position_m = double(cfg.receiver.position_m(:)).';
     cfg.receiver.orientation_deg = normalize_orientation(cfg.receiver.orientation_deg);
     cfg.sources = normalize_static_sources(cfg.sources);
+    if any(strcmp(cfg.schema_version, {'2.0', '3.0'}))
+        validate_schema2_pose(cfg.receiver.position_m, cfg.room.geometry, ...
+            'receiver.position_m', false);
+        for iSource = 1:numel(cfg.sources)
+            if ~isfield(cfg.sources(iSource), 'position_m') || isempty(cfg.sources(iSource).position_m)
+                error('sources(%d).position_m is required for schema 2.0.', iSource);
+            end
+            validate_schema2_pose(cfg.sources(iSource).position_m, cfg.room.geometry, ...
+                sprintf('sources(%d).position_m', iSource), true);
+        end
+    end
     cfg.background_noise = normalize_background_noise_config(getfield_if_present(cfg, 'background_noise')); %#ok<GFLD>
 
     if ~isfield(cfg.render, 'sample_rate_hz') || ~isfield(cfg.render, 'output_wav_path') ...
@@ -46,8 +69,44 @@ function cfg = validate_static_scene_config(cfg)
         cfg.render.seed = effective_seed;
     end
 
-    cfg.receiver.hrtfs = normalize_receiver_hrtfs(cfg.receiver);
-    cfg.render.outputs = derive_render_outputs(cfg.render, cfg.project_name, cfg.scene_id, cfg.receiver.hrtfs);
+    has_array = isfield(cfg.receiver, 'circular_array') && ~isempty(cfg.receiver.circular_array);
+    if has_array
+        cfg.receiver.circular_array = validate_circular_array_descriptor( ...
+            cfg.receiver.circular_array, cfg.receiver.position_m, cfg.receiver.orientation_deg.yaw);
+        if any(strcmp(cfg.schema_version, {'2.0', '3.0'}))
+            for k = 1:numel(cfg.receiver.circular_array.microphones)
+                validate_schema2_pose(cfg.receiver.circular_array.microphones(k).position_m, ...
+                    cfg.room.geometry, 'receiver.circular_array.microphones.position_m', false, 0);
+            end
+        end
+    end
+    if has_array && isempty(getfield_if_present(cfg.receiver, 'hrtfs')) && ...
+            isempty(getfield_if_present(cfg.receiver, 'hrtf'))
+        cfg.receiver.hrtfs = struct([]);
+    else
+        cfg.receiver.hrtfs = normalize_receiver_hrtfs(cfg.receiver);
+    end
+    variants = repmat(struct('output_type', '', 'receiver_kind', '', 'hrtf_index', 0), ...
+        1, numel(cfg.receiver.hrtfs) + double(has_array));
+    for i = 1:numel(cfg.receiver.hrtfs)
+        variants(i) = struct('output_type', cfg.receiver.hrtfs(i).hrtf_id, ...
+            'receiver_kind', 'catalog', 'hrtf_index', i);
+    end
+    if has_array
+        if any(strcmp({variants.output_type}, 'circular_array'))
+            error('circular_array output identity cannot also name an HRTF.');
+        end
+        variants(end) = struct('output_type', 'circular_array', 'receiver_kind', 'circular_array', 'hrtf_index', 0);
+    end
+    if isfield(cfg.render, 'active_output_type') && ~isempty(cfg.render.active_output_type)
+        selected = strcmp({variants.output_type}, char(string(cfg.render.active_output_type)));
+        if sum(selected) ~= 1
+            error('render.active_output_type must select exactly one declared receiver output.');
+        end
+        variants = variants(selected);
+    end
+    cfg.render.receiver_variants = variants;
+    cfg.render.outputs = derive_render_outputs(cfg.render, cfg.project_name, cfg.scene_id, variants);
 end
 
 function background_noise = normalize_background_noise_config(background_noise)
@@ -247,6 +306,15 @@ function sources = normalize_static_sources(sources)
             sources(i).audio_path = char(string(sources(i).audio_path));
         end
 
+        for field = {'identity_id', 'audio_relpath'}
+            field_name = field{1};
+            if isfield(sources(i), field_name) && ~isempty(sources(i).(field_name))
+                sources(i).(field_name) = char(string(sources(i).(field_name)));
+            else
+                sources(i).(field_name) = '';
+            end
+        end
+
         if isfield(sources(i), 'directivity_path') && ~isempty(sources(i).directivity_path)
             sources(i).directivity_path = char(string(sources(i).directivity_path));
         end
@@ -318,14 +386,292 @@ function value = normalize_optional_logical_field(value, default_value, field_na
     error('%s must be a logical scalar.', field_name);
 end
 
-function room = normalize_room_config(room)
+function room = normalize_room_config(room, schema_version)
+    if strcmp(schema_version, '1.0')
+        room = normalize_legacy_room_config(room);
+        return;
+    end
+
+    room = normalize_polygon_room_config(room);
+    if strcmp(schema_version, '3.0')
+        room = normalize_acoustic_surfaces(room);
+    end
+end
+
+function room = normalize_acoustic_surfaces(room)
+    if ~isfield(room, 'acoustic_surfaces') || ~isstruct(room.acoustic_surfaces)
+        error('room.acoustic_surfaces is required for schema 3.0.');
+    end
+    required = [room.geometry.wall_ids, {'floor', 'ceiling'}];
+    validate_exact_surface_fields(room.acoustic_surfaces, required, 'room.acoustic_surfaces');
+    for iSurface = 1:numel(required)
+        surface = required{iSurface};
+        item = room.acoustic_surfaces.(surface);
+        if ~isstruct(item) || ~isscalar(item) || ...
+                ~isfield(item, 'effective_absorption') || ~isfield(item, 'effective_scattering')
+            error('room.acoustic_surfaces.%s must define effective absorption and scattering.', surface);
+        end
+        if ~isfield(item, 'surface_area_m2') || ~is_finite_scalar(item.surface_area_m2) || ...
+                item.surface_area_m2 <= 0
+            error('room.acoustic_surfaces.%s.surface_area_m2 must be finite and positive.', surface);
+        end
+        item.surface_area_m2 = double(item.surface_area_m2);
+        item.effective_absorption = normalize_acoustic_vector(item.effective_absorption, ...
+            sprintf('room.acoustic_surfaces.%s.effective_absorption', surface));
+        item.effective_scattering = normalize_acoustic_vector(item.effective_scattering, ...
+            sprintf('room.acoustic_surfaces.%s.effective_scattering', surface));
+        if ~isfield(item, 'base_material') || ~isfield(item.base_material, 'scattering')
+            error('room.acoustic_surfaces.%s.base_material.scattering is required.', surface);
+        end
+        base_scattering = normalize_acoustic_vector(item.base_material.scattering, ...
+            sprintf('room.acoustic_surfaces.%s.base_material.scattering', surface));
+        if any(item.effective_scattering ~= base_scattering)
+            error('room.acoustic_surfaces.%s must preserve base scattering.', surface);
+        end
+        item.treatment = normalize_surface_treatment(item, surface);
+        room.acoustic_surfaces.(surface) = item;
+    end
+end
+
+function treatment = normalize_surface_treatment(item, surface)
+    if ~isfield(item, 'treatment') || ~isstruct(item.treatment) || ~isscalar(item.treatment)
+        error('room.acoustic_surfaces.%s.treatment is required.', surface);
+    end
+    treatment = item.treatment;
+    required = {'preset_id', 'catalog_version', 'coverage', 'treated_area_m2', 'absorption'};
+    for iField = 1:numel(required)
+        if ~isfield(treatment, required{iField}) || isempty(treatment.(required{iField}))
+            error('room.acoustic_surfaces.%s.treatment.%s is required.', surface, required{iField});
+        end
+    end
+
+    treatment.preset_id = char(string(treatment.preset_id));
+    approved_presets = {'none', 'broadband_light', 'broadband_medium', 'broadband_strong'};
+    if ~any(strcmp(treatment.preset_id, approved_presets))
+        error('room.acoustic_surfaces.%s.treatment.preset_id is unsupported: %s', ...
+            surface, treatment.preset_id);
+    end
+    treatment.catalog_version = normalize_approved_version( ...
+        treatment.catalog_version, 1, ...
+        sprintf('room.acoustic_surfaces.%s.treatment.catalog_version', surface));
+    if ~is_finite_scalar(treatment.coverage) || treatment.coverage < 0 || treatment.coverage > 1
+        error('room.acoustic_surfaces.%s.treatment.coverage must be finite and in [0,1].', surface);
+    end
+    treatment.coverage = double(treatment.coverage);
+    if ~is_finite_scalar(treatment.treated_area_m2) || treatment.treated_area_m2 < 0
+        error('room.acoustic_surfaces.%s.treatment.treated_area_m2 must be finite and nonnegative.', surface);
+    end
+    treatment.treated_area_m2 = double(treatment.treated_area_m2);
+    expected_area = item.surface_area_m2 * treatment.coverage;
+    tolerance = 1e-9 + 1e-12 * abs(expected_area);
+    if abs(treatment.treated_area_m2 - expected_area) > tolerance
+        error('room.acoustic_surfaces.%s.treatment.treated_area_m2 must equal area times coverage.', surface);
+    end
+    treatment.absorption = normalize_acoustic_vector(treatment.absorption, ...
+        sprintf('room.acoustic_surfaces.%s.treatment.absorption', surface));
+
+    if strcmp(surface, 'floor') && ...
+            (~strcmp(treatment.preset_id, 'none') || treatment.coverage ~= 0 || treatment.treated_area_m2 ~= 0)
+        error('room.acoustic_surfaces.floor must not receive virtual treatment.');
+    end
+end
+
+function reverberation = normalize_reverberation_sampling(cfg)
+    if ~isfield(cfg, 'reverberation_sampling') || ...
+            ~isstruct(cfg.reverberation_sampling) || ~isscalar(cfg.reverberation_sampling)
+        error('reverberation_sampling is required for schema 3.0.');
+    end
+    reverberation = cfg.reverberation_sampling;
+    required = {'estimator', 'estimator_version', 'aggregation', 'mean_bands_hz', ...
+        'treatment_catalog_version', 'absorption_mix_model', ...
+        'absorption_mix_model_version', 'proposal_strategy_version'};
+    for iField = 1:numel(required)
+        if ~isfield(reverberation, required{iField}) || isempty(reverberation.(required{iField}))
+            error('reverberation_sampling.%s is required for schema 3.0.', required{iField});
+        end
+    end
+
+    reverberation.estimator = normalize_approved_text( ...
+        reverberation.estimator, 'sabine', 'reverberation_sampling.estimator');
+    reverberation.estimator_version = normalize_approved_text( ...
+        reverberation.estimator_version, 'sabine_polygon_octaves_v4', ...
+        'reverberation_sampling.estimator_version');
+    reverberation.aggregation = normalize_approved_text( ...
+        reverberation.aggregation, 'arithmetic_mean', 'reverberation_sampling.aggregation');
+    if ~isnumeric(reverberation.mean_bands_hz)
+        error('reverberation_sampling.mean_bands_hz must match the schema 3.0 bands.');
+    end
+    reverberation.mean_bands_hz = double(reverberation.mean_bands_hz(:)).';
+    approved_mean_bands = [125 250 500 1000 2000 4000 8000];
+    if ~isequal(reverberation.mean_bands_hz, approved_mean_bands)
+        error('reverberation_sampling.mean_bands_hz must match the schema 3.0 bands.');
+    end
+    reverberation.treatment_catalog_version = normalize_approved_version( ...
+        reverberation.treatment_catalog_version, 1, ...
+        'reverberation_sampling.treatment_catalog_version');
+    reverberation.absorption_mix_model = normalize_approved_text( ...
+        reverberation.absorption_mix_model, 'area_weighted_linear', ...
+        'reverberation_sampling.absorption_mix_model');
+    reverberation.absorption_mix_model_version = normalize_approved_version( ...
+        reverberation.absorption_mix_model_version, 1, ...
+        'reverberation_sampling.absorption_mix_model_version');
+    reverberation.proposal_strategy_version = normalize_approved_version( ...
+        reverberation.proposal_strategy_version, 1, ...
+        'reverberation_sampling.proposal_strategy_version');
+end
+
+function value = normalize_approved_text(value, approved, field_name)
+    value = char(string(value));
+    if ~strcmp(value, approved)
+        error('%s must be %s.', field_name, approved);
+    end
+end
+
+function value = normalize_approved_version(value, approved, field_name)
+    if ~is_finite_scalar(value) || double(value) ~= approved
+        error('%s must be version %d.', field_name, approved);
+    end
+    value = double(value);
+end
+
+function tf = is_finite_scalar(value)
+    tf = isnumeric(value) && isscalar(value) && isfinite(value);
+end
+
+function values = normalize_acoustic_vector(values, field_name)
+    if ~isnumeric(values) || numel(values) ~= 31
+        error('%s must contain exactly 31 numeric values.', field_name);
+    end
+    values = double(values(:)).';
+    if any(~isfinite(values)) || any(values < 0) || any(values > 1)
+        error('%s values must be finite and in [0,1].', field_name);
+    end
+end
+
+function room = normalize_legacy_room_config(room)
     if ~isfield(room, 'dimensions_m') || numel(room.dimensions_m) ~= 3
         error('room.dimensions_m must define exactly three values.');
     end
-
+    if isfield(room, 'geometry')
+        error('schema 1.0 room cannot contain geometry.');
+    end
     room.dimensions_m = double(room.dimensions_m(:)).';
+    if any(~isfinite(room.dimensions_m)) || any(room.dimensions_m <= 0)
+        error('room.dimensions_m values must be finite and positive.');
+    end
+    required_surfaces = get_legacy_room_surfaces();
+    room = normalize_room_materials(room, required_surfaces, false);
+end
 
-    required_surfaces = get_required_room_surfaces();
+function room = normalize_polygon_room_config(room)
+    if isfield(room, 'dimensions_m')
+        error('schema 2.0 room cannot contain dimensions_m.');
+    end
+    if ~isfield(room, 'geometry') || ~isstruct(room.geometry) || ~isscalar(room.geometry)
+        error('room.geometry is required for schema 2.0.');
+    end
+
+    geometry = room.geometry;
+    required_geometry = {'type', 'height_m', 'footprint_vertices_m', 'wall_ids'};
+    for iField = 1:numel(required_geometry)
+        if ~isfield(geometry, required_geometry{iField})
+            error('room.geometry.%s is required.', required_geometry{iField});
+        end
+    end
+
+    geometry.type = char(string(geometry.type));
+    if ~any(strcmp(geometry.type, {'shoebox', 'trapezoid', 'l_shape'}))
+        error('room.geometry.type is unsupported: %s', geometry.type);
+    end
+    if ~isnumeric(geometry.height_m) || ~isscalar(geometry.height_m) || ...
+            ~isfinite(geometry.height_m) || geometry.height_m <= 0
+        error('room.geometry.height_m must be a finite positive scalar.');
+    end
+    geometry.height_m = double(geometry.height_m);
+
+    vertices = geometry.footprint_vertices_m;
+    if ~isnumeric(vertices) || size(vertices, 2) ~= 2 || any(~isfinite(vertices), 'all')
+        error('room.geometry.footprint_vertices_m must be a finite N-by-2 matrix.');
+    end
+    vertices = double(vertices);
+    expected_vertices = 4;
+    if strcmp(geometry.type, 'l_shape')
+        expected_vertices = 6;
+    end
+    if size(vertices, 1) ~= expected_vertices
+        error('room.geometry.%s requires exactly %d footprint vertices.', ...
+            geometry.type, expected_vertices);
+    end
+    if any(vecnorm(vertices - circshift(vertices, -1, 1), 2, 2) <= 1e-6)
+        error('room.geometry footprint contains a zero-length edge.');
+    end
+    signed_area = polygon_signed_area(vertices);
+    if signed_area <= 1e-8
+        error('room.geometry footprint must be simple, non-degenerate and counter-clockwise.');
+    end
+    if polygon_has_self_intersection(vertices)
+        error('room.geometry footprint must be simple.');
+    end
+    if abs(min(vertices(:, 1))) > 1e-6 || abs(min(vertices(:, 2))) > 1e-6
+        error('room.geometry footprint must be normalized to min(x)=min(z)=0.');
+    end
+
+    wall_ids = normalize_wall_ids(geometry.wall_ids);
+    if numel(wall_ids) ~= size(vertices, 1)
+        error('room.geometry.wall_ids must match the footprint vertex count.');
+    end
+    expected_wall_ids = arrayfun(@(index) sprintf('wall_%03d', index), ...
+        1:size(vertices, 1), 'UniformOutput', false);
+    if ~isequal(wall_ids, expected_wall_ids)
+        error('room.geometry.wall_ids must be canonical and ordered.');
+    end
+
+    geometry.footprint_vertices_m = vertices;
+    geometry.wall_ids = wall_ids;
+    room.geometry = geometry;
+    required_surfaces = [wall_ids, {'floor', 'ceiling'}];
+    room = normalize_room_materials(room, required_surfaces, true);
+end
+
+function validate_schema2_pose(position, geometry, field_name, require_vertical_clearance, wall_clearance_m)
+    if nargin < 5
+        wall_clearance_m = 0.5;
+    end
+    if ~isnumeric(position) || numel(position) ~= 3 || any(~isfinite(position), 'all')
+        error('%s must contain exactly three finite coordinates.', field_name);
+    end
+    position = double(position(:).');
+    vertices = geometry.footprint_vertices_m;
+    [inside, on_boundary] = inpolygon(position(1), position(3), ...
+        vertices(:, 1), vertices(:, 2));
+    if ~inside || (wall_clearance_m > 0 && (on_boundary || ...
+            polygon_wall_clearance(position([1 3]), vertices) < wall_clearance_m - 1e-6))
+        error('%s must be inside the schema 2.0 footprint with %g m wall clearance.', ...
+            field_name, wall_clearance_m);
+    end
+    if position(2) < 0 || position(2) > geometry.height_m
+        error('%s height must be inside the schema 2.0 room.', field_name);
+    end
+    if require_vertical_clearance && ...
+            (position(2) < 0.5 - 1e-6 || position(2) > geometry.height_m - 0.5 + 1e-6)
+        error('%s height must keep 0.5 m from floor and ceiling.', field_name);
+    end
+end
+
+function clearance = polygon_wall_clearance(point, vertices)
+    clearance = inf;
+    for iVertex = 1:size(vertices, 1)
+        next_index = mod(iVertex, size(vertices, 1)) + 1;
+        start_point = vertices(iVertex, :);
+        segment = vertices(next_index, :) - start_point;
+        segment_length_squared = dot(segment, segment);
+        t = max(0, min(1, dot(point - start_point, segment) / segment_length_squared));
+        projection = start_point + t * segment;
+        clearance = min(clearance, norm(point - projection));
+    end
+end
+
+function room = normalize_room_materials(room, required_surfaces, require_exact)
 
     if ~isfield(room, 'materials') || ~isstruct(room.materials)
         error('room.materials is required for the static flow.');
@@ -333,6 +679,11 @@ function room = normalize_room_config(room)
 
     if ~isfield(room, 'material_files') || ~isstruct(room.material_files)
         error('room.material_files is required for the static flow.');
+    end
+
+    if require_exact
+        validate_exact_surface_fields(room.materials, required_surfaces, 'room.materials');
+        validate_exact_surface_fields(room.material_files, required_surfaces, 'room.material_files');
     end
 
     normalized_materials = struct();
@@ -384,13 +735,78 @@ function room = normalize_room_config(room)
     room.material_files = normalized_material_files;
 end
 
+function wall_ids = normalize_wall_ids(candidate)
+    if isstring(candidate)
+        wall_ids = cellstr(candidate(:).');
+    elseif iscell(candidate)
+        wall_ids = reshape(candidate, 1, []);
+        for iWall = 1:numel(wall_ids)
+            if ~(ischar(wall_ids{iWall}) || (isstring(wall_ids{iWall}) && isscalar(wall_ids{iWall})))
+                error('room.geometry.wall_ids must contain text values.');
+            end
+            wall_ids{iWall} = char(string(wall_ids{iWall}));
+        end
+    else
+        error('room.geometry.wall_ids must be a text array.');
+    end
+end
+
+function validate_exact_surface_fields(candidate, expected, field_name)
+    actual = fieldnames(candidate).';
+    missing = expected(~ismember(expected, actual));
+    unexpected = actual(~ismember(actual, expected));
+    if ~isempty(missing) || ~isempty(unexpected) || numel(actual) ~= numel(expected)
+        error('%s surfaces must match geometry exactly. Missing: %s. Unexpected: %s.', ...
+            field_name, strjoin(missing, ', '), strjoin(unexpected, ', '));
+    end
+end
+
+function area = polygon_signed_area(vertices)
+    next_vertices = circshift(vertices, -1, 1);
+    area = 0.5 * sum(vertices(:, 1) .* next_vertices(:, 2) - ...
+        next_vertices(:, 1) .* vertices(:, 2));
+end
+
+function has_intersection = polygon_has_self_intersection(vertices)
+    n_vertices = size(vertices, 1);
+    has_intersection = false;
+    for iEdge = 1:n_vertices
+        a1 = vertices(iEdge, :);
+        a2 = vertices(mod(iEdge, n_vertices) + 1, :);
+        for jEdge = iEdge + 1:n_vertices
+            if jEdge == iEdge + 1 || (iEdge == 1 && jEdge == n_vertices)
+                continue;
+            end
+            b1 = vertices(jEdge, :);
+            b2 = vertices(mod(jEdge, n_vertices) + 1, :);
+            if segments_intersect_strict(a1, a2, b1, b2)
+                has_intersection = true;
+                return;
+            end
+        end
+    end
+end
+
+function intersects = segments_intersect_strict(a1, a2, b1, b2)
+    o1 = cross_2d(a2 - a1, b1 - a1);
+    o2 = cross_2d(a2 - a1, b2 - a1);
+    o3 = cross_2d(b2 - b1, a1 - b1);
+    o4 = cross_2d(b2 - b1, a2 - b1);
+    intersects = ((o1 > 1e-9 && o2 < -1e-9) || (o1 < -1e-9 && o2 > 1e-9)) && ...
+        ((o3 > 1e-9 && o4 < -1e-9) || (o3 < -1e-9 && o4 > 1e-9));
+end
+
+function value = cross_2d(lhs, rhs)
+    value = lhs(1) * rhs(2) - lhs(2) * rhs(1);
+end
+
 function tf = is_absolute_path(path_value)
     path_value = char(string(path_value));
     tf = ~isempty(regexp(path_value, '^[A-Za-z]:[\\/]', 'once')) || ...
         startsWith(path_value, '\\') || startsWith(path_value, '/');
 end
 
-function surfaces = get_required_room_surfaces()
+function surfaces = get_legacy_room_surfaces()
     surfaces = {'north_wall', 'south_wall', 'east_wall', 'west_wall', 'floor', 'ceiling'};
 end
 
@@ -533,18 +949,21 @@ function unique_id = uniquify_hrtf_id(base_id, used_ids)
     unique_id = sprintf('%s-%d', base_id, next_index);
 end
 
-function outputs = derive_render_outputs(render_cfg, project_name, scene_id, hrtfs)
-    n_hrtfs = numel(hrtfs);
-    outputs = repmat(struct('hrtf_id', '', 'wav_path', '', 'metadata_path', '', ...
+function outputs = derive_render_outputs(render_cfg, project_name, scene_id, variants)
+    n_hrtfs = numel(variants);
+    outputs = repmat(struct('hrtf_id', '', 'output_type', '', 'wav_path', '', 'metadata_path', '', ...
         'project_name', ''), 1, n_hrtfs);
 
     base_wav_path = resolve_output_target(render_cfg.output_wav_path, scene_id, '.wav');
     base_metadata_path = resolve_output_target(render_cfg.output_metadata_path, scene_id, '.json');
 
     for i = 1:n_hrtfs
-        hrtf_id = hrtfs(i).hrtf_id;
+        hrtf_id = variants(i).output_type;
 
-        outputs(i).hrtf_id = hrtf_id;
+        outputs(i).output_type = hrtf_id;
+        if strcmp(variants(i).receiver_kind, 'catalog')
+            outputs(i).hrtf_id = hrtf_id;
+        end
         if n_hrtfs == 1
             outputs(i).wav_path = base_wav_path;
             outputs(i).metadata_path = base_metadata_path;

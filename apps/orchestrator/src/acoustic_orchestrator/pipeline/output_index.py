@@ -1,10 +1,28 @@
 import json
+import math
+import os
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
+from uuid import uuid4
+import wave
 
+from acoustic_orchestrator.pipeline.render_backends import DEFAULT_SAMPLE_RATE_HZ
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths
+from acoustic_orchestrator.pipeline.render_validation import RenderValidation, RenderValidity, validate_render
+from acoustic_orchestrator.pipeline.render_validation import equivalent_render_inputs
+from acoustic_orchestrator.pipeline.render_attempt import read_json_object
+from acoustic_orchestrator.pipeline.render_history import RenderHistory, history_root, load_render_history, resume_evidence
 
+
+_INDEX_LOCKS_GUARD = threading.Lock()
+_INDEX_LOCKS: dict[Path, threading.Lock] = {}
+_INDEX_REPLACE_ATTEMPTS = 10
+_INDEX_REPLACE_RETRY_DELAY_S = 0.01
 
 VariantStatus = Literal["planned", "completed", "partial", "failed"]
 ClarityStatus = Literal["planned", "submitted", "completed", "partial", "failed", "blocked", "skipped"]
@@ -35,6 +53,8 @@ class MetadataSnapshot(TypedDict, total=False):
     scene_id: str
     output_type: str
     hrtf_id: str
+    circular_array: dict
+    coordinate_frame: str
     rendered_wav_path: str
     render_metadata_path: str
 
@@ -50,10 +70,18 @@ class VariantRecord(TypedDict):
     runtime_manifest_path: str
     rendered_wav_path: str
     render_metadata_path: str | None
-    receiver_ir_path: str
+    receiver_ir_path: str | None
     observed_outputs: ObservedOutputsRecord
     metadata_snapshot: MetadataSnapshot | None
     validation: ValidationRecord
+    render_validity: NotRequired[RenderValidity]
+    attempt_id: NotRequired[str]
+    attempt_outcome_path: NotRequired[str]
+    completion_path: NotRequired[str]
+    process_status: NotRequired[str]
+    exit_code: NotRequired[int | None]
+    decision: NotRequired[str]
+    recovery_reason: NotRequired[str | None]
     updated_at: str
 
 
@@ -79,6 +107,11 @@ class ClarityJobManifestRecord(TypedDict):
     output_dir: str
     expected_output_wav_path: str
     expected_output_metadata_path: str
+    processor: str
+    calibration: dict[str, Any] | None
+    outer_middle_ear: str
+    processor_config: dict[str, Any]
+    processing_signature: dict[str, Any]
 
 
 class ClarityObservedOutputsRecord(TypedDict):
@@ -107,6 +140,7 @@ class ClarityRecord(TypedDict):
     scene_id: str
     output_type: str
     hearing_profile_id: str
+    processor: str | None
     status: ClarityStatus
     resumed: bool
     attempted: bool
@@ -144,7 +178,7 @@ def build_planned_variant_record(
     *,
     metadata_required: bool,
 ) -> VariantRecord:
-    return {
+    record: VariantRecord = {
         "variant_id": variant_paths["variant_id"],
         "scene_id": variant_paths["scene_id"],
         "output_type": variant_paths["output_type"],
@@ -165,6 +199,7 @@ def build_planned_variant_record(
         "validation": {"ok": True, "issues": []},
         "updated_at": _now_isoformat(),
     }
+    return record
 
 
 def inspect_variant(
@@ -173,9 +208,14 @@ def inspect_variant(
     metadata_required: bool,
     attempted: bool,
     resumed: bool = False,
+    render_validation: RenderValidation | None = None,
+    resume_history: RenderHistory | None = None,
 ) -> VariantRecord:
     observed_outputs = _observe_outputs(variant_paths)
     metadata_snapshot, validation_issues = _read_render_metadata(variant_paths["render_metadata_path"])
+    if render_validation is None:
+        render_validation = validate_render(variant_paths, metadata_required=metadata_required)
+    validation_issues.extend(render_validation.as_record()["issues"])
 
     required_outputs = [
         observed_outputs["runtime_manifest"],
@@ -186,9 +226,9 @@ def inspect_variant(
 
     if not attempted and not resumed:
         status: VariantStatus = "planned"
-    elif all(required_outputs):
+    elif all(required_outputs) and render_validation.validity == "valid":
         status = "completed"
-    elif any(required_outputs):
+    elif observed_outputs["rendered_wav"] or observed_outputs["render_metadata"]:
         status = "partial"
     else:
         status = "failed"
@@ -201,8 +241,10 @@ def inspect_variant(
             metadata_snapshot=metadata_snapshot,
         )
     )
+    if validation_issues and status == "completed":
+        status = "partial"
 
-    return {
+    record: VariantRecord = {
         "variant_id": variant_paths["variant_id"],
         "scene_id": variant_paths["scene_id"],
         "output_type": variant_paths["output_type"],
@@ -216,12 +258,26 @@ def inspect_variant(
         "receiver_ir_path": variant_paths["receiver_ir_path"],
         "observed_outputs": observed_outputs,
         "metadata_snapshot": metadata_snapshot,
+        "render_validity": render_validation.validity,
         "validation": {
             "ok": not validation_issues,
-            "issues": validation_issues,
+            "issues": list(dict.fromkeys(validation_issues)),
         },
         "updated_at": _now_isoformat(),
     }
+    if resumed:
+        history = resume_history if resume_history is not None else load_render_history(history_root(variant_paths))
+        allowed, prior = resume_evidence(history, variant_paths, None)
+        if allowed and prior is not None:
+            for field_name in ("attempt_id", "completion_path", "process_status", "exit_code", "decision", "recovery_reason"):
+                cast(dict[str, Any], record)[field_name] = prior.get(field_name)
+            record["attempt_outcome_path"] = prior["_outcome_path"].as_posix()
+        elif not allowed:
+            record["validation"]["ok"] = False
+            record["validation"]["issues"].append("resume_history_not_accepted")
+            record["render_validity"] = "not_verifiable"
+            record["status"] = "partial" if observed_outputs["rendered_wav"] or observed_outputs["render_metadata"] else "failed"
+    return record
 
 
 def should_resume_variant(
@@ -229,6 +285,8 @@ def should_resume_variant(
     variant_paths: RenderVariantPaths,
     *,
     metadata_required: bool,
+    history: RenderHistory | None = None,
+    expected_manifest: dict[str, Any] | None = None,
 ) -> bool:
     existing_record = existing_records.get(variant_paths["variant_id"])
     if existing_record is not None:
@@ -237,17 +295,31 @@ def should_resume_variant(
         if not existing_record["validation"]["ok"]:
             return False
 
-    current_record = inspect_variant(
-        variant_paths,
-        metadata_required=metadata_required,
-        attempted=False,
-        resumed=True,
-    )
-    return current_record["status"] == "completed" and current_record["validation"]["ok"]
+    if history is None:
+        history = load_render_history(history_root(variant_paths, existing_record))
+    allowed, _ = resume_evidence(history, variant_paths, existing_record, expected_manifest)
+    if not allowed:
+        return False
+    if expected_manifest is not None:
+        try:
+            current = read_json_object(Path(variant_paths["runtime_manifest_path"]))
+            if not equivalent_render_inputs(expected_manifest, current):
+                return False
+        except (OSError, ValueError):
+            return False
+
+    validation = validate_render(variant_paths, metadata_required=metadata_required, profile="reuse")
+    return validation.validity == "valid"
 
 
 def upsert_variant(index_path: Path, records: dict[str, VariantRecord], record: VariantRecord) -> None:
     _upsert_jsonl(index_path=index_path, records=records, key=record["variant_id"], record=record)
+
+
+def upsert_variants(index_path: Path, records: dict[str, VariantRecord], new_records: list[VariantRecord]) -> None:
+    """Upsert many variants with a single index rewrite (avoids O(n^2) publishing)."""
+    if new_records:
+        _upsert_many_jsonl(index_path, records, {record["variant_id"]: record for record in new_records})
 
 
 def summarize_variant_index(records: dict[str, VariantRecord]) -> dict[str, int]:
@@ -310,6 +382,7 @@ def build_clarity_record(
         "scene_id": job["scene_id"],
         "output_type": job["output_type"],
         "hearing_profile_id": job["hearing_profile_id"],
+        "processor": job["processor"],
         "status": status,
         "resumed": resumed,
         "attempted": attempted,
@@ -435,7 +508,7 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
     metadata_snapshot = cast(MetadataSnapshot | None, record.get("metadata_snapshot"))
     validation = cast(ValidationRecord | None, record.get("validation")) or {"ok": True, "issues": []}
 
-    return {
+    normalized: VariantRecord = {
         "variant_id": cast(str, record["variant_id"]),
         "scene_id": cast(str, record["scene_id"]),
         "output_type": cast(str, record["output_type"]),
@@ -446,7 +519,7 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
         "runtime_manifest_path": cast(str, record["runtime_manifest_path"]),
         "rendered_wav_path": cast(str, record["rendered_wav_path"]),
         "render_metadata_path": render_metadata_path,
-        "receiver_ir_path": cast(str, record["receiver_ir_path"]),
+        "receiver_ir_path": cast(str | None, record["receiver_ir_path"]),
         "observed_outputs": observed_outputs,
         "metadata_snapshot": metadata_snapshot,
         "validation": {
@@ -455,6 +528,13 @@ def _normalize_variant_record(record: dict[str, Any]) -> VariantRecord:
         },
         "updated_at": cast(str, record.get("updated_at", _now_isoformat())),
     }
+    if "render_validity" in record:
+        normalized["render_validity"] = cast(RenderValidity, record["render_validity"])
+    for field_name in ("attempt_id", "attempt_outcome_path", "completion_path", "process_status", "exit_code",
+                       "decision", "recovery_reason"):
+        if field_name in record:
+            cast(dict[str, Any], normalized)[field_name] = record[field_name]
+    return normalized
 
 
 def _normalize_clarity_record(record: dict[str, Any]) -> ClarityRecord:
@@ -472,6 +552,8 @@ def _normalize_clarity_record(record: dict[str, Any]) -> ClarityRecord:
         "scene_id": cast(str, record["scene_id"]),
         "output_type": cast(str, record["output_type"]),
         "hearing_profile_id": cast(str, record.get("hearing_profile_id", "default")),
+        # Records written before per-processor layouts carry no processor (legacy, never resumed).
+        "processor": _pick_string(record.get("processor")),
         "status": cast(ClarityStatus, record.get("status", "planned")),
         "resumed": bool(record.get("resumed", False)),
         "attempted": bool(record.get("attempted", False)),
@@ -525,13 +607,21 @@ def _read_render_metadata(render_metadata_path: str | None) -> tuple[MetadataSna
 
     try:
         payload = cast(dict[str, Any], json.loads(metadata_path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         return None, [f"render_metadata_parse_error: {exc}"]
+
+    if not isinstance(payload, dict):
+        return None, ["render_metadata_payload_not_object"]
 
     summary = _as_dict(payload.get("summary"))
     render = _as_dict(payload.get("render"))
 
     metadata_snapshot: MetadataSnapshot = {}
+    receiver = _as_dict(payload.get("receiver"))
+    if isinstance(receiver.get("circular_array"), dict):
+        metadata_snapshot["circular_array"] = receiver["circular_array"]
+    if isinstance(receiver.get("coordinate_frame"), str):
+        metadata_snapshot["coordinate_frame"] = receiver["coordinate_frame"]
     scene_id = _pick_string(payload.get("scene_id"), summary.get("scene_id"))
     output_type = _pick_string(payload.get("output_type"), summary.get("output_type"))
     hrtf_id = _pick_string(payload.get("hrtf_id"), summary.get("hrtf_id"))
@@ -584,6 +674,8 @@ def _validate_variant(
     metadata_snapshot: MetadataSnapshot | None,
 ) -> list[str]:
     issues: list[str] = []
+    if variant_paths["output_type"] == "circular_array":
+        issues.extend(_validate_array_outputs(variant_paths, observed_outputs, metadata_snapshot))
     if metadata_required and not observed_outputs["render_metadata"]:
         issues.append("render_metadata_missing")
 
@@ -625,6 +717,60 @@ def _validate_variant(
             f"{_normalize_path(expected_metadata_path)} got {_normalize_path(observed_metadata_path)}"
         )
 
+    return issues
+
+
+def _matches_array_value(expected: Any, observed: Any) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(observed, dict) and all(
+            key in observed and _matches_array_value(value, observed[key]) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(observed, list) and len(expected) == len(observed) and all(
+            _matches_array_value(a, b) for a, b in zip(expected, observed, strict=True)
+        )
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return isinstance(observed, (int, float)) and not isinstance(observed, bool) and (
+            math.isfinite(observed) and math.isclose(expected, observed, rel_tol=1e-9, abs_tol=1e-6)
+        )
+    return expected == observed
+
+
+def _validate_array_outputs(
+    paths: RenderVariantPaths, observed: ObservedOutputsRecord, metadata: MetadataSnapshot | None
+) -> list[str]:
+    issues: list[str] = []
+    expected = paths.get("circular_array")
+    if expected is None:
+        return ["array_planned_geometry_missing"]
+    if observed["rendered_wav"]:
+        try:
+            with wave.open(paths["rendered_wav_path"], "rb") as audio:
+                if audio.getnchannels() != expected["num_microphones"]:
+                    issues.append("array_wav_channel_count_mismatch")
+                if audio.getframerate() != paths.get("sample_rate_hz", DEFAULT_SAMPLE_RATE_HZ):
+                    issues.append("array_wav_sample_rate_mismatch")
+        except (OSError, EOFError, wave.Error) as exc:
+            issues.append(f"array_wav_unreadable: {exc}")
+    if observed["runtime_manifest"]:
+        try:
+            runtime = json.loads(Path(paths["runtime_manifest_path"]).read_text(encoding="utf-8"))
+            receiver = _as_dict(_as_dict(runtime).get("receiver"))
+            if not _matches_array_value(expected, receiver.get("circular_array")):
+                issues.append("array_runtime_geometry_mismatch")
+            if receiver.get("hrtfs") or _as_dict(runtime.get("render")).get("active_output_type") != "circular_array":
+                issues.append("array_runtime_selection_mismatch")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            issues.append(f"array_runtime_unreadable: {exc}")
+    if observed["render_metadata"]:
+        if metadata is None or not _matches_array_value(expected, metadata.get("circular_array")):
+            issues.append("array_metadata_geometry_mismatch")
+        if metadata is None or metadata.get("coordinate_frame") != "public_xyz_y_up":
+            issues.append("array_metadata_coordinate_frame_mismatch")
+        if metadata is None or metadata.get("output_type") != "circular_array":
+            issues.append("array_metadata_output_type_missing")
+    elif not observed["runtime_manifest"]:
+        issues.append("array_provenance_missing")
     return issues
 
 
@@ -670,6 +816,7 @@ def _validate_clarity_result(
         if not observed_outputs["expected_output_wav"]:
             issues.append(f"expected_output_wav_missing: {job['expected_output_wav_path']}")
         issues.extend(_validate_matching_field(result_metadata, "output_wav_path", job["expected_output_wav_path"]))
+        issues.extend(_validate_processing_identity(job, result_metadata))
         degradation_applied = _as_dict(result_metadata.get("degradation_applied"))
         if not degradation_applied:
             issues.append("clarity_result_degradation_applied_missing")
@@ -766,6 +913,29 @@ def _summarize_clarity_batch_status(records: dict[str, ClarityRecord]) -> Clarit
     return "partial"
 
 
+def _validate_processing_identity(job: ClarityJobManifestRecord, result_metadata: dict[str, Any]) -> list[str]:
+    """A completed sidecar must come from the job's processor, signature and render scale K."""
+    issues: list[str] = []
+    observed_processor = _pick_string(_as_dict(result_metadata.get("processor")).get("name"))
+    if observed_processor != job["processor"]:
+        issues.append(f"clarity_result_processor_mismatch: expected {job['processor']} got {observed_processor}")
+    observed_signature = result_metadata.get("processing_signature")
+    if not isinstance(observed_signature, dict):
+        issues.append("clarity_result_processing_signature_missing")
+    elif json.dumps(observed_signature, sort_keys=True) != json.dumps(job["processing_signature"], sort_keys=True):
+        issues.append("clarity_result_processing_signature_mismatch")
+    expected_scale = _as_dict(job["calibration"]).get("effective_scale_db_spl")
+    observed_calibration = result_metadata.get("calibration")
+    if not isinstance(observed_calibration, dict):
+        issues.append("clarity_result_calibration_missing")
+    elif observed_calibration.get("effective_scale_db_spl") != expected_scale:
+        issues.append(
+            "clarity_result_calibration_mismatch: expected effective_scale_db_spl "
+            f"{expected_scale} got {observed_calibration.get('effective_scale_db_spl')}"
+        )
+    return issues
+
+
 def _validate_required_string(payload: dict[str, Any], field_name: str, *, prefix: str) -> list[str]:
     value = _pick_string(payload.get(field_name))
     if value is None:
@@ -811,10 +981,46 @@ def _now_isoformat() -> str:
     return datetime.now(UTC).isoformat()
 
 
+@contextmanager
+def _index_write_lock(index_path: Path) -> Iterator[None]:
+    resolved_path = index_path.resolve()
+    with _INDEX_LOCKS_GUARD:
+        lock = _INDEX_LOCKS.setdefault(resolved_path, threading.Lock())
+    with lock:
+        yield
+
+
+def _index_temp_path(index_path: Path) -> Path:
+    return index_path.with_name(
+        f".{index_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp"
+    )
+
+
+def _replace_index(temp_path: Path, index_path: Path) -> None:
+    for attempt in range(_INDEX_REPLACE_ATTEMPTS):
+        try:
+            temp_path.replace(index_path)
+            return
+        except PermissionError:
+            if attempt == _INDEX_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_INDEX_REPLACE_RETRY_DELAY_S)
+
+
 def _upsert_jsonl(index_path: Path, records: dict[str, Any], key: str, record: Any) -> None:
+    _upsert_many_jsonl(index_path, records, {key: record})
+
+
+def _upsert_many_jsonl(index_path: Path, records: dict[str, Any], updates: dict[str, Any]) -> None:
+    """Merge ``updates`` into ``records`` and rewrite the index once."""
     index_path.parent.mkdir(parents=True, exist_ok=True)
-    records[key] = record
-    temp_path = index_path.with_suffix(f"{index_path.suffix}.tmp")
-    lines = [json.dumps(records[current_key], sort_keys=True) for current_key in sorted(records)]
-    temp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    temp_path.replace(index_path)
+    with _index_write_lock(index_path):
+        records.update(updates)
+        temp_path = _index_temp_path(index_path)
+        lines = [json.dumps(records[current_key], sort_keys=True) for current_key in sorted(records)]
+        try:
+            temp_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            _replace_index(temp_path, index_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise

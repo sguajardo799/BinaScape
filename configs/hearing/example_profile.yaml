@@ -1,0 +1,20 @@
+profiles:
+  - hearing_profile_id: symmetric_moderate_loss
+    description: Moderate bilateral loss for stronger degradation tests.
+    ears:
+      left:
+        loss_db_by_band:
+          250: 30
+          500: 35
+          1000: 40
+          2000: 45
+          4000: 50
+          8000: 55
+      right:
+        loss_db_by_band:
+          250: 30
+          500: 35
+          1000: 40
+          2000: 45
+          4000: 50
+          8000: 55

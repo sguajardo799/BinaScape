@@ -7,13 +7,21 @@ hearing-loss degradation jobs.
 
 The primary supported workflow is root-first execution from the monorepo root.
 
+See the [documentation index](../../docs/README.md), [local architecture](ARCHITECTURE.md),
+[shared contracts](../../docs/architecture/contracts.md), [setup](../../docs/development/setup.md),
+and [testing guide](../../docs/development/testing.md). The sibling
+[output analyzer](../output-analyzer/README.md) can inspect run metadata after
+execution; it is an optional analysis application.
+
 ## Requirements
 
 - Python `>=3.12,<3.13`
 - `uv`
-- MATLAB on `PATH` as `matlab` for `render-static`
+- MATLAB on `PATH` as `matlab` for `render-static` with the default RAVEN backend
 - A local MATLAB/RAVEN backend at `apps/matlab`
 - ITA Toolbox and RAVEN configured in MATLAB
+- Alternatively, for `render.backend: pyroomacoustics` (circular arrays only, no MATLAB):
+  the optional `pyroomacoustics` extra (see [Render Backends](#render-backends))
 - Local assets referenced by the selected config
 - The sibling Clarity backend at `apps/clarity-backend` when submitting hearing
   degradation jobs
@@ -44,11 +52,14 @@ Generate manifests only:
 uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml
 ```
 
-Run the full static render:
+Run the official opt-in MATLAB/RAVEN smoke directly through the orchestrator:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml
 ```
+
+This command samples all configured room-shape candidates and requires the
+referenced local assets, MATLAB, ITA Toolbox, and RAVEN.
 
 Prepare Clarity handoff artifacts without submission:
 
@@ -60,6 +71,13 @@ Prepare and submit Clarity handoff artifacts to the sibling backend:
 
 ```sh
 uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit
+```
+
+Export a run for a calibrated playback chain (same gain for unprocessed, MSBG and WHIS versions;
+see [Presentation export](#presentation-export)):
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator export-presentation outputs/artifacts/<run_name> --playback apps/orchestrator/examples/playback_calibration.yaml
 ```
 
 From inside `apps/orchestrator`, the equivalent app-local example command is:
@@ -74,13 +92,18 @@ The local `main.py` entrypoint can also be used for development:
 uv run python .\main.py generate-manifests .\examples\example_config.yml
 ```
 
+For development inspection of sampled room footprints, install the optional
+`dev` extra (which includes matplotlib) and call
+`acoustic_orchestrator.experiment.geometry_visualization.plot_room_geometry`.
+The helper is intentionally not imported by the production pipeline.
+
 ## Config Examples
 
 Root-level examples:
 
-- `configs/experiments/static_example.yml`: canonical root-first static
+- `configs/experiments/static_example.yml`: root-first static
   pipeline example.
-- `configs/experiments/sim_config.yml`: additional experiment configuration.
+- `configs/experiments/speech_fixed_position_e2e.yml`: fixed-position experiment example.
 - `configs/hearing/hearing_profiles.yaml`: hearing profile catalog for Clarity
   degradation.
 
@@ -108,7 +131,25 @@ This command:
 2. Resolves relative paths from the config file location.
 3. Samples static scenes according to `execution.num_simulations`.
 4. Writes one scene manifest per generated scene under
-   `{outputs.artifact_root}/{run_name}/manifests/scene/`.
+   `{outputs.artifact_root}/{run_name}/metadata/manifests/scene/`.
+
+Run artifacts are grouped under `metadata/manifests/`, `metadata/indexes/`,
+and `output_audio/`. The optional `cropped_audio/` directory is created only when
+source audio must be trimmed. Output directories are created when a stage writes
+files, so a manifest-only run does not create empty render or Clarity directories.
+
+Generated scene manifests use schema **3.0**. MATLAB accepts schemas 1.0, 2.0,
+and 3.0; the examples illustrate contracts implemented by production validators.
+The loader rejects legacy independent output-root keys and
+`room_sampling.max_rt30_s`; use `outputs.artifact_root`, `outputs.run_name`,
+and `room_sampling.reverberation`.
+
+`experiment.experiment_id` and `outputs.run_name` accept a `{seed}` placeholder
+that the loader replaces with `experiment.random_seed` (for example,
+`experiment_id: e2e_1_worker_s{seed}` with `random_seed: 42` becomes
+`e2e_1_worker_s42`). It is the only supported placeholder; any other field,
+format spec, or unbalanced brace is rejected when the config loads. Use `{{` and
+`}}` for literal braces.
 
 Current material contract in generated manifests:
 
@@ -116,9 +157,68 @@ Current material contract in generated manifests:
 - `room.material_files` is added as a surface-to-file map.
 - Each material file path is absolute.
 - Material entries do not emit `surface_id`.
+- Schema 3.0 adds `room.acoustic_surfaces` with base, treatment and authoritative
+  effective absorption/scattering vectors for every surface.
 
-Coordinate note for RAVEN: receiver and source positions are serialized as
-`[x, y, -z]` because the MATLAB/RAVEN side expects that coordinate convention.
+The required `room_sampling.reverberation` block defines a global uniform
+distribution over equal-width bins. The sampler preassigns balanced quotas by
+scene index, estimates all ten RAVEN octave bands with Sabine and classifies on
+the seven-band mean from 125 Hz through 8 kHz. Walls and ceiling receive
+independent synthetic treatments. A uniformly retained in-range candidate is
+used as a soft fallback when the requested bin is not reached. Manifests contain
+`reverberation_sampling`; their embedded `reverberation_batch` is a historical
+snapshot of quotas, observations, deviations, fallbacks, failures and statistical
+resolution. Current batch statistics live in
+`metadata/indexes/static_run_summary.json`, not in rewritten reused manifests.
+
+The bin divisibility check uses an absolute tolerance of `1e-9 s` (plus a
+relative tolerance of `1e-12`) on the reconstructed time span. Bins follow
+`[lower, upper)` semantics, except that the last bin includes its upper bound.
+For a single-bin experiment, set its width to the complete range:
+
+```yaml
+room_sampling:
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution:
+      type: uniform
+      scope: global
+      range_s: {min: 0.4, max: 0.6}
+      bin_width_s: 0.2
+      quota_tolerance_fraction: 0.10
+    treatment:
+      catalog_version: 1
+      mix_model: area_weighted_linear
+      mix_model_version: 1
+      eligible_surface_types: [wall, ceiling]
+      max_treatments_per_surface: 1
+      preserve_base_scattering: true
+      allow_none: true
+      wall_coverage: {min: 0.0, max: 1.0}
+      ceiling_coverage: {min: 0.0, max: 1.0}
+```
+
+The v1 synthetic treatment catalog requires 31 finite absorption coefficients
+in `[0, 1]` and limits the absolute step between adjacent frequency bands to
+`0.08`. This is an acoustic-plausibility rule, not a claim of construction or
+commercial-product realism. `quota_tolerance_fraction` is diagnostic: bins
+above it are reported and a successful batch becomes
+`complete_with_deviation`, but the tolerance never changes classification or
+invalidates the batch. Small quotas also report
+`insufficient_statistical_resolution` when their discrete resolution is coarser
+than the requested tolerance.
+
+Coordinate note for RAVEN: public manifests use `[x, y, z]` with the footprint
+in `[x, z]`. For schemas 2.0 and 3.0, the MATLAB adapter applies the same explicit
+`[x, y, z] -> [x, y, -z]` reflection to positions and orientation vectors.
+Legacy schema 1.0 keeps its existing shoebox contract. Scene and runtime JSON
+preserve public coordinates: the reflection takes place inside MATLAB. Render
+metadata source positions and orientation vectors therefore use the adapted
+RAVEN coordinates for schemas 2.0/3.0.
 
 ## Background Noise Planning
 
@@ -151,8 +251,9 @@ uv run --project apps/orchestrator acoustic-orchestrator render-static configs/e
 
 This command:
 
-1. Generates static scene manifests.
-2. Creates MATLAB input manifests, one per enabled receiver-output variant.
+1. Inspects the complete static plan and existing manifests before applying changes.
+2. Reuses compatible variants and creates missing scene/runtime inputs only for
+   work that must run, one runtime per enabled receiver-output variant.
 3. Invokes `matlab -batch` through the fixed backend entrypoint
    `apps/matlab/run_raven_static_render.m`.
 4. Writes rendered WAV files and render metadata to configured paths.
@@ -164,14 +265,743 @@ This command:
 
 Parallel MATLAB/RAVEN execution is controlled by `execution.num_workers`.
 `num_workers: 1` keeps execution sequential. Higher values may launch multiple
-MATLAB subprocesses after runtime inputs are prepared. Do not configure more
+MATLAB subprocesses after runtime inputs are prepared: up to `num_workers`
+scenes render their canonical variant at the same time (each scene still
+retries and resamples its RAVEN T30 on its own), and the remaining variants are
+then rendered with the same bound. Accepted scenes and remaining variants keep
+scene order; audit logs (scene revisions, sampling failures) keep completion
+order. Do not configure more
 workers than available MATLAB/RAVEN licenses, and return to `1` if the local
 RAVEN setup shows hidden global state.
 
-The canonical single-output example enables `binaural_hrtf`. The runtime also
+Each MATLAB process runs with its own MATLAB preferences directory: the
+orchestrator sets `MATLAB_PREFDIR` to a fresh, empty directory in the system
+temp folder (prefix `binascape-matlab-prefs-`, outside the batch outputs),
+overriding any inherited value. Parallel renders therefore never race on the
+shared `matlabprefs.mat`, and your own MATLAB preferences are neither read nor
+written by renders. The directory is removed when the process ends, whether it
+succeeded, failed or could not launch; a removal failure only emits a
+`RuntimeWarning` and never changes the attempt outcome. Each attempt's
+`outcome.json` records `matlab_prefdir: {"path": ..., "cleanup": "removed" | "failed"}`.
+`scripts/diagnostics/rt30_reproducibility.py` applies the same isolation. If
+the orchestrator is killed mid-render, leftover directories are harmless;
+delete them with the orchestrator stopped, for example:
+`Get-ChildItem $env:TEMP -Directory -Filter 'binascape-matlab-prefs-*' | Remove-Item -Recurse -Force`.
+
+### One MATLAB session with a parallel pool (`execution.matlab_runner: pool`)
+
+With a single MATLAB license, several `matlab -batch` processes started at the
+same time can fail with `Unable to communicate with required MathWorks services
+(error 5001)`. Set `execution.matlab_runner: pool` (RAVEN only; the default is
+`process`) to render with **one** MATLAB session per run instead: the
+orchestrator starts one `matlab -batch run_raven_pool_server(...)` process,
+which opens a local Parallel Computing Toolbox pool of `num_workers` workers
+and renders up to `num_workers` attempts at once. Only that session checks out
+a MATLAB license.
+
+```yaml
+execution:
+  num_workers: 3          # what the machine can hold; see below
+  matlab_runner: pool     # default: process
+  matlab_pool:            # optional
+    startup_timeout_s: 600   # pool must be ready within this time
+    heartbeat_timeout_s: 300 # session considered hung after this silence
+```
+
+Every variant is still an attempt with the same files and rules as in
+`process` mode (snapshot, `outcome.json`, `completion.json`/`failure.json`,
+`console.log`, `events.jsonl`, exit code), so acceptance, retries, the batch
+circuit, resume, `reconcile-static` and `reset-circuit` behave the same; a run
+can switch modes and resume. A job that raises is an observed exit `1`
+(`CalledProcessError`). If the session exits, never becomes ready (for example
+a licensing error at startup) or stops refreshing its heartbeat, every
+attempt waiting on it fails as an observed process failure with the session's
+exit code and the session console appended to its `console.log`; the next
+dispatch starts a new session. The session is started lazily on the first
+RAVEN dispatch (a fully resumed run opens none) and stopped when the render
+stages end, including on errors and an open circuit.
+
+Pool attempts record `matlab_runner: "pool"`, `pool_session_id`,
+`pool_worker_id` and, on session failure, `pool_session_failure` (`reason`:
+`startup_exited`, `startup_timeout`, `session_exited` or `heartbeat_stale`).
+Each session lives in `metadata/matlab_pool/<session_id>/` with
+`invocation.json` (command, private `MATLAB_PREFDIR`, start/ready/finish times,
+exit code), `console.log`, and the `requests/`/`results/` job queue. The
+session's private preferences directory is shared by its workers; before
+reporting ready, the server performs the first ITA-Toolbox preferences access
+on one worker at a time so no worker reads `matlabprefs.mat` while another
+rewrites it.
+
+Choose `num_workers` for the memory available: each worker is a full MATLAB
+process. On the development machine (13.9 GB RAM) a pool of 3 workers starts
+and renders correctly, while a 4th worker exits during startup.
+
+The same setting also parallelizes static scene planning: scenes are sampled and
+inspected in up to `min(num_workers, CPU count, num_simulations)` worker
+processes and merged in scene order, so manifests, the static plan and the
+sampling failure journal are identical to the sequential run. A worker that
+finishes a scene takes the next pending one without waiting for slower,
+earlier scenes, with at most `2 * workers` scenes in flight. Fingerprints of
+the selected dependencies (audio, receiver IRs, materials) are computed on
+background threads as soon as a scene finishes, once per path and inspection,
+overlapping with the sampling of other scenes. Each source `audio_dir` is
+listed once per inspection and process and reused for every scene and attempt;
+the next inspection, and the catalog check before publication, list it again.
+Custom samplers that cannot be pickled (for example closures) are planned
+in-process.
+
+The canonical single-output example enables `binaural_hrtf`. MATLAB requires
+`render.sample_rate_hz: 44100`. Before completing the remaining variants,
+the pipeline checks that the canonical RAVEN T30 has exactly ten finite,
+positive bands and can retry within the scene budget. This measured T30 is
+distinct from the seven-band Sabine estimate used by sampling. The runtime also
 supports additional receiver IR outputs when enabled under `receiver_outputs`.
 
+### Receiver IR subject pairing
+
+By default (`receiver_outputs.subject_pairing: independent`) each enabled
+HRTF/HARTF output draws its IR file independently, so the `binaural_hrtf`,
+`bte_front_hartf`, and `bte_rear_hartf` renders of one scene usually come from
+different subjects. Set `subject_pairing: shared` to draw one subject per scene
+and use that subject's file in every enabled HRTF/HARTF output:
+
+```yaml
+receiver_outputs:
+  subject_pairing: shared   # independent (default) | shared
+  binaural_hrtf: {enabled: true, ir_catalog_path: ../assets/hrtf, ...}
+  bte_front_hartf: {enabled: true, ir_catalog_path: ../assets/hartf/front, ...}
+  bte_rear_hartf: {enabled: true, ir_catalog_path: ../assets/hartf/rear, ...}
+```
+
+The subject ID is the filename part before the first `_`
+(`id22_HRTF.daff`, `id22_HARTF_front.daff`, `id22_HARTF_rear.daff` → `id22`).
+The subject is drawn uniformly from the IDs present in every enabled catalog.
+In `shared` mode validation rejects `num_hrtfs` other than 1, catalog files
+without a subject ID, a subject repeated within one catalog, and catalogs with
+no subject in common. Each `receiver.hrtfs[]` entry of the scene manifest then
+carries `subject_id`. The circular array is not part of the pairing.
+`independent` keeps the previous sampling, so existing configs and seeds
+reproduce the same scenes; `shared` draws differ from `independent` for the
+same seed.
+
+## Diagnóstico por invocación MATLAB
+
+### Progreso de planificación
+
+`generate-manifests` muestra el avance por escenas evaluadas en stderr, con
+contadores de nuevas, conservadas y fallidas. Evaluar todas las escenas no
+significa que el plan se haya publicado: verificación y publicación aparecen
+como operaciones separadas. El ETA es aproximado y necesita tres escenas nuevas
+evaluadas satisfactoriamente; las conservadas no aportan muestras de velocidad.
+En una consola redirigida solo se escriben transiciones sin animación ni ANSI.
+Para desactivar toda presentación de progreso (no el resumen final):
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator generate-manifests configs/experiments/static_example.yml --no-progress
+```
+
+### Progreso del render
+
+`render-static` muestra primero canónicas por escena y después las variantes
+restantes por trabajo. Se distinguen aceptadas, reutilizadas y fallidas, además
+de invocaciones, reintentos de proceso y remuestreos T30. Reintentar no completa
+otra unidad. Si el lote aborta, los trabajos no resueltos quedan pendientes.
+La última actividad MATLAB observada se consulta por UUID de intento cada 500 ms
+en terminal interactiva; sin eventos se indica actividad interna desconocida.
+`entrypoint_completed` no es aceptación ni éxito del proceso.
+
+El tiempo transcurrido sigue visible durante simulaciones largas. El ETA por
+etapa se habilita tras tres aceptaciones nuevas e incluye reintentos y esperas;
+las reutilizaciones no aportan muestras. Es aproximado, no hay ETA global ni
+porcentaje ficticio dentro de RAVEN. Las APIs aceptan un callback opcional
+`progress=events.append` y permanecen sin interfaz por defecto.
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator render-static configs/experiments/static_example.yml --no-progress
+```
+
+### Progreso de Clarity y handoff
+
+`hearing_degradation.enabled=true` habilita la preparación de jobs; solo
+`runner.auto_submit=true` en `render-static`, o `clarity-handoff --submit`, ejecuta
+el backend. La consola distingue preparación, revalidación, ejecución pendiente,
+ausencia de pendientes y bloqueo. Solo los jobs realmente enviados forman el
+total de la barra local de Clarity; reutilizados, bloqueados y omitidos no se
+presentan como procesamiento nuevo.
+
+Durante el subprocess de Clarity se suspende la presentación del orquestador y
+el backend usa stderr heredado. `--no-progress` se propaga al hijo, también desde
+`render-static`; las llamadas Python sin observador desactivan la presentación
+del backend automáticamente. Al retornar se reinspeccionan los resultados sin
+confundir una salida no cero con ausencia de todos los resultados.
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs/experiments/static_example.yml --submit --no-progress
+```
+
+Cada intento real (incluidos reintentos T30) tiene un UUID y archivos separados:
+`{artifact_root}/{run_name}/metadata/diagnostics/matlab/{attempt_id}/`.
+Las variantes reanudadas sin ejecutar MATLAB no crean intentos. El runner Python
+directo acepta `diagnostics_dir=`; si se omite, usa `matlab_diagnostics/` junto al
+manifiesto. No se añaden opciones obligatorias al YAML.
+
+- `input_manifest.json`: copia de entrada; sobrevive a sobrescrituras o descartes T30.
+- `console.log`: stdout y stderr combinados, escritos a disco sin reproducción en vivo.
+- `events.jsonl`: eventos MATLAB incrementales, con versión, intento, secuencia y UTC.
+- `invocation.json`: resumen inicial `running`, actualizado al observar la terminación.
+
+El resumen versión 1 contiene identidades, comando como lista, rutas, tiempos UTC,
+duración monotónica en segundos, código de salida (`null` sin resultado de proceso),
+error, última etapa/subpaso iniciado y completado, y limitaciones en `diagnostic_errors`.
+Ejemplo de campos independientes del resumen (extracto):
+
+```json
+{
+  "schema_version": 1,
+  "process_status": "failed",
+  "exit_code": 7,
+  "entrypoint_completed": true,
+  "failure_location": "post_entrypoint"
+}
+```
+
+`entrypoint_completed` no implica éxito del proceso: solo una terminación observada
+con código cero establece `process_status=succeeded`. Sin evento final se conserva
+`entrypoint_completed=false`, aunque el proceso termine con cero. `running` tras una
+caída del orquestador no confirma que MATLAB siga vivo. No hay reconciliación automática.
+
+Las etapas son `initialization`, `simulation` y `artifact_writing`; dentro de
+`simulation` se distinguen `raven_run` y `audio_postprocessing`, sin instrumentar
+internamente RAVEN. Sin eventos, un fallo queda `indeterminate`; un fallo posterior
+al evento final es `post_entrypoint`, sin atribuir una causa concreta al cierre.
+Cada artefacto registra ruta, existencia anterior/posterior y `write_confirmed`
+solo por evento del intento actual. Existencia no equivale a escritura ni validación.
+
+Estos archivos **no cambian el índice de render, la reanudación ni las excepciones**.
+Los fallos exclusivos del diagnóstico advierten y conservan la evidencia posible;
+si no se puede abrir el log se hereda la consola y si no se puede preparar contexto
+se ejecuta sin eventos. La persistencia depende del almacenamiento disponible.
+Una línea final incompleta de eventos se ignora con advertencia.
+
+La retención es manual: no se borran diagnósticos al descartar WAV/metadatos.
+Los logs y copias pueden crecer y contener rutas locales; revísalos antes de compartirlos.
+
+Comprobación opt-in con MATLAB/ITA/RAVEN reales (el destino debe ser nuevo):
+
+```sh
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_matlab_diagnostics.py --output-root <directorio-nuevo>
+```
+
+Verifica un render array-only y un manifiesto inválido, conserva la evidencia y
+escribe `acceptance.json`. No simula fallos nativos de cierre ni modifica ejemplos versionados.
+
+## Aceptación funcional y fallos del proceso MATLAB
+
+El pipeline registra tres resultados independientes: **proceso**, **validez del
+render** y **decisión de continuación**. Un código no cero no equivale por sí solo
+a render incompleto; un mensaje de éxito o un archivo existente tampoco acreditan
+un render válido.
+
+Cada invocación prepara evidencia funcional fuera de los diagnósticos:
+
+`{artifact_root}/{run_name}/metadata/render_attempts/{attempt_id}/`
+
+- `input_manifest.json`: snapshot de bytes exactos que se pasa a MATLAB.
+- `completion.json`: constancia funcional versión 1, con identidad del intento,
+  SHA-256 del manifiesto e inventario exacto de WAV/metadatos con tamaño y SHA-256.
+- `failure.json`: informe funcional opcional versión 1 de entrada inválida durante
+  carga/validación MATLAB; no es una constancia de finalización ni un diagnóstico.
+- `outcome.json`: resultado observado del proceso, validaciones, decisión, error
+  original y estado de persistencia. Una decisión solo queda confirmada cuando
+  `commit_status=committed` y se ha publicado también el índice correspondiente.
+
+MATLAB publica la constancia atómicamente después de cerrar todas las salidas.
+La comprobación de hashes **no sustituye** la validación completa del WAV PCM,
+frecuencia/canales/duración, estructura del sidecar, fuentes y procedencia,
+receptor/IR o geometría del array, semilla, ruido y resultados acústicos requeridos.
+La variante canónica mantiene su puerta T30 de diez bandas finitas positivas y el
+presupuesto existente de remuestreo. No se añaden umbrales de calidad de señal ni
+un requisito de coincidencia entre T30 RAVEN y los bins Sabine.
+
+| Evidencia | Decisión |
+|---|---|
+| Código cero y artefactos válidos | Continuar; no exigir constancia a productores anteriores |
+| Código no cero observado, constancia válida y todas las validaciones satisfactorias | `continue_with_warning`, conservando `process_status=failed` y el código original |
+| Constancia presente pero contradictoria | Abortar, incluso con código cero |
+| Artefactos incompletos, corruptos o no verificables | No aceptar; conservar el error del proceso si existe |
+| Artefactos íntegros y T30 canónico rechazado | Política T30 existente, sin aceptar la escena ni eludir límites; con código no cero también se exige constancia válida |
+| Fallo de lanzamiento o terminación no observada | No recuperar |
+
+El índice conserva los campos anteriores y añade identidad/rutas del intento,
+`process_status`, `exit_code`, `render_validity`, `decision` y `recovery_reason`.
+Por ello, el estado de archivos no debe interpretarse sin la decisión funcional.
+El outcome recuperado conserva `error` y una advertencia durable con código
+`matlab_process_failed_after_completion`. La consola también advierte con el UUID y
+la ruta de evidencia; la CLI muestra:
+
+```text
+MATLAB procesos_fallidos=1 recuperados=1 recuperaciones_reanudadas=0
+```
+
+`procesos_fallidos` cuenta intentos de esta ejecución, incluidos los descartados
+por T30; `recuperados` cuenta los aceptados con advertencia y persistencia confirmada.
+`recuperaciones_reanudadas` es un contador separado para variantes reutilizadas
+con recuperación previa. La recuperación por sí sola no cambia el exit de CLI a
+fallo si el experimento fue aceptado; los códigos por fallo o muestreo se mantienen.
+
+`recovery_reason=post_completion` significa finalización funcional acreditada. No
+confirma la causa del cierre. El diagnóstico solo usa `post_entrypoint` si observó
+su evento final; si no lo observó, no lo inventa aunque el render sea recuperable.
+Ni eventos ni consola autorizan aceptación. Sus fallos siguen siendo de mejor
+esfuerzo; los fallos de almacenamiento funcional impiden continuar y conservan
+accesibles ambos errores cuando coinciden con un proceso fallido.
+
+El helper directo `render_manifest_with_matlab(...)` acepta `attempts_dir=`
+(fallback `render_attempts/` junto al manifiesto), además del `diagnostics_dir=`
+independiente. Devuelve `MatlabProcessResult` con `exit_code`, `error`, estado del
+proceso e intento; **ya no propaga automáticamente `CalledProcessError`**. El caller
+debe comprobar el resultado; la política de aceptación y su persistencia pertenecen
+al pipeline. Errores de preparación/persistencia funcional sí se propagan. El helper
+por sí solo no acepta artefactos ni convierte una terminación desconocida en éxito.
+
+Smoke opt-in con MATLAB/ITA/RAVEN reales, en un destino que no exista:
+
+```sh
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_render_acceptance.py --output-root <directorio-nuevo>
+```
+
+Ejecuta un render array-only normal y otro cuyo proceso falla deliberadamente
+después de retornar el entrypoint. La inyección existe solo en el harness; no cambia
+el renderer ni el audio de producción. Conserva outcome, constancia y diagnóstico,
+y escribe `acceptance.json` solo si ambas fases superan sus comprobaciones.
+
+### Plan y reanudación protegida
+
+`resume_if_possible: true` junto con `overwrite_existing: false` es la combinación
+de reanudación protegida soportada (véase `examples/example_config.yml`). El
+preflight inspecciona el lote completo antes de escribir: JSON corrupto, claves
+duplicadas, valores no finitos, identidades/poses/superficies inválidas, entradas
+incompatibles o salidas parciales protegidas producen conflicto con ruta y motivo.
+No se arregla ese conflicto activando sobrescritura de forma automática. Una
+variante sin salidas puede ejecutarse; una salida preexistente no reutilizable no
+se borra, mueve ni reemplaza con sobrescritura desactivada.
+
+`metadata/indexes/static_plan.json` (versión 1) registra configuración funcional
+normalizada, hash del contrato de generación, identidad/número de escenas,
+versiones y catálogo ordenado, con rutas y hashes de entradas seleccionadas.
+Workers, reanudación, sobrescritura y política de reintentos no cambian la identidad
+acústica; cambios acústicos, de catálogo, versiones o número de escenas sí pueden
+impedir compatibilidad. El plan no sustituye la validación de cada manifiesto.
+
+Un lote histórico sin plan requiere replay en memoria de su realización persistida:
+índice, semilla entera exacta, intento de muestreo y versiones disponibles. Se
+conserva el intento seleccionado después de T30, no se vuelve a la primera escena.
+Solo tras verificar todo el lote se publica adopción; las huellas observadas ahora
+no se presentan como huellas originales desconocidas. Si el replay no acredita
+compatibilidad, se informa conflicto. Se completan huecos con IDs estables y se
+conserva el journal de fallos/revisiones de muestreo y rechazos T30.
+
+La reutilización conserva **bytes y fechas de modificación** de escena, runtime,
+audio preparado, WAV y sidecar. Primero se construye la entrada esperada en memoria;
+no se llama al writer, al preparador de audio con efectos ni a MATLAB para variantes
+válidas. Audio preparado alterado es conflicto, no regeneración silenciosa. Índices
+y resúmenes actuales se publican por separado. Incluso con ambas opciones en `true`
+se prefieren resultados compatibles; `false/false` no autoriza sustituir existentes.
+
+`metadata/indexes/static_run_summary.json` (versión 1) separa `generated_scenes`,
+`acoustically_accepted_scenes` y variantes completadas: generar una escena no acredita
+T30 ni render completo. El resumen refleja también lotes interrumpidos; los campos
+embebidos históricos no se refrescan al reanudar ni borran rechazos conocidos.
+
+Una realización nueva por rechazo T30 se guarda, junto con la revisión del plan,
+antes de invocarla. No se remuestrea una escena si eso sustituiría variantes válidas
+protegidas por `overwrite_existing=false`. Los restos y recortes de realizaciones
+descartadas se archivan con sus huellas; un presupuesto T30 agotado se conserva como
+estado terminal, no como un manifiesto ausente que deba regenerarse al reiniciar.
+Los runtimes compatibles conservan sus bytes exactos, incluidos finales CRLF legacy:
+la identidad de una cadena no se calcula reserializando un JSON existente.
+
+Solo puede haber un orquestador escritor por lote. La exclusión de escritor se
+obtiene antes de aplicar acciones y se revalidan precondiciones de archivos. Un
+lock de estado incierto **no se rompe automáticamente**: investigar y confirmar que
+no quedan escritores antes de intervenir. No sustituye protección ante cambios
+externos; el paralelismo interno por variantes sigue permitido.
+
+### Reanudación, índices históricos y entrega a Clarity
+
+Con `resume_if_possible=true`, el pipeline compara cada runtime existente con la
+entrada que espera generar **antes de sobrescribirlo**. Considera fuentes y rutas
+preparadas, ganancias, tiempos, sala, receptor/IR o geometría y semilla; no solo
+los nombres de archivos. Cambios de cuotas/resumen de lote o de trazabilidad de
+muestreo no invalidan por sí solos el audio si la entrada acústica sigue igual.
+
+La reanudación consulta el historial funcional más reciente por variante. Un
+intento `running`, una decisión abortada/rechazada, una publicación `pending` o
+`failed`, o una referencia a evidencia desaparecida no se convierten en éxito por
+reiniciar. Esto también se comprueba si falta el índice: los archivos del intento
+no se consideran legacy solo porque se haya perdido una fila JSONL. Publicar un
+plan no borra las decisiones anteriores. Si el historial no puede leerse o
+atribuirse con seguridad, se bloquea su reutilización; no se borra evidencia
+automáticamente ni se afirma que el proceso siga vivo.
+
+Una variante recuperada se reutiliza solo si siguen coincidiendo las huellas de
+su snapshot y salidas con la constancia original, la entrada vigente es compatible
+y sus artefactos vuelven a superar la validación. No crea otro intento: conserva
+UUID, outcome, código no cero, `process_status=failed` y advertencia. En una
+reanudación sin MATLAB, por ejemplo, la CLI puede mostrar:
+
+```text
+MATLAB procesos_fallidos=0 recuperados=0 recuperaciones_reanudadas=1
+```
+
+La lectura de índices anteriores es aditiva; no hay migración masiva ni se fabrican
+constancias o éxitos de proceso. Una salida legacy sin evidencia funcional y sin
+fallo conocido puede reutilizarse si tiene runtime y artefactos estrictamente
+válidos. Un `.wav` de texto, sidecar `{}`, datos truncados o identidad insuficiente
+requieren un render nuevo aunque antes fueran clasificados como completos por
+existencia. Una recuperación declarada sin constancia verificable no es legacy.
+Con `resume_if_possible=false` se vuelve a invocar MATLAB incluso si las salidas
+anteriores son válidas, siempre que la sobrescritura necesaria esté autorizada;
+los intentos anteriores permanecen como historial.
+
+Clarity vuelve a comprobar archivos, manifiesto/procedencia e historial antes de
+crear jobs y otra vez al enviarlos; no confía solo en `completed` y `validation.ok`
+guardados. Si existe manifiesto de escena, también contrasta la entrada runtime
+con esa escena. Un archivo alterado o intento pendiente posterior bloquea el job y
+no llega al backend. Solo las HRTF seleccionadas son elegibles, incluidas sus
+variantes numeradas; HARTF y array siguen siendo render-only aunque tengan dos
+canales. Se mantienen basename WAV, directorio por perfil y sidecar adyacente.
+
+La validación acredita el contrato y la integridad disponibles, no fidelidad física
+completa. No firma archivos contra productores maliciosos ni demuestra el contenido
+original de assets históricos sin huellas propias. El lock del lote excluye otros
+orquestadores, no escritores externos; cada variante debe tener un único escritor
+durante render/entrega.
+
+### Reintentos de proceso y operación
+
+`execution.matlab_process_retry` es opcional y aplica estos defaults:
+
+```yaml
+execution:
+  matlab_process_retry:
+    max_attempts: 3
+    initial_delay_s: 2.0
+    max_delay_s: 30.0
+    max_consecutive_failures: 5
+```
+
+Los presupuestos/corte son enteros positivos estrictos (no booleanos); las esperas
+son números finitos no negativos y el máximo no puede ser menor que la inicial.
+`max_attempts` incluye la primera invocación; `1` desactiva repetición. Tras el fallo
+ordinal `n`, la espera es `min(max_delay_s, initial_delay_s * 2**(n-1))`: 2/4 segundos
+por defecto. No cambia el presupuesto de muestreo T30 ni la aceptación funcional.
+
+Se evalúa aceptación primero: una recuperación `post_completion` válida no se
+repite. Un código no cero observado sin render aceptado ni error determinista
+acreditado puede reintentarse, sin afirmar causa transitoria. No se reintentan
+lanzamiento fallido, terminación no observada, almacenamiento funcional fallido,
+entrada/dependencia inválida acreditada, integridad contradictoria o código cero
+con render inválido. Consola y eventos no deciden esta política, aunque falten.
+
+El contexto funcional añade `failure_path`, separado de `completion_path`. Python
+verifica estrictamente `failure.json`: `schema_version=1`, identidad de intento y
+variante, `manifest_sha256`, categoría `invalid_input` y `error` original
+(`identifier`, `message`). Un informe corrupto/ajeno o contradictorio bloquea por
+integridad. Su ausencia no acredita transitoriedad ni una etapa interna. MATLAB
+solo lo emite por fallo de carga/validación, no por cualquier fallo de RAVEN;
+si no puede escribirlo, conserva y relanza la excepción original. Las llamadas sin
+contexto o con contexto antiguo siguen soportadas; no se fabrica `completion.json`.
+
+Cada cadena persistente fija realización, runtime/hash, semilla y política. Reserva
+el ordinal antes del lanzamiento; cada invocación tiene UUID, snapshot y constancia
+propios, enlazados al intento previo. `decision=abort` sigue rechazando ese intento;
+`retry_decision=scheduled|not_retryable|exhausted|circuit_open` decide programación.
+Un reinicio respeta presupuesto y espera pendientes. Un `running` sin terminación
+observada bloquea hasta intervención, sin suponer que MATLAB haya muerto.
+
+#### Reconciliar manualmente una interrupción
+
+`reconcile-static` permite autorizar otro intento después de confirmar que no quedan
+escritores. **No acepta el render anterior, no inventa su código de salida, no retira
+locks y no lanza MATLAB.** Use la raíz del lote, no el YAML ni una carpeta de escena.
+
+1. Confirme que el orquestador y sus procesos MATLAB/RAVEN anteriores están detenidos.
+   Un `static_writer.lock` existente sigue bloqueando: investigue su propietario antes
+   de retirarlo manualmente. La operación nunca lo elimina por antigüedad.
+2. Inspeccione sin escribir (desde la raíz del repositorio):
+
+   ```powershell
+   uv run acoustic-orchestrator reconcile-static .\outputs\mi_lote --chain <chain_id>
+   ```
+
+3. Aplique únicamente al UUID del intento mostrado por la inspección:
+
+   ```powershell
+   uv run acoustic-orchestrator reconcile-static .\outputs\mi_lote --chain <chain_id> --attempt <attempt_id> --apply --confirm-stopped --reason "Interrupción; se verificó que no quedan escritores"
+   ```
+
+4. Reanude `render-static` por separado con `resume_if_possible=true` y
+   `overwrite_existing=false`. Se reutilizan las otras variantes válidas y el nuevo
+   intento tiene otro UUID, pero conserva cadena, entrada, semilla y presupuesto.
+
+La consulta de procesos es conservadora: bloquea cualquier MATLAB/RAVEN local y otros
+orquestadores de render/generación. Si la consulta falla o hay un posible escritor no
+verificable, no permite aplicar; `--confirm-stopped` no omite esa comprobación. Es una
+confirmación operativa, no prueba de que se haya observado la terminación pasada.
+
+La evidencia queda en `metadata/render_attempts/<attempt_id>/interruption_reconciliation/`:
+`chain.before.json` y `outcome.before.json` preservan bytes exactos; `record.json`
+conserva motivo, operador, fecha, identidad, huellas e inventario de salidas. El outcome
+queda `process_status=interrupted`, `decision=abort`, `termination_observed=false` y
+`exit_code=null`; no se modifica la fecha de finalización desconocida ni el error original.
+La programación usa `confirmed_interruption`, acreditada por ese registro, no por logs.
+
+El intento interrumpido **sigue consumiendo su ordinal**. Sin presupuesto restante,
+la cadena queda agotada; tampoco se reinicia el circuito del lote. Los restos parciales
+se conservan mediante el journal existente antes de otro lanzamiento. Si aparecen o
+cambian archivos después de la confirmación, se bloquea su archivo automático.
+Constancias/informes funcionales presentes, salidas completas verificables o evidencia
+incoherente requieren revisión independiente y no se descartan con este comando.
+Repetir la misma reconciliación es idempotente; una publicación interrumpida puede
+completarse con el mismo comando, pero nunca autoriza otro intento distinto del indicado.
+
+#### Reiniciar un corte de procesos MATLAB
+
+Si el lote termina con `circuit_open=true` (`max_consecutive_failures` alcanzado, por
+ejemplo por licencia MathWorks no disponible), `render-static` queda bloqueado con
+`Corte de procesos MATLAB persistido`. Corrija primero la causa (revise los
+`console.log` de `metadata/diagnostics/matlab/`) y luego reinicie el corte. **No lanza
+MATLAB, no renueva presupuestos y no re-renderiza las variantes ya aceptadas.**
+
+1. Inspeccione sin escribir:
+
+   ```powershell
+   uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote
+   ```
+
+2. Aplique:
+
+   ```powershell
+   uv run acoustic-orchestrator reset-circuit .\outputs\mi_lote --apply --confirm-stopped --reason "Licencia restaurada; no quedan procesos MATLAB"
+   ```
+
+3. Reanude `render-static` con `resume_if_possible=true` y `overwrite_existing=false`.
+
+Solo las cadenas cuyo último fallo de proceso se resolvió durante el corte vuelven a
+`scheduled` (o `exhausted` sin presupuesto). Las aceptadas se reutilizan. Una cadena
+`running` bloquea el reinicio: reconcíliela antes con `reconcile-static`. La evidencia
+queda en `metadata/indexes/circuit_resets/<reset_id>/` y el circuito anterior se archiva
+como `matlab_process_circuit.<reset_id>.json`. Editar el JSON del circuito a mano no
+basta: la cadena cortada sigue bloqueando la reanudación.
+
+Las rutas públicas WAV/sidecar no cambian. Antes de repetir se archivan solo restos
+propios del proceso terminado, bajo su intento, con journal de rutas originales,
+destinos, tamaños y SHA-256. Snapshot y constancia permanecen intactos. Un archivo
+interrumpido se reconcilia antes de lanzar; ambigüedad o persistencia fallida bloquea
+y conserva ambos errores. No se mueven salidas protegidas anteriores a la cadena.
+
+La coordinación limita despachos a `num_workers`. Cuenta fallos no recuperados en
+orden de resolución persistida; aceptación reinicia la racha, T30 por sí solo no.
+Al alcanzar el umbral el corte queda enclavado y persistido: no hay nuevos lanzamientos
+ni reintentos. Se espera y registra trabajo ya iniciado, sin matarlo; un éxito tardío
+no reabre el lote. El error terminal conserva el original y enlaces a toda la cadena.
+
+`render_jobs` cuenta trabajos/variantes intentados, no procesos. Por ejemplo, una
+variante aceptada al tercer intento produce este extracto ilustrativo del resumen:
+
+```text
+render_jobs=1 matlab_invocations=3 process_retries=2 variants_completed_after_retry=1
+MATLAB procesos_fallidos=2 recuperados=0 recuperaciones_reanudadas=0
+```
+
+Los contadores de proceso incluyen todas las invocaciones reales; reutilizar no
+crea ninguna. Éxito tras reintento no es recuperación del primer proceso fallido;
+las advertencias históricas se conservan y el resumen incluye la razón del corte.
+
+Un restart normal no renueva una cadena agotada/cortada. Solo una ejecución nueva
+intencional con `resume_if_possible=false` y `overwrite_existing=true` abre nuevas
+cadenas, preservando las anteriores; no es un arreglo rutinario para conflictos.
+Outcomes antiguos sin cadena siguen legibles y pueden preceder una nueva cadena
+si no existen salidas protegidas, sin inventar política retroactiva. Para rollback,
+usar `max_attempts=1`; versiones antiguas requieren YAML compatible y no deben
+reanudar cadenas nuevas pendientes que no puedan verificar. Preferir otro run y
+conservar toda evidencia: no borrar registros para forzar reanudación o rollback.
+
+## Render Backends
+
+`render.backend` selects the acoustic renderer for every variant of a run:
+
+| Value | Renderer | Supported outputs | Platform |
+|---|---|---|---|
+| `raven` (default) | MATLAB + ITA Toolbox + RAVEN, `matlab -batch` | binaural HRTF, BTE HARTF, circular array | Windows with licensed RAVEN |
+| `pyroomacoustics` | Python worker process, Image Source Method only | circular array only | any platform with the extra installed |
+
+Omitting `render.backend` keeps the RAVEN behaviour exactly: existing configurations,
+normalized plan identity, scene/runtime manifests and validation outcomes are unchanged.
+
+Install the optional backend from the repository root:
+
+```sh
+uv sync --package acoustic-orchestrator --extra dev --extra pyroomacoustics
+```
+
+The extra pins `pyroomacoustics>=0.10.1,<0.11` together with numpy, scipy and soundfile.
+RAVEN-only installs do not need it and never import it.
+
+A Pyroomacoustics configuration replaces the `raven` block with a `pyroomacoustics` block
+(see [`configs/experiments/circular_array_pyroomacoustics.yml`](../../configs/experiments/circular_array_pyroomacoustics.yml)):
+
+```yaml
+render:
+  backend: pyroomacoustics
+  sample_rate_hz: 44100
+pyroomacoustics:
+  max_order: 100                # ISM order for shoebox rooms (required, integer >= 0)
+  max_order_non_shoebox: 8      # trapezoid / L-shape (optional, defaults to max_order; keep it small)
+  air_absorption: true          # required boolean
+  # temperature_c: 20.0         # optional, only together with humidity_pct
+  # humidity_pct: 50.0          # optional, 0..100
+```
+
+Configuration validation rejects, before planning and with an error naming the field:
+
+- a `raven` block, or any explicitly set RAVEN tuning field (`render.generate_rir`,
+  `generate_brir`, `simulation_type_rt`, `simulation_type_is`, `num_particles`, `is_order_ps`);
+- an enabled `binaural_hrtf`, `bte_rear_hartf` or `bte_front_hartf` output;
+- any source type with `directivity` (no omnidirectional substitute is used);
+- `hearing_degradation.enabled: true`, `scene_type: dynamic`, and any rate other than 44100 Hz;
+- a missing or out-of-range `pyroomacoustics` package (checked from installed metadata).
+
+Under `raven`, a `pyroomacoustics` block is rejected. The `raven` block and its
+`base_rpf_file` are only required for the RAVEN backend.
+
+On Linux the whole pipeline runs without MATLAB:
+
+```sh
+uv run --package acoustic-orchestrator --extra pyroomacoustics \
+  acoustic-orchestrator render-static configs/experiments/circular_array_pyroomacoustics.yml
+```
+
+Each attempt runs `python -m acoustic_orchestrator.backends.pyroomacoustics.worker` as a
+separate process with the same attempt contract as MATLAB: snapshot in; WAV, sidecar,
+`completion.json`/`failure.json` and diagnostic events out. Retries
+(`execution.matlab_process_retry`), the circuit breaker, `reconcile-static`, resume,
+indexes and progress apply unchanged; `matlab_*` names are kept. The worker computes ISM
+impulse responses for each (source, microphone) pair, then synthesizes the recording in
+Python with the MATLAB array semantics (downmix, peak normalization, gain, convolution,
+offsets, target duration, noise/SNR, 0.999 guards) and writes 16-bit PCM WAV.
+
+Important limitations:
+
+- Pyroomacoustics and RAVEN rooms are **not** acoustically equivalent, and recordings are not
+  sample-identical. Use the measured T30 of the sidecar as the reverberation label.
+- T30 is measured from the impulse responses (`schroeder_backward_integration_v1`); the
+  canonical T30 gate stays active, so an ISM order too low for the room rejects and resamples
+  the scene. `max_order` must be large enough for the configured RT range: truncated ISM
+  responses bias T30 low (see the calibration in the change's `verification.md`).
+- Trapezoid and L-shape rooms are built by extrusion, but general-polyhedron ISM at affordable
+  orders produces responses far too short for a valid T30, so such scenes are rejected by the
+  gate. Use shoebox rooms with this backend.
+- The 31.5 Hz and 63 Hz absorption coefficients have no independent effect (the backend's
+  octave bank starts at 125 Hz); scattering is recorded but not applied by ISM.
+- Circular-array microphones follow the common pose convention (microphone 0 points along
+  the receiver's forward direction, public `-Z` at yaw +90°); see the contracts.
+- Switching an existing run directory between backends is reported as a plan conflict and
+  never reuses or overwrites outputs; use a new `run_name`.
+
+## Circular Array Configuration
+
+Configuration loading/validation accepts an optional `receiver_outputs.circular_array`.
+The static pipeline supports array-only and mixed receiver scene generation,
+runtime selection, rendering, indexing, and resume provenance checks.
+
+```yaml
+receiver_outputs:
+  circular_array:
+    enabled: true
+    num_microphones: 8
+    radius_m: 0.05
+    output_subdir: circular_array
+    required: true
+hearing_degradation:
+  enabled: false
+  input_targets: []
+  hearing_profiles_path: path/to/hearing_profiles.yml
+```
+
+This is a section-level excerpt: retain the other required experiment sections.
+Array-only config does not require a `binaural_hrtf` block or receiver IR catalog.
+`num_microphones` is a strict integer >= 2; `radius_m` is a finite positive
+distance in meters. Channels are derived from the microphone count, so do not
+configure `num_channels`, `num_hrtfs`, `file_pattern`, or `ir_catalog_path` for an
+array. The defaults are `enabled: false`, `required: false`, and
+`output_subdir: circular_array`; a disabled array can omit its geometry.
+Output subdirectories must be relative, nonempty, and contain no traversal
+segments or Windows drive/root/UNC prefixes. At least one output must be enabled.
+
+The array geometry is a horizontal ring in the public XZ plane, centered on
+the sampled receiver and rotated by yaw only. HRTF/HARTF outputs remain
+independently configurable alongside the array.
+
+Array WAVs and sidecars use the existing artifact layout:
+
+```text
+{artifact_root}/{run_name}/output_audio/render/{output_subdir}/
+  {scene_id}__circular_array.wav
+  {scene_id}__circular_array__render.json
+```
+
+These filenames follow the default naming templates; custom templates still
+use `{scene_id}` and `{output_type}`. One array has one variant identity
+`{scene_id}__circular_array`, regardless of microphone count. Its index entry
+uses `receiver_ir_path: null`, not a fake HRTF path. Metadata records the
+public center/yaw, radius, ordered microphone positions and WAV channel mapping.
+Microphone 0 corresponds to WAV channel 1; yaw zero starts at +X, with ordering
+toward -Z (the receiver's right in the rendered scene; see `docs/architecture/contracts.md`). Array source WAVs are downmixed by channel mean before normalization
+and gain, while HRTF/HARTF source handling is unchanged.
+
+Resume checks compare planned array geometry with the sidecar/runtime provenance
+and verify actual WAV channel count/sample rate. Wrong radius/yaw/order or channel
+count makes the output invalid for resume. If sidecars are disabled, saved runtime
+geometry is required; newly written manifests must not validate old stale WAVs.
+Canonical receiver rendering still needs a T30 sidecar for room acceptance.
+For resuming an existing experiment, use `resume_if_possible: true` together
+with `overwrite_existing: false`: compatible inputs and valid outputs are reused
+without rewriting them. Incompatible protected artifacts produce an explicit conflict.
+
+Full experiment examples: `configs/experiments/circular_array_only.yml` and
+`configs/experiments/circular_array_mixed.yml`. Receiver-section examples are
+in `apps/orchestrator/examples/circular_array_scenes.md`.
+
+Opt-in acceptance checks require installed MATLAB/RAVEN, compatible subject-01
+DAFF files in the HRTF/front-HARTF/rear-HARTF catalogs, and the Clarity backend.
+Run from the repository root using a fresh writable artifact directory:
+
+```sh
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_circular_array_e2e.py render --output-root PATH
+uv run --project apps/orchestrator python apps/orchestrator/tests/verify_circular_array_e2e.py clarity --output-root PATH
+```
+
+The render phase verifies array-only and four-output mixed runs, actual IR paths
+stored in RAVEN projects, channel/coordinate provenance, T30, and resume. The
+Clarity phase verifies HRTF-only degraded artifacts and rejection of HARTF/array
+targets. Reports are `render_verification.json` and `clarity_verification.json`
+under `PATH`. These real-backend checks are separate from mocked unit tests.
+
 ## Clarity Handoff
+
+Only `binaural_hrtf` is accepted in `hearing_degradation.input_targets`.
+This base target covers numbered sampled HRTFs such as `binaural_hrtf__1`;
+do not list numbered variants in the experiment config.
+HARTF rear/front and `circular_array` targets are rejected explicitly, even
+when degradation is disabled and even for two microphones. To migrate a
+previous HARTF-degradation config, remove HARTF from `input_targets`; keep
+its receiver output enabled to continue rendering it. Array-only or
+HARTF-only runs must disable degradation and use `input_targets: []`.
+Enabled degradation requires an enabled binaural HRTF output and a nonempty
+eligible target list. Handoff creation and submission independently enforce
+the same HRTF-only policy, including stale or externally supplied job records.
 
 Prepare artifacts only:
 
@@ -187,24 +1017,139 @@ uv run --project apps/orchestrator acoustic-orchestrator clarity-handoff configs
 
 Expected artifacts:
 
-- `manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
-  variant, including `run_id` and `backend_invocation`.
-- `indexes/clarity_index.jsonl`: status tracking for planned, submitted,
+- `metadata/manifests/runtime/clarity/clarity_jobs.jsonl`: one job per eligible rendered
+  variant, hearing profile and processor, including `run_id` and `backend_invocation`.
+- `metadata/indexes/clarity_index.jsonl`: status tracking for planned, submitted,
   completed, partial, failed, blocked, or skipped jobs.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
+- `metadata/indexes/level_calibration.jsonl`: one record per render with its effective
+  scale K (see [Level calibration](#level-calibration)).
+- `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`:
   degraded output from the backend.
-- `outputs/degraded/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
+- `output_audio/degraded/{processor}/{output_type}/{hearing_profile_id}/{render_wav_stem}.json`:
   metadata sidecar next to the degraded WAV.
 
 Current degradation output contract:
 
-- The default root is `{artifact_root}/{run_name}/outputs/degraded/`.
-- Subdirectories are `{output_type}/{hearing_profile_id}/`.
+- The default root is `{artifact_root}/{run_name}/output_audio/degraded/`; an explicit `hearing_degradation.output_dir` overrides it.
+- Subdirectories are `{processor}/{output_type}/{hearing_profile_id}/` for every processor,
+  `msbg` included, so outputs of different processors never overwrite each other.
+- Job ids are `clarity__{variant_id}__{hearing_profile_id}__{processor}`.
 - `expected_output_wav_path` and `expected_output_metadata_path` in each JSONL
   job are authoritative for the backend.
-- Resume checks validate the explicit paths reserved in the handoff manifest.
-- Legacy layouts under `outputs/clarity/...` are not enough to satisfy new runs
-  by themselves.
+- Resume checks validate the explicit paths reserved in the handoff manifest and the
+  `processing_signature` of the job (see [Resume](#resume-by-processing-signature)).
+- Outputs of the layout before per-processor directories
+  (`output_audio/degraded/{output_type}/{hearing_profile_id}/`) and legacy layouts under
+  `outputs/clarity/...` are never reused; their jobs are processed again in the new layout.
+
+### Hearing processors
+
+`hearing_degradation.processors` selects the simulators applied to every eligible render
+(default `[msbg]`). With `[msbg, whis]` each render gets one job per profile and processor,
+all sharing the same calibration and outer/middle ear reference:
+
+```yaml
+hearing_degradation:
+  enabled: true
+  input_targets: [binaural_hrtf]
+  hearing_profiles_path: ./hearing_profiles.yaml
+  processors: [msbg, whis]
+  calibration:
+    mode: presentation_level
+    presentation_level_range_db_spl: [55, 80]   # or presentation_level_db_spl: 65
+  outer_middle_ear: itu                         # free_field | diffuse_field | itu | eardrum
+  msbg:
+    level_handling: true_level                  # or legacy_active_rescale
+  whis:
+    install_root: ../../../../whis              # contains WHIS/WHISv302 and gammachirp-filterbank/GCFBv234
+    matlab_executable: matlab
+    synth_method: dtvf                          # or fbanasyn
+```
+
+See `examples/example_config_whis.yml` for a full config. Rules checked before planning:
+
+- `processors` is a non-empty list of `msbg`/`whis` without repeats.
+- With `whis`: `calibration`, `outer_middle_ear` and `whis.install_root` are mandatory and every
+  profile must declare `compression_health` in both ears with no negative thresholds.
+- Without `whis` a `whis` block is rejected; without `msbg` a `msbg` block is rejected.
+- With only `msbg` and no `calibration`/`outer_middle_ear`, the run uses `fixed_scale` 90 dB
+  (recorded as default) and `free_field`, as before this change.
+- Profiles may declare band `125` and `compression_health` (a number in [0, 1] or one value per
+  `loss_db_by_band` band). MSBG ignores both and lists them in `ignored_profile_fields`.
+- `configs/hearing/hearing_profiles.yaml` includes `nh_reference` (0 dB HL, compression health 1),
+  the control profile for comparing processors on the same render.
+
+Before submitting, WHIS jobs are checked against the machine: if `install_root` lacks
+`WHIS/WHISv302` or `gammachirp-filterbank/GCFBv234`, or the MATLAB executable is not found, only
+the WHIS jobs are marked `blocked` with the missing path; MSBG jobs of the same manifest still run.
+
+### Level calibration
+
+K is the dB SPL that corresponds to digital RMS 1.0. The orchestrator computes it once per render
+during the handoff and copies it unchanged into every job of that render, whatever the processor or
+profile; the backend never recomputes it and the signal is never rescaled for calibration.
+
+- `fixed_scale`: K = `digital_rms1_spl_db`.
+- `presentation_level`: K = P − 10·log10((ms_L + ms_R)/2), where `ms_c` is the unweighted mean square
+  of channel c over the whole file and P the binaural presentation level (Leq) of the render.
+  With `presentation_level_range_db_spl: [min, max]`, P is drawn uniformly from SHA-256 of
+  `experiment.random_seed` and the `variant_id`, so every run and resume gives the same P.
+- Each ear is simulated at `K + 20·log10(rms_c)`: both channels share K, which preserves the ILD.
+- A silent channel stays silent. In `presentation_level`, a render with both channels silent has no
+  K and its jobs are `blocked` with `calibration_undefined_silent_input`.
+
+`metadata/indexes/level_calibration.jsonl` holds, per render: `variant_id`, `mode`, `configured`
+values, `is_default`, `random_seed` (only with a range), `presentation_level_db_spl`,
+`effective_scale_db_spl` (K), per-channel `mean_square`, `leq_db_spl` and `silent`, the
+`silent_channels`, `level_measure: rms_unweighted_full_file` and `status`.
+
+Each job line adds to the fields above: `processor`, `calibration` (the render record),
+`outer_middle_ear`, `processor_config` (`level_handling` for MSBG; `install_root`,
+`matlab_executable`, `synth_method` for WHIS) and `processing_signature`.
+
+### Resume by processing signature
+
+A completed result is reused only if its sidecar declares the job's `processor.name`, the same
+`processing_signature` and a `calibration.effective_scale_db_spl` equal to the job's K. The signature
+covers the processor, the configured calibration, the seed (only with a level range), the outer/middle
+ear reference and `msbg.level_handling` or `whis.synth_method`. Consequences:
+
+- Adding `whis` to a completed `[msbg]` run plans only the WHIS jobs.
+- Changing `outer_middle_ear`, the calibration or, with a level range, `experiment.random_seed`
+  reprocesses every job.
+- WHIS/GCFB commits and `install_root` are recorded in the sidecar but are not part of the signature;
+  use `runner.force_rerun` after updating WHIS in place.
+- To reproduce a run made before this change bit for bit, use `processors: [msbg]`,
+  `msbg.level_handling: legacy_active_rescale`, `outer_middle_ear: free_field` and no `calibration`.
+
+Calibration guides: [validating the simulators with listeners](../../docs/guides/calibration-simulator-validation.md)
+and [generating neural-network datasets](../../docs/guides/calibration-nn-dataset.md).
+
+### Presentation export
+
+`export-presentation` prepares a run for listening tests on a calibrated playback chain:
+
+```sh
+uv run --project apps/orchestrator acoustic-orchestrator export-presentation outputs/artifacts/sim_001_msbg_whis --playback apps/orchestrator/examples/playback_calibration.yaml
+```
+
+The playback file (see `examples/playback_calibration.yaml`) declares `playback_id`
+(path-safe), `k_play_db.left/right` (dB SPL that digital RMS 1.0 produces in each channel of the
+measured chain: play the 1 kHz tone at -26 dBFS RMS and use `k_play_db = L_measured + 26`) and
+`max_spl_db`. Missing or non-finite values are rejected before writing anything.
+
+For every render with a calibration record, the unprocessed WAV and each completed, valid degraded
+output of that render get the same per-channel gain `g_c = K_render - k_play_db_c` dB, so each version
+is played at the SPL it was simulated at. Outputs are float32 with a JSON sidecar (render, version,
+K, `k_play_db`, gain and estimated SPL per channel):
+
+- `output_audio/presentation/{playback_id}/unprocessed/{output_type}/{render_wav_name}.wav`
+- `output_audio/presentation/{playback_id}/{processor}/{output_type}/{hearing_profile_id}/{render_wav_name}.wav`
+
+If any version of a render would exceed `max_spl_db` or clip after the gain, no version of that render
+is exported (`exceeds_max_spl` / `would_clip`). Renders without degraded outputs still export their
+unprocessed version; missing or failed degraded versions are listed per render. The summary is written
+to `output_audio/presentation/{playback_id}/export_summary.json`.
 
 The orchestrator does not add the Clarity backend as a direct Python dependency.
 The current design keeps a file-and-subprocess boundary between the two apps.
@@ -242,26 +1187,132 @@ Key modules:
 - `pipeline/output_paths.py`: output path reservation.
 - `pipeline/runtime_audio.py`: runtime audio preparation.
 
+## Source audio directories
+
+`source_sampling.source_types[].audio_dir` accepts WAVs directly in the configured
+directory and directly in its immediate child folders. Each child folder name is
+treated as an opaque database identity, not necessarily a speaker:
+
+```text
+speech/                  <-- audio_dir
++-- flat.wav
++-- ID01/
+|   +-- recording.wav
++-- ID02/
+    +-- recording.wav
+```
+
+Both layouts can coexist; no new YAML keys are needed. Extensions are
+case-insensitive (`.wav`, `.WAV`). Sidecars, empty folders, and deeper recordings
+such as `ID01/session/clip.wav` are ignored. At least one eligible WAV is required.
+Point `audio_dir` at the parent of the ID folders, not an individual ID folder.
+Selection remains file-based: IDs do not impose uniqueness or balancing, and two
+recordings of the same identity can occur in one scene.
+
+New scene manifests include two provenance strings per source:
+
+| Original recording relative to `audio_dir` | `identity_id` | `audio_relpath` |
+| --- | --- | --- |
+| `ID02/recording.wav` | `"ID02"` | `"ID02/recording.wav"` |
+| `clip_ID13.wav` | `""` | `"clip_ID13.wav"` |
+
+The scene-local `source_id` (for example `src_0001`) identifies an instance, not
+the database identity. Flat recordings have an empty identity; IDs are not parsed
+from filenames or the configured root's own name. IDs are scoped to that source
+database, not globally unique person identifiers. `audio_relpath` uses forward
+slashes and always describes the original recording. Runtime trimming can change
+`audio_path` but leaves both provenance strings unchanged.
+
+When render metadata is enabled, inspect `summary.sources` in each rendered JSON
+sidecar for these fields. Existing MATLAB manifests missing either field remain
+accepted and export an empty string for the missing value. Provenance is not
+duplicated into the compact output-index snapshot or Clarity degraded sidecars;
+the latter retain their link to the input render metadata. Existing schema
+versions, output names, and acoustic processing are unchanged.
+
+## Fixed source positions
+
+`fixed_position` places a required source type at receiver-relative points
+defined by the Cartesian product of three non-empty lists:
+
+```yaml
+source_sampling:
+  min_sources: 1
+  max_sources: 1
+  source_types:
+    - event_type: speech
+      role: base
+      min_count: 1
+      max_count: 1
+      probability: 1.0
+      audio_dir: ../../../assets/events/speech/
+      spatial_policy:
+        type: fixed_position
+        azimuths_deg: [-90, 0, 90]
+        elevations_deg: [0, 15]
+        distances_m: [1.0]
+```
+
+The example defines six cases. `execution.num_simulations` must be at least
+the largest case count of any configured `fixed_position` policy. For each
+policy, every block of six scenes uses a seed-reproducible shuffle and covers
+each case exactly once. A final partial block uses the prefix of a fresh
+shuffle. The scheduled case is preferred. If scheduled cases from simultaneous
+`fixed_position` policies conflict, the sampler tries deterministic local
+alternatives; this exceptional substitution can reduce that block's coverage.
+WAV selection remains independent and may reuse the same file.
+
+Angles follow the common pose convention (`docs/architecture/contracts.md`): at
+receiver yaw/pitch zero, azimuth/elevation zero points along `+X`; positive
+azimuth rotates toward public `-Z`, which is heard on the right; positive
+elevation rotates toward `+Y`. Azimuth is added to receiver yaw, elevation is
+added to receiver pitch, and receiver roll is ignored. Python preserves the
+public coordinates in the manifest; the MATLAB schema 2.0/3.0 adapter reflects Z
+consistently for room geometry, poses, and orientation vectors.
+
+List values must be finite and unique. Azimuth is limited to `[-180, 180]`,
+elevation to `[-90, 90]`, and distance must be greater than zero. A fixed
+source type must have `min_count >= 1`. Multiple fixed sources in one scene use
+distinct points; the sampler searches alternate assignments when necessary to
+meet source-to-source separation. It aborts if there are too few unique points
+or no valid assignment.
+
+Assigned fixed points always enforce room bounds, the 0.5 m wall clearance,
+the configured receiver clearance, and source separation, including when
+`require_sources_inside_room` is false. An assigned point that violates a room,
+wall, or receiver constraint aborts the experiment instead of being resampled.
+Monophonic scenes are supported with `source_sampling.min_sources: 1`.
+
 ## Development
 
 Run tests:
 
 ```sh
-uv run --project apps/orchestrator pytest
+uv run --project apps/orchestrator pytest apps/orchestrator/tests
 ```
 
 Run static checks when the tools are installed:
 
 ```sh
-uv run --project apps/orchestrator ruff check .
-uv run --project apps/orchestrator mypy src
+uv run --project apps/orchestrator ruff check apps/orchestrator
+uv run --project apps/orchestrator mypy apps/orchestrator/src
 ```
 
-The example configs use `execution.overwrite_existing: true`, so repeated runs
-can replace generated manifests and outputs for the same run.
+The canonical `configs/experiments/static_example.yml` smoke config uses
+`execution.overwrite_existing: false`. To intentionally perform a fresh smoke run,
+choose a fresh `outputs.run_name`, then execute `render-static` above directly.
+To resume a compatible run, keep its name and enable `resume_if_possible`; a fresh
+run name is not required for protected resume. Other examples may choose overwrite
+behavior independently. Real-backend smoke checks remain opt-in, not a claim that
+MATLAB/ITA/RAVEN was verified in this environment.
 
 ## Practical Notes
 
+- `generate-manifests` and `render-static` return exit code 2 for partial
+  sampling and 1 for failed sampling; render errors also return 1. Failed scene
+  indices and diagnostics remain in `metadata/indexes/scene_sampling_failures.jsonl`.
+- A Clarity job requires a completed, validated render variant targeted by
+  `input_targets`, with both input WAV and render metadata present.
 - `render-static` assumes the monorepo layout where `apps/orchestrator`,
   `apps/matlab`, and `apps/clarity-backend` are sibling directories.
 - If `apps/matlab` is missing, `render-static` fails before invoking MATLAB.

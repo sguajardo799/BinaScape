@@ -1,3 +1,5 @@
+# Catálogo de ejemplo. compression_health (0-1, escalar o por banda) y la banda 125
+# solo los usa WHIS; MSBG los ignora y los registra como ignorados en el sidecar.
 profiles:
   - hearing_profile_id: right_unilateral
     ears:
@@ -9,6 +11,7 @@ profiles:
           2000: 10
           4000: 15
           8000: 20
+        compression_health: 1
       right:
         loss_db_by_band:
           250:  35
@@ -17,6 +20,7 @@ profiles:
           2000: 40
           4000: 35
           8000: 25
+        compression_health: 0.5
   - hearing_profile_id: bilateral_base
     ears:
       left:
@@ -27,6 +31,7 @@ profiles:
           2000: 20
           4000: 30
           8000: 50
+        compression_health: {250: 1, 500: 1, 1000: 0.8, 2000: 0.6, 4000: 0.4, 8000: 0.2}
       right:
         loss_db_by_band:
           250: 10
@@ -35,3 +40,13 @@ profiles:
           2000: 20
           4000: 30
           8000: 50
+        compression_health: {250: 1, 500: 1, 1000: 0.8, 2000: 0.6, 4000: 0.4, 8000: 0.2}
+  - hearing_profile_id: nh_reference
+    # Control 0 dB HL con compresión sana: latencia, ancho de banda y nivel entre procesadores.
+    ears:
+      left:
+        loss_db_by_band: {125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0}
+        compression_health: 1
+      right:
+        loss_db_by_band: {125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0}
+        compression_health: 1

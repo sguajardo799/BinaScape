@@ -10,11 +10,20 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
     meta.scene_type = cfg.scene_type;
     meta.sample_rate_hz = result.fs;
     meta.summary = result.summary;
+    if isfield(meta.summary, 'scene_type')
+        meta.summary = rmfield(meta.summary, 'scene_type');
+    end
 
-    if isfield(result, 'hrtf_id')
+    meta.output_type = get_render_output_type(result);
+    if isfield(result.summary, 'receiver')
+        meta.receiver = result.summary.receiver;
+        meta.receiver.coordinate_frame = 'public_xyz_y_up';
+        meta.summary = rmfield(meta.summary, 'receiver');
+    end
+    if isfield(result, 'hrtf_id') && ~isempty(result.hrtf_id)
         meta.hrtf_id = result.hrtf_id;
     end
-    if isfield(result, 'hrtf_path')
+    if isfield(result, 'hrtf_path') && ~isempty(result.hrtf_path)
         meta.hrtf_path = result.hrtf_path;
     end
     if isfield(cfg, 'render') && isfield(cfg.render, 'effective_seed')
@@ -29,9 +38,18 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
         meta.output_metadata_path = output_metadata_path;
     end
     if ~isempty(batch_summary)
-        meta.batch = batch_summary;
-    elseif isfield(result, 'summary') && isfield(result.summary, 'batch')
-        meta.batch = result.summary.batch;
+        meta.batch = struct('n_variants', batch_summary.n_variants);
+        if isfield(batch_summary, 'variants')
+            other_variants = batch_summary.variants;
+            if ~iscell(other_variants)
+                other_variants = arrayfun(@(item) item, other_variants, 'UniformOutput', false);
+            end
+            ids = cellfun(@variant_identity, other_variants, 'UniformOutput', false);
+            other_variants = other_variants(~strcmp(ids, meta.output_type));
+            if ~isempty(other_variants)
+                meta.batch.other_variants = other_variants;
+            end
+        end
     end
 
     txt = jsonencode(meta, 'PrettyPrint', true);
@@ -41,11 +59,33 @@ function export_render_metadata(cfg, result, output_metadata_path, batch_summary
         mkdir(out_dir);
     end
 
-    fid = fopen(output_metadata_path, 'w');
+    fid = fopen(output_metadata_path, 'wb');
     if fid == -1
         error('Could not open metadata output file: %s', output_metadata_path);
     end
 
-    fwrite(fid, txt, 'char');
-    fclose(fid);
+    try
+        bytes = unicode2native(txt, 'UTF-8');
+        if fwrite(fid, bytes, 'uint8') ~= numel(bytes)
+            error('BinaScape:Metadata:WriteFailed', 'Escritura incompleta: %s', output_metadata_path);
+        end
+        status = fclose(fid);
+        fid = -1;
+        if status ~= 0
+            error('BinaScape:Metadata:CloseFailed', 'No se pudo cerrar: %s', output_metadata_path);
+        end
+    catch ME
+        if fid ~= -1
+            try, fclose(fid); catch, end
+        end
+        rethrow(ME);
+    end
+end
+
+function identity = variant_identity(variant)
+    if isfield(variant, 'output_type')
+        identity = char(string(variant.output_type));
+    else
+        identity = char(string(variant.hrtf_id));
+    end
 end

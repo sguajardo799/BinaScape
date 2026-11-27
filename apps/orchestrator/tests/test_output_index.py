@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+import pytest
+from render_fixtures import write_variant_fixture
 
 from acoustic_orchestrator.config.loader import load_config
 from acoustic_orchestrator.pipeline.matlab_runner import RenderVariantPaths, build_render_variant_paths
@@ -59,10 +62,7 @@ def test_build_render_variant_paths_returns_deterministic_identity(tmp_path: Pat
 
 def test_inspect_variant_returns_normalized_record_payload(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     record = inspect_variant(variant_paths, metadata_required=False, attempted=True, resumed=True)
 
@@ -84,6 +84,7 @@ def test_inspect_variant_returns_normalized_record_payload(tmp_path: Path) -> No
             "render_metadata": False,
         },
         "metadata_snapshot": None,
+        "render_validity": "valid",
         "validation": {"ok": True, "issues": []},
         "updated_at": record["updated_at"],
     }
@@ -125,27 +126,87 @@ def test_upsert_variant_rewrites_current_record_per_variant(tmp_path: Path) -> N
     assert load_variant_index(index_path)[variant_paths["variant_id"]]["attempted"] is True
 
 
+def test_upsert_variants_writes_index_once_preserving_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import acoustic_orchestrator.pipeline.output_index as output_index
+
+    index_path = tmp_path / "output_index.jsonl"
+    base = build_planned_variant_record(_variant_paths(tmp_path), metadata_required=False)
+    existing = {**base, "variant_id": "scene_b__hrtf", "status": "completed"}
+    records: dict[str, VariantRecord] = {}
+    upsert_variant(index_path, records, existing)
+    planned = [{**base, "variant_id": f"scene_{name}__hrtf"} for name in ("c", "a")]
+
+    replacements: list[Path] = []
+    original_replace = output_index._replace_index
+    monkeypatch.setattr(output_index, "_replace_index",
+                        lambda temp, target: (replacements.append(target), original_replace(temp, target)))
+    output_index.upsert_variants(index_path, records, planned)
+    output_index.upsert_variants(index_path, records, [])
+
+    assert replacements == [index_path]
+    lines = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    assert [line["variant_id"] for line in lines] == ["scene_a__hrtf", "scene_b__hrtf", "scene_c__hrtf"]
+    assert load_variant_index(index_path)["scene_b__hrtf"]["status"] == "completed"
+    assert set(records) == {"scene_a__hrtf", "scene_b__hrtf", "scene_c__hrtf"}
+
+
 def test_metadata_disabled_allows_completed_without_metadata(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     record = inspect_variant(variant_paths, metadata_required=False, attempted=True)
 
     assert record["status"] == "completed"
 
 
-def test_failed_attempt_with_partial_outputs_stays_partial(tmp_path: Path) -> None:
+def test_runtime_input_alone_is_not_a_produced_output(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
     Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
     Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
+    assert record["status"] == "failed"
+    assert summarize_variant_index({record["variant_id"]: record})["failed_variants"] == 1
+
+
+def test_wav_without_required_metadata_is_partial(tmp_path: Path) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths)
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
     assert record["status"] == "partial"
-    assert summarize_variant_index({record["variant_id"]: record})["partial_variants"] == 1
+    assert record["render_validity"] == "incomplete"
+
+
+@pytest.mark.parametrize("case", ["text_wav", "truncated_wav", "empty_metadata", "changed_source"])
+def test_all_present_but_invalid_artifacts_never_complete_or_resume(tmp_path: Path, case: str) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths, metadata=True)
+    wav, metadata = Path(paths["rendered_wav_path"]), Path(paths["render_metadata_path"])
+    if case == "text_wav":
+        wav.write_text("not audio", encoding="utf-8")
+    elif case == "truncated_wav":
+        wav.write_bytes(wav.read_bytes()[:-4])
+    elif case == "empty_metadata":
+        metadata.write_text("{}", encoding="utf-8")
+    else:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+        payload["summary"]["sources"][0]["gain_db"] = 8
+        metadata.write_text(json.dumps(payload), encoding="utf-8")
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
+    assert record["status"] == "partial"
+    assert record["render_validity"] == "invalid"
+    assert not record["validation"]["ok"]
+    assert not should_resume_variant({}, paths, metadata_required=True)
+
+
+def test_render_validity_survives_index_roundtrip(tmp_path: Path) -> None:
+    paths = _variant_paths(tmp_path)
+    write_variant_fixture(paths, metadata=True)
+    record = inspect_variant(paths, metadata_required=True, attempted=True)
+    index = tmp_path / "index.jsonl"
+    upsert_variant(index, {}, record)
+    assert load_variant_index(index)[record["variant_id"]]["render_validity"] == "valid"
 
 
 def test_failed_attempt_with_zero_outputs_is_failed(tmp_path: Path) -> None:
@@ -215,7 +276,7 @@ def test_inspect_variant_collects_metadata_snapshot_from_summary_fallback(tmp_pa
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
-    assert record["status"] == "completed"
+    assert record["status"] == "partial"  # Snapshot extraction is not acceptance.
     assert record["metadata_snapshot"] == {
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -223,7 +284,7 @@ def test_inspect_variant_collects_metadata_snapshot_from_summary_fallback(tmp_pa
         "rendered_wav_path": variant_paths["rendered_wav_path"],
         "render_metadata_path": variant_paths["render_metadata_path"],
     }
-    assert record["validation"] == {"ok": True, "issues": []}
+    assert record["validation"]["ok"] is False
 
 
 def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Path) -> None:
@@ -249,7 +310,7 @@ def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Pat
 
     record = inspect_variant(variant_paths, metadata_required=True, attempted=True)
 
-    assert record["status"] == "completed"
+    assert record["status"] == "partial"
     assert record["validation"]["ok"] is False
     assert any("scene_id" in issue for issue in record["validation"]["issues"])
     assert any("output_type" in issue or "hrtf_id" in issue for issue in record["validation"]["issues"])
@@ -259,10 +320,7 @@ def test_inspect_variant_preserves_metadata_mismatch_for_debugging(tmp_path: Pat
 
 def test_should_resume_only_when_outputs_are_observably_complete(tmp_path: Path) -> None:
     variant_paths = _variant_paths(tmp_path)
-    Path(variant_paths["runtime_manifest_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["runtime_manifest_path"]).write_text("{}", encoding="utf-8")
-    Path(variant_paths["rendered_wav_path"]).parent.mkdir(parents=True)
-    Path(variant_paths["rendered_wav_path"]).write_text("wav", encoding="utf-8")
+    write_variant_fixture(variant_paths)
 
     assert should_resume_variant({}, variant_paths, metadata_required=False) is True
     assert should_resume_variant({}, variant_paths, metadata_required=True) is False
@@ -318,6 +376,72 @@ def test_upsert_clarity_record_rewrites_current_record_per_variant(tmp_path: Pat
     assert load_clarity_index(index_path)[job["job_id"]]["status"] == "blocked"
 
 
+def test_upsert_clarity_record_uses_unique_temp_file_per_write(tmp_path: Path, monkeypatch) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    records = {}
+    replace_sources: list[str] = []
+    path_class = type(index_path)
+    original_replace = path_class.replace
+
+    def recording_replace(self, target):  # type: ignore[no-untyped-def]
+        replace_sources.append(self.name)
+        return original_replace(self, target)
+
+    monkeypatch.setattr(path_class, "replace", recording_replace)
+
+    for suffix in ["mild_loss", "moderate_loss", "severe_loss"]:
+        job = _clarity_job(tmp_path)
+        job["job_id"] = f"clarity__scene_static_0001__binaural_hrtf__{suffix}"
+        job["hearing_profile_id"] = suffix
+        upsert_clarity_record(
+            index_path,
+            records,
+            build_clarity_record(
+                job,
+                manifest_path=tmp_path / "clarity_jobs.jsonl",
+                status="planned",
+                attempted=False,
+                resumed=False,
+                runnable=True,
+            ),
+        )
+
+    assert len(replace_sources) == 3
+    assert len(set(replace_sources)) == 3
+    assert "clarity_index.jsonl.tmp" not in replace_sources
+    assert not (tmp_path / "clarity_index.jsonl.tmp").exists()
+
+
+def test_upsert_clarity_record_serializes_same_process_writers(tmp_path: Path) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    records = {}
+
+    def upsert_job(index: int) -> None:
+        job = _clarity_job(tmp_path)
+        job["job_id"] = f"clarity__scene_static_{index:04d}__binaural_hrtf__mild_loss"
+        job["variant_id"] = f"scene_static_{index:04d}__binaural_hrtf"
+        job["scene_id"] = f"scene_static_{index:04d}"
+        upsert_clarity_record(
+            index_path,
+            records,
+            build_clarity_record(
+                job,
+                manifest_path=tmp_path / "clarity_jobs.jsonl",
+                status="planned",
+                attempted=False,
+                resumed=False,
+                runnable=True,
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(upsert_job, range(1, 25)))
+
+    loaded_records = load_clarity_index(index_path)
+    assert len(loaded_records) == 24
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_inspect_clarity_record_detects_completed_outputs(tmp_path: Path) -> None:
     job = _clarity_job(tmp_path)
     Path(job["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +460,7 @@ def test_inspect_clarity_record_detects_completed_outputs(tmp_path: Path) -> Non
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -369,6 +494,7 @@ def test_should_resume_clarity_job_requires_existing_completed_outputs(tmp_path:
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -411,6 +537,7 @@ def test_inspect_clarity_record_marks_resumed_completed_outputs_as_skipped(tmp_p
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -498,6 +625,7 @@ def test_inspect_clarity_record_treats_completed_metadata_without_wav_as_partial
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -514,7 +642,7 @@ def test_summarize_clarity_index_marks_mixed_batch_as_partial(tmp_path: Path) ->
     completed_job = _clarity_job(tmp_path)
     failed_job = {
         **_clarity_job(tmp_path),
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__severe_loss__msbg",
         "hearing_profile_id": "severe_loss",
         "output_dir": str(tmp_path / "degraded" / "binaural_hrtf" / "severe_loss"),
         "expected_output_wav_path": str(tmp_path / "degraded" / "binaural_hrtf" / "severe_loss" / "scene_static_0001__binaural_hrtf.wav"),
@@ -539,6 +667,7 @@ def test_summarize_clarity_index_marks_mixed_batch_as_partial(tmp_path: Path) ->
                 "input_render_metadata_path": completed_job["input_render_metadata_path"],
                 "output_wav_path": completed_job["expected_output_wav_path"],
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(completed_job),
             }
         ),
         encoding="utf-8",
@@ -594,6 +723,7 @@ def test_should_resume_clarity_job_rejects_legacy_fixed_filename_outputs(tmp_pat
                 "input_render_metadata_path": job["input_render_metadata_path"],
                 "output_wav_path": str((legacy_dir / "degraded.wav").resolve()),
                 "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+                **_processing_identity(job),
             }
         ),
         encoding="utf-8",
@@ -608,9 +738,9 @@ def _variant_paths(tmp_path: Path) -> RenderVariantPaths:
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
         "output_subdir": "binaural_hrtf",
-        "runtime_manifest_path": str(tmp_path / "artifacts" / "sim_test" / "manifests" / "runtime" / "render" / "scene_static_0001__binaural_hrtf.json"),
-        "rendered_wav_path": str(tmp_path / "artifacts" / "sim_test" / "outputs" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav"),
-        "render_metadata_path": str(tmp_path / "artifacts" / "sim_test" / "outputs" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf__render.json"),
+        "runtime_manifest_path": str(tmp_path / "artifacts" / "sim_test" / "metadata" / "manifests" / "runtime" / "render" / "scene_static_0001__binaural_hrtf.json"),
+        "rendered_wav_path": str(tmp_path / "artifacts" / "sim_test" / "output_audio" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf.wav"),
+        "render_metadata_path": str(tmp_path / "artifacts" / "sim_test" / "output_audio" / "render" / "binaural_hrtf" / "scene_static_0001__binaural_hrtf__render.json"),
         "receiver_ir_path": str(tmp_path / "catalog.daff"),
     }
 
@@ -649,7 +779,7 @@ receiver_sampling:
   one_receiver_per_scene: true
   position_strategy:
     type: random_uniform_inside_room
-    margin_m: {x: 0.2, y: 0.2, z: 0.2}
+    margin_m: {x: 0.5, y: 0.2, z: 0.5}
     fixed_height_m: {min: 1.2, max: 1.4}
   orientation_strategy:
     type: random_yaw
@@ -667,6 +797,14 @@ receiver_outputs:
     required: true
 
 room_sampling:
+  reverberation:
+    metric: estimated_rt30_s
+    estimator: sabine
+    estimator_version: sabine_polygon_octaves_v4
+    aggregation: arithmetic_mean
+    mean_bands_hz: [125, 250, 500, 1000, 2000, 4000, 8000]
+    distribution: {type: uniform, scope: global, range_s: {min: 0.1, max: 1.2}, bin_width_s: 0.1, quota_tolerance_fraction: 0.10}
+    treatment: {catalog_version: 1, mix_model: area_weighted_linear, mix_model_version: 1, eligible_surface_types: [wall, ceiling], max_treatments_per_surface: 1, preserve_base_scattering: true, allow_none: true, wall_coverage: {min: 0.0, max: 1.0}, ceiling_coverage: {min: 0.0, max: 1.0}}
   dimensions_m:
     length: {min: 4.0, max: 4.5}
     width: {min: 3.0, max: 3.5}
@@ -744,7 +882,7 @@ def _clarity_job(tmp_path: Path) -> ClarityJobManifestRecord:
     return {
         "schema_version": "1.0",
         "run_id": "sim_test",
-        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss",
+        "job_id": "clarity__scene_static_0001__binaural_hrtf__mild_loss__msbg",
         "variant_id": "scene_static_0001__binaural_hrtf",
         "scene_id": "scene_static_0001",
         "output_type": "binaural_hrtf",
@@ -758,11 +896,117 @@ def _clarity_job(tmp_path: Path) -> ClarityJobManifestRecord:
         },
         "input_wav_path": str(tmp_path / "input.wav"),
         "input_render_metadata_path": str(tmp_path / "render.json"),
-        "output_dir": str(tmp_path / "degraded" / "binaural_hrtf" / "mild_loss"),
+        "output_dir": str(tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss"),
         "expected_output_wav_path": str(
-            tmp_path / "degraded" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
+            tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.wav"
         ),
         "expected_output_metadata_path": str(
-            tmp_path / "degraded" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.json"
+            tmp_path / "degraded" / "msbg" / "binaural_hrtf" / "mild_loss" / "scene_static_0001__binaural_hrtf.json"
         ),
+        "processor": "msbg",
+        "calibration": {"variant_id": "scene_static_0001__binaural_hrtf", "effective_scale_db_spl": 90.0},
+        "outer_middle_ear": "free_field",
+        "processor_config": {"level_handling": "true_level"},
+        "processing_signature": {
+            "processor": "msbg",
+            "calibration": {"mode": "fixed_scale", "configured": {"digital_rms1_spl_db": 90.0}, "is_default": True},
+            "random_seed": None,
+            "outer_middle_ear": "free_field",
+            "msbg": {"level_handling": "true_level"},
+        },
     }
+
+
+def _processing_identity(job: ClarityJobManifestRecord) -> dict:
+    return {
+        "processor": {"name": job["processor"]},
+        "processing_signature": job["processing_signature"],
+        "calibration": dict(job["calibration"]),
+    }
+
+
+def _write_completed_sidecar(job: ClarityJobManifestRecord, **overrides) -> None:
+    Path(job["expected_output_wav_path"]).parent.mkdir(parents=True, exist_ok=True)
+    Path(job["expected_output_wav_path"]).write_text("wav", encoding="utf-8")
+    payload = {
+        "schema_version": "1.0",
+        "job_id": job["job_id"],
+        "variant_id": job["variant_id"],
+        "scene_id": job["scene_id"],
+        "output_type": job["output_type"],
+        "hearing_profile_id": job["hearing_profile_id"],
+        "status": "completed",
+        "input_wav_path": job["input_wav_path"],
+        "input_render_metadata_path": job["input_render_metadata_path"],
+        "output_wav_path": job["expected_output_wav_path"],
+        "degradation_applied": {"left": {"250": 10}, "right": {"250": 12}},
+        **_processing_identity(job),
+        **overrides,
+    }
+    Path(job["expected_output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_completed_sidecar_from_another_processor_is_invalid(tmp_path: Path) -> None:
+    job = {**_clarity_job(tmp_path), "processor": "whis"}
+    job["processing_signature"] = {**job["processing_signature"], "processor": "whis"}
+    _write_completed_sidecar(job, processor={"name": "msbg"})
+
+    record = inspect_clarity_record(job, manifest_path=tmp_path / "clarity_jobs.jsonl", attempted=True)
+
+    assert record["status"] == "partial"
+    assert "clarity_result_processor_mismatch: expected whis got msbg" in record["validation"]["issues"]
+    assert should_resume_clarity_job({}, job, manifest_path=tmp_path / "clarity_jobs.jsonl") is False
+
+
+@pytest.mark.parametrize(
+    "change, issue",
+    [
+        (lambda job: job["processing_signature"].update(outer_middle_ear="itu"), "processing_signature_mismatch"),
+        (lambda job: job["processing_signature"]["calibration"].update(
+            mode="fixed_scale", configured={"digital_rms1_spl_db": 100.0}, is_default=False), "processing_signature_mismatch"),
+        (lambda job: job["processing_signature"].update(random_seed=43), "processing_signature_mismatch"),
+        (lambda job: job["calibration"].update(effective_scale_db_spl=95.0), "calibration_mismatch"),
+    ],
+    ids=["outer_middle_ear", "calibration", "seed_with_range", "scale_k"],
+)
+def test_completed_result_is_not_resumed_when_the_job_processing_changes(tmp_path: Path, change, issue: str) -> None:
+    completed_job = _clarity_job(tmp_path)
+    _write_completed_sidecar(completed_job)
+    assert should_resume_clarity_job({}, completed_job, manifest_path=tmp_path / "clarity_jobs.jsonl") is True
+
+    current_job = json.loads(json.dumps(completed_job))
+    change(current_job)
+
+    assert should_resume_clarity_job({}, current_job, manifest_path=tmp_path / "clarity_jobs.jsonl") is False
+    record = inspect_clarity_record(current_job, manifest_path=tmp_path / "clarity_jobs.jsonl", attempted=False, resumed=True)
+    assert any(issue in item for item in record["validation"]["issues"])
+
+
+def test_completed_sidecar_without_processing_identity_is_invalid(tmp_path: Path) -> None:
+    job = _clarity_job(tmp_path)
+    _write_completed_sidecar(job)
+    payload = json.loads(Path(job["expected_output_metadata_path"]).read_text(encoding="utf-8"))
+    for field in ("processor", "processing_signature", "calibration"):
+        payload.pop(field)
+    Path(job["expected_output_metadata_path"]).write_text(json.dumps(payload), encoding="utf-8")
+
+    issues = inspect_clarity_record(job, manifest_path=tmp_path / "x.jsonl", attempted=True)["validation"]["issues"]
+
+    assert "clarity_result_processor_mismatch: expected msbg got None" in issues
+    assert "clarity_result_processing_signature_missing" in issues
+    assert "clarity_result_calibration_missing" in issues
+
+
+def test_legacy_index_records_load_without_processor(tmp_path: Path) -> None:
+    index_path = tmp_path / "clarity_index.jsonl"
+    record = build_clarity_record(
+        _clarity_job(tmp_path), manifest_path=tmp_path / "clarity_jobs.jsonl", status="completed",
+        attempted=True, resumed=False, runnable=True,
+    )
+    legacy = {key: value for key, value in record.items() if key != "processor"}
+    legacy["job_id"] = "clarity__scene_static_0001__binaural_hrtf__mild_loss"
+    index_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    loaded = load_clarity_index(index_path)
+
+    assert loaded[legacy["job_id"]]["processor"] is None

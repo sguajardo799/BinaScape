@@ -1,0 +1,163 @@
+# output-analyzer-report Specification
+
+## Purpose
+
+Defines what the output analyzer's `report.html` and `images/` SVGs present, so the report stays readable and bounded in size for large runs while every value remains auditable through the exported data files.
+
+## Requirements
+
+### Requirement: Charts shown in the report
+`report.html` and `images/` SHALL contain only the metric charts listed in the scenarios below, each subject to the constant and empty rules; RT30 scene-mean charts and floor plans are always kept.
+
+#### Scenario: Kept chart set
+- **WHEN** the analyzer runs on a run with non-constant, non-empty data for every metric
+- **THEN** the only metric SVGs are `hist_room_height`, `hist_room_area`, `hist_room_volume`, `geometry_types`, `hist_global_doa`, `hist_receiver_relative_doa`, `hist_distance`, `hist_elevation`, `hist_wall_distance`, `receiver_wall_distance`, `hist_start_time`, `rt30_difference`, every `rt30_scene_mean_*`, `sampling_scene_attempt`, `sampling_receiver_attempt`, `sampling_obtained_bin`, `material_coverage` and the `degraded_*` charts, plus `plan_*` floor plans
+
+#### Scenario: Removed charts absent
+- **WHEN** the analyzer runs on any run
+- **THEN** `report.html` and `images/` contain no chart for `hist_room_length`, `hist_room_width`, `rt30_sabine_estimate`, `rt30_raven_rpf_gett30`, `sampling_attempts`, `sampling_requested_bin` or `surface_area`
+
+#### Scenario: Kept charts present
+- **WHEN** the analyzer runs on a run whose scenes and sources have non-constant room area and source distance
+- **THEN** `images/hist_room_area.svg` and `images/hist_distance.svg` exist and their SVG is embedded in `report.html`
+
+### Requirement: Constant metrics collapse to a summary line
+When every valid observation of a metric has the same value, the report SHALL show one text line stating the metric title, the single value, its unit and n, and SHALL NOT write or embed a chart for it.
+
+#### Scenario: Constant gain
+- **WHEN** all 1000 sources declare `gain_db` 0
+- **THEN** `images/hist_gain.svg` does not exist and the report contains a line with "Declared gain", "0", "dB" and "n=1000"
+
+#### Scenario: Constant categorical metric
+- **WHEN** every render variant has `background_noise_applied` False
+- **THEN** no `background_noise` chart is written and the report states the single value False with its n
+
+### Requirement: Empty metrics are listed, not drawn
+When a metric shown in the report has no valid observations, the report SHALL list its title under a "Not available" note with its excluded count and SHALL NOT write or embed a chart for it. This does not apply to `rt30_scene_mean_*` charts.
+
+#### Scenario: No degraded metadata
+- **WHEN** the run has no degraded records
+- **THEN** no `degraded_*` SVG is written and the report lists "Hearing profiles", "Degradation status" and "Declared ear asymmetry on common bands" as not available
+
+### Requirement: HRTF coverage as a compact table
+The report SHALL present HRTF coverage as a table with one row per employed HRTF identity and its render variant count, sorted by count descending then identity, instead of a chart.
+
+#### Scenario: Many HRTF identities
+- **WHEN** render variants use 60 distinct HRTF identities
+- **THEN** the report contains a two-column HRTF coverage table with 60 rows and no `hist_employed_hrtf` chart
+
+### Requirement: No raw record dumps in the report
+`report.html` SHALL NOT embed full tables of normalized records (RT30 records, consolidated values, comparisons, pairs, matched means, coverage, materials, sampling records, sampling failures, sampling batches, degraded records, render variants). It SHALL instead name the export files holding them.
+
+#### Scenario: Large run report
+- **WHEN** the analyzer runs on a run with 1000 scenes and 3000 render variants
+- **THEN** `report.html` contains no table with more than 50 data rows other than the HRTF coverage count table, and names `rt30_records`, `rt30_pairs`, `rt30_comparisons`, `rt30_consolidated`, `coverage`, `materials` and `sampling_records` as exports
+
+### Requirement: Bounded incident table
+The quality section SHALL show at most 50 incident rows with category, entity, field and detail, state the total incident count, and point to `incidents.jsonl` when rows are omitted.
+
+#### Scenario: More incidents than the bound
+- **WHEN** the run has 120 incidents
+- **THEN** the report shows 50 incident rows, states 120 total, and names `incidents.jsonl`
+
+### Requirement: Compact per-scene cards
+Each scene card in "Positions by geometry" SHALL contain the scene identity, its HRTF/variant identities as one inline list, the floor plan, the RT30 per-band table with comparable means, and a compact pose summary of receiver and source positions; it SHALL NOT embed raw record tables.
+
+#### Scenario: Card content
+- **WHEN** a scene has two render variants and one source
+- **THEN** its card lists both HRTF identities inline, shows the floor plan and RT30 per-band table, shows the receiver and source coordinates in meters, and contains no `<details>` with record tables
+
+### Requirement: English report labels
+All report labels, including the per-scene RT30 table, SHALL be in English. Unavailable values SHALL read "Not available" followed by the reason.
+
+#### Scenario: Missing RAVEN band
+- **WHEN** a scene's RAVEN value for a band is conflicted
+- **THEN** that cell reads "Not available — variant conflict" and the table header and means line use English labels
+
+### Requirement: Readable general parameters
+The general parameters table SHALL present each parameter's observed values and frequencies as readable text rather than serialized JSON, and SHALL keep omitting `render_configuration`.
+
+#### Scenario: Observed sample rates
+- **WHEN** `sample_rate_hz` is `{"44100.0": 3000}`
+- **THEN** its cell reads "44100.0 (n=3000)" without JSON braces or quotes
+
+#### Scenario: Nested configuration value
+- **WHEN** `rt30_numerical_tolerance` is `{"absolute_s": 1e-06, "relative": 1e-06, ...}`
+- **THEN** its cell lists each key and value as "absolute_s: 1e-06; relative: 1e-06; ..."
+
+### Requirement: Exports unchanged by presentation
+Report presentation rules SHALL NOT change the values or shape of any JSON, JSONL or CSV export, `metrics.json` entries included, nor how the summary `status` is derived.
+
+#### Scenario: Export stability
+- **WHEN** the analyzer is run on the same input before and after this change
+- **THEN** every exported data file and `summary.json` is identical, including `metrics.json` entries for charts no longer shown
+
+### Requirement: Floor plan orientation arrows
+Each floor plan in "Positions by geometry" SHALL draw an orientation arrow from every receiver or source marker that has both a position and a yaw, pointing along plan direction `(cos yaw, −sin yaw)` in `(X, Z)` per the canonical pose convention. Arrows SHALL share one fixed on-screen length, use the marker color, ignore pitch and roll, and SHALL NOT change plan bounds, scale or marker positions.
+
+#### Scenario: Receiver yaw 0 points to +X
+- **WHEN** a scene's receiver has yaw 0
+- **THEN** its plan arrow points toward increasing X on screen with no vertical component
+
+#### Scenario: Receiver yaw +90 points to −Z
+- **WHEN** a scene's receiver has yaw +90
+- **THEN** its plan arrow points toward decreasing Z, i.e. downward on screen, with no horizontal component
+
+#### Scenario: Source arrow uses source yaw
+- **WHEN** a source has yaw −90
+- **THEN** its plan arrow points toward increasing Z (upward on screen) in that source's event color
+
+#### Scenario: Arrows do not move the plan
+- **WHEN** the same scene is plotted with and without orientation data
+- **THEN** the polygon, axis ticks and marker coordinates are identical
+
+#### Scenario: Missing yaw draws no arrow
+- **WHEN** a source has a valid position but no valid yaw
+- **THEN** its marker is drawn, no arrow is drawn for it, and the legend reports the orientation count as drawn n and excluded ≥ 1
+
+### Requirement: Orientation legend entry
+A floor plan legend SHALL include an entry describing the arrows as the horizontal projection of yaw (yaw 0 = +X, positive yaw toward −Z; pitch and roll not shown) with the counts of orientations drawn and excluded. When no actor has an arrow, the entry SHALL read "Orientation: Not available" followed by the reason.
+
+#### Scenario: Legend with all orientations
+- **WHEN** a scene has a receiver and two sources, all with valid position and yaw
+- **THEN** the legend states orientations drawn n=3, excluded=0
+
+#### Scenario: Legend without orientations
+- **WHEN** no actor in a scene has a valid yaw
+- **THEN** the legend contains "Orientation: Not available" and the plan contains no arrows
+
+### Requirement: Source yaw in source records
+The analyzer SHALL read each manifest source's `orientation_deg.yaw` into a `source_yaw_deg` field of source records, in degrees in the public frame, and include it in the sources export. A missing or non-numeric yaw SHALL yield an empty value and SHALL NOT exclude the source. Sources whose spatial data is excluded for an unknown coordinate frame SHALL have an empty `source_yaw_deg`. Existing source fields and values SHALL remain unchanged.
+
+#### Scenario: Manifest source yaw exported
+- **WHEN** a manifest source has `orientation_deg.yaw` = −90
+- **THEN** its source record and the sources export have `source_yaw_deg` = −90
+
+#### Scenario: Missing source yaw
+- **WHEN** a manifest source has no `orientation_deg`
+- **THEN** its `source_yaw_deg` is empty and all its other fields are unchanged
+
+### Requirement: Degraded records identified by processor
+The analyzer SHALL identify each degraded record by variant, hearing profile and processor, taking the processor from the sidecar's `processor.name`. Records of different processors for the same variant and profile SHALL be kept as separate records, without one replacing the other or being reported as a duplicate.
+
+#### Scenario: Run with two processors
+- **WHEN** a run contains `msbg` and `whis` sidecars for the same variant and hearing profile
+- **THEN** the exported degraded records contain both, each with its processor, and no duplicate issue is reported
+
+### Requirement: Legacy degraded layout
+The analyzer SHALL still read sidecars in the layout prior to per-processor directories (`degraded/<output_type>/<profile>/`). Sidecars without `processor.name` SHALL be treated as `msbg` and flagged as legacy in the exported records.
+
+#### Scenario: Run produced before per-processor layout
+- **WHEN** the analyzer reads a run whose sidecars lack `processor.name` and sit in the previous layout
+- **THEN** its degraded records are loaded as `msbg` with a legacy flag, and the degraded charts are produced as before
+
+### Requirement: Degraded charts and summaries per processor
+When a run contains degraded records from more than one processor, degraded charts and summaries (hearing profiles, degradation status, ear asymmetry) SHALL be broken down by processor. Exports SHALL include each record's processor, effective scale K, presentation level and per-ear Leq when present.
+
+#### Scenario: Status per processor
+- **WHEN** all `msbg` jobs completed and one `whis` job failed
+- **THEN** the degradation status summary shows the failure under `whis` and none under `msbg`
+
+#### Scenario: Calibration fields exported
+- **WHEN** a sidecar records K = 95 dB and per-ear Leq values
+- **THEN** the degraded record export contains those values for that record
