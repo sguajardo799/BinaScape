@@ -211,7 +211,7 @@ def _prepare_noise_layer(layer: dict, fs: int, num_samples: int, channels: int, 
     explicit = layer.get("seed")
     info: dict = {
         "strategy_original": raw_strategy, "strategy": strategy, "snr_db": float(layer["snr_db"]),
-        "seed": [] if explicit in (None, []) else float(explicit),
+        "seed": [] if explicit is None or explicit == [] else float(explicit),
         "effective_seed": layer_seed(render_seed, index, explicit),
         "source_fs": fs, "resampled": False, "path": "", "color": "",
     }
@@ -265,7 +265,7 @@ def apply_background_noise(mix: np.ndarray, fs: int, config: dict | None, render
         return mix, metadata
     num_samples, channels = mix.shape
     accumulated = np.zeros_like(mix)
-    for index, layer in enumerate(config.get("layers") or [], 1):
+    for index, layer in enumerate((config or {}).get("layers") or [], 1):
         noise, prepared = _prepare_noise_layer(layer, fs, num_samples, channels, render_seed, index)
         scaled, scaling = _scale_to_snr(mix, noise, prepared["snr_db"])
         info = {**prepared, **scaling, "applied": not scaling["skipped"]}

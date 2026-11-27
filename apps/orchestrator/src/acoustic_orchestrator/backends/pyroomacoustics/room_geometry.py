@@ -7,6 +7,7 @@ winding must be reversed.
 
 import math
 from collections.abc import Sequence
+from typing import TypeGuard
 
 from acoustic_orchestrator.backends.pyroomacoustics.errors import InvalidRenderInput
 from acoustic_orchestrator.backends.pyroomacoustics.frames import footprint_translation, public_to_backend
@@ -24,7 +25,7 @@ def signed_area_xy(vertices: Sequence[Sequence[float]]) -> float:
     return total / 2.0
 
 
-def _finite_number(value: object) -> bool:
+def _finite_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 

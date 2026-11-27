@@ -85,8 +85,8 @@ def measure_t30(rirs: Sequence[Sequence[np.ndarray]], fs: int) -> tuple[dict, li
     bands: list[float | None] = []
     for band in range(len(OCTAVE_CENTER_FREQUENCIES_HZ)):
         column = [values[band] for values in flat]
-        bands.append(None if not column or any(value is None for value in column)
-                     else float(sum(column) / len(column)))
+        known = [value for value in column if value is not None]
+        bands.append(float(sum(known) / len(known)) if known and len(known) == len(column) else None)
     return reverberation_descriptor(bands), pairs
 
 

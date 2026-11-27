@@ -344,3 +344,18 @@ def test_raven_only_code_paths_never_import_pyroomacoustics() -> None:
             "print('ok')")
     completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert completed.returncode == 0 and completed.stdout.strip() == "ok", completed.stderr
+
+
+@pytest.mark.parametrize("index", [None, "0", 1.0])
+def test_non_integer_microphone_index_is_invalid_input(tmp_path: Path, index: object) -> None:
+    from acoustic_orchestrator.backends.pyroomacoustics.errors import InvalidRenderInput
+
+    _, manifest = make_runtime_manifest(tmp_path)
+    microphones = manifest["receiver"]["circular_array"]["microphones"]
+    if index is None:
+        microphones[1].pop("microphone_index")
+    else:
+        microphones[1]["microphone_index"] = index
+    # Previously a missing index was compared with int while sorting and raised TypeError.
+    with pytest.raises(InvalidRenderInput, match="microphone_index"):
+        load_render_job(manifest)
