@@ -10,7 +10,9 @@ configurations:
   MATLAB runner;
 - the exact MATLAB command list built by ``render_manifest_with_matlab``.
 
-Machine-specific prefixes are replaced by ``<REPO>`` and ``<TMP>``.
+Machine-specific prefixes are replaced by ``<REPO>`` and ``<TMP>``, and
+paths are compared in a platform-neutral spelling (see ``portable_paths``) so the
+goldens captured on Linux also hold on Windows.
 Regenerate only on purpose: ``python tests/raven_golden.py`` (never as a side
 effect of a test run).
 """
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import struct
 import subprocess
@@ -50,6 +53,29 @@ def _placeholders(value: object, replacements: list[tuple[str, str]]) -> object:
     return value
 
 
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:\\")
+_DRIVE_UNDER_PLACEHOLDER = re.compile(r"^<(?:REPO|TMP)>/(?:[^/]+/)*?(?=[A-Za-z]:/)")
+
+
+def portable_paths(value: object) -> object:
+    """Spell paths identically on every platform; idempotent, so it applies to goldens too.
+
+    - Native Windows paths (``C:\\x\\y``) use ``/`` separators.
+    - A drive-absolute path stays absolute: on Windows ``C:/x`` is absolute, while on
+      POSIX the same config text is relative and resolves under the config directory
+      (``<REPO>/configs/experiments/C:/x``), so that placeholder prefix is dropped.
+    """
+    if isinstance(value, str):
+        if _WINDOWS_ABSOLUTE.match(value):
+            value = value.replace("\\", "/")
+        return _DRIVE_UNDER_PLACEHOLDER.sub("", value)
+    if isinstance(value, list):
+        return [portable_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: portable_paths(item) for key, item in value.items()}
+    return value
+
+
 def normalized_example_config(name: str, *, explicit_raven_backend: bool = False, tmp_dir: Path | None = None) -> dict:
     """Normalized static config of the shipped example file (no assets needed)."""
     from acoustic_orchestrator.config.loader import load_config
@@ -69,7 +95,8 @@ def normalized_example_config(name: str, *, explicit_raven_backend: bool = False
         copy.write_text(text.replace("\nrender:\n", "\nrender:\n  backend: raven\n"), encoding="utf-8")
         path = copy
     config = load_config(path)
-    return _placeholders(normalized_static_config(config), [(root.resolve().as_posix(), "<REPO>")])
+    normalized = portable_paths(normalized_static_config(config))
+    return portable_paths(_placeholders(normalized, [(root.resolve().as_posix(), "<REPO>")]))
 
 
 def _write_wav(path: Path, *, duration_s: float, sample_rate_hz: int = 8000, frequency_hz: float = 440.0) -> None:
@@ -190,7 +217,7 @@ def capture_matlab_command(root: Path, monkeypatch) -> list[str]:
 
 
 def load_golden(name: str) -> object:
-    return json.loads((GOLDEN_DIR / name).read_text(encoding="utf-8"))
+    return portable_paths(json.loads((GOLDEN_DIR / name).read_text(encoding="utf-8")))
 
 
 def _write_golden(name: str, value: object) -> None:
